@@ -33,7 +33,7 @@ Re-run `--install-unit` after changing it, then `systemctl --user daemon-reload 
 
 ## What it shows
 
-The left list has four tabs.
+The left list has five tabs.
 
 **Messages** is the default and is what firstmate said to you: one row per message, newest first, each with its title and its time. A captured message's words are never read for which work it is about. When the turn it was said in named exactly one task's own record (`state/<id>.meta` or `.status`) in a tool call, it is recorded against that task with the project and worktree that record names; a turn that named none or several reads "Not recorded". That record holds no branch, so the capture reads it live from the task's worktree when the turn has just ended; a message captured later, or backfilled, reads "Not recorded" for its branch rather than today's branch of that worktree. A message written by hand with `bin/fm-captain-message.sh --task` carries all three. `bin/fm-captain-message-backfill.py` applies the same turn rule to older rows and fills project and worktree for any row carrying a task id whose record still names them; it never guesses from message text, and never derives a past branch from a worktree's current one.
 Click one and the whole message opens with a box to reply in.
@@ -62,6 +62,8 @@ It is also how a question is routed on a Claude primary: firstmate records a que
 
 A stopped worker's row carries the worker's own note, exactly as it wrote it, because the options you are being asked to choose between are the whole value of that row.
 The one exception is the machine line a no-mistakes ask-user gate reports itself with, `ask-user findings=<ids> file=<path>`, which is ids and a path with the content deliberately left in the file: that row is stated plainly instead, as which project it is and that a worker there stopped and needs a decision or cannot go on.
+
+**Work** is the fleet-wide picture `/bearings lavish` shows, so answering it never needs a separate page: **Captain's Call** (open decisions), **Underway** (live work), **Recently landed** (what just shipped) and **Charted next** (what is queued or gated), worded exactly as `bin/fm-bearings-board.sh` words them. Its rows come straight from the firstmate root's `bin/fm-bearings-snapshot.sh --json`, enriched here with each row's project, worktree and branch the same way **Waiting on you** reads them, and with a full PR link wherever the snapshot names one. It is read on its own 15-second cadence (`bin/command-center-work.sh`, cached by `command-center.py`'s `Work` class), separately from the 3-second `/api/items` poll, because the snapshot does bounded remote-ledger reads too slow for that cadence. Answering a Captain's Call row, or naming your merge choice, sends `<task id>: <your words>` through `bin/fm-inbox.sh note` — the same note route a reply with nowhere else to go already takes — so firstmate reads it as an ordinary note and acts on it; the command center itself never calls `fm-captain-hold.sh` or a merge command for these rows.
 
 **My words** is everything you have typed here and where it went.
 
