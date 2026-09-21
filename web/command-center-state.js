@@ -125,6 +125,30 @@ function orderRows(rows, group, newestDefault) {
   return dated.concat(undated);
 }
 
+// --- My words, grouped by conversation -------------------------------------------
+// His ruling 2026-09-21: "sort things according to my last reply" - My words
+// groups by conversation (the same key its row already opens by: a message it
+// replied to, or the item/note key otherwise) and orders those groups by their
+// most recent reply, newest first.
+function wordConversationKey(r) {
+  return r.msg ? 'msg/' + r.msg : (r.item_key || r.key || '');
+}
+
+// `rows` arrives newest first (read_said), so the first row seen for a
+// conversation key is already its most recent reply: collecting keys in that
+// order and grouping every row under its key's first appearance needs no
+// separate sort by time at all.
+function orderWordsByLastReply(rows) {
+  const order = [];
+  const byKey = new Map();
+  for (const r of rows || []) {
+    const key = wordConversationKey(r);
+    if (!byKey.has(key)) { byKey.set(key, []); order.push(key); }
+    byKey.get(key).push(r);
+  }
+  return order.flatMap(key => byKey.get(key));
+}
+
 // --- two rows, one send ---------------------------------------------------------
 // The click may not wait on a shell command, so the server writes his words to
 // the durable record the moment it accepts them and writes the same record
@@ -364,4 +388,5 @@ if (typeof module === 'object' && module.exports)
                      replyTarget, foldSaid, wordsAfter,
                      listSignature, mayRelease, logRead,
                      sendState, sendKeys, spokenFor, sameWords,
-                     heldWith, captureBand, saidDigest, mergeMessages };
+                     heldWith, captureBand, saidDigest, mergeMessages,
+                     wordConversationKey, orderWordsByLastReply };

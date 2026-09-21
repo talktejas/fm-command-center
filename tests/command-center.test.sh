@@ -1104,6 +1104,78 @@ test_a_message_matched_to_a_registered_project_when_it_names_no_task() {
   pass "a message naming no task but exactly one registered project is matched to it"
 }
 
+# The captain's own order of precedence: the worker/task a turn was actually
+# handling - found from its own transcript, not the message's words - is
+# checked first and used even where firstmate's own sweep left the row's task
+# blank (that turn touched two, so turn_task's single-match rule left it
+# null). Unlike a keyword match, several tasks found this way show ALL their
+# projects rather than staying blank.
+test_a_message_shows_every_project_a_turns_tool_calls_touched() {
+  local home cfg enc port body
+  home="$TMP_ROOT/turn-projects"
+  cfg="$TMP_ROOT/turn-projects-config"
+  seed_turn_home "$home"
+  cat > "$home/data/backlog.md" <<'EOF'
+# Backlog
+
+## Queued
+- [ ] cc-one - First (repo: alpha) (kind: ship) (since 2026-09-01)
+- [ ] cc-two - Second (repo: beta) (kind: ship) (since 2026-09-02)
+EOF
+  enc=$(python3 -c 'import re,sys; print(re.sub(r"[^A-Za-z0-9]","-",sys.argv[1]))' "$home")
+  seed_turn_transcript "$cfg/projects/$enc/sess-t.jsonl"
+  jq -cn '{id:"m-two", req:"r-two", session:"sess-t", title:"Both landed",
+    text:"Both landed.", task:null, project:null, worktree:null, branch:null,
+    source:"transcript", at:"2026-09-21T00:00:00Z"}' \
+    > "$home/data/captain-messages.jsonl"
+
+  CLAUDE_CONFIG_DIR="$cfg" start_server "$home" || fail "the server did not start"
+  port=$SERVER_PORT
+  curl -s -m 120 -o /dev/null "http://127.0.0.1:$port/api/items"
+  body=$(curl -s -m 30 "http://127.0.0.1:$port/api/messages")
+  stop_server
+
+  assert_equals "alpha · beta" "$(jq -r '.messages[0].project' <<<"$body")" \
+    "a turn whose tool calls touched two tasks did not show both their projects"
+  assert_equals "null" "$(jq -r '.messages[0].worktree' <<<"$body")" \
+    "two touched tasks must not invent a single worktree"
+  pass "a message from a turn whose tool calls touched two tasks shows both their projects"
+}
+
+# The message's own text names a project too, but the worker/task evidence
+# already answered it: keyword matching is a fallback for when that evidence
+# names nothing, never a second vote once it has.
+test_a_worker_evidenced_project_is_not_joined_by_a_keyword_guess() {
+  local home cfg enc port body
+  home="$TMP_ROOT/turn-precedence"
+  cfg="$TMP_ROOT/turn-precedence-config"
+  seed_turn_home "$home"
+  cat > "$home/data/backlog.md" <<'EOF'
+# Backlog
+
+## Queued
+- [ ] cc-one - First (repo: alpha) (kind: ship) (since 2026-09-01)
+EOF
+  printf '# Projects\n\n- decoy [direct-PR] - a project this message also names (added 2026-09-21)\n' \
+    > "$home/data/projects.md"
+  enc=$(python3 -c 'import re,sys; print(re.sub(r"[^A-Za-z0-9]","-",sys.argv[1]))' "$home")
+  seed_turn_transcript "$cfg/projects/$enc/sess-t.jsonl"
+  jq -cn '{id:"m-one", req:"r-one", session:"sess-t", title:"About one task",
+    text:"About one task, also touches decoy.", task:null, project:null,
+    worktree:null, branch:null, source:"transcript", at:"2026-09-21T00:00:00Z"}' \
+    > "$home/data/captain-messages.jsonl"
+
+  CLAUDE_CONFIG_DIR="$cfg" start_server "$home" || fail "the server did not start"
+  port=$SERVER_PORT
+  curl -s -m 120 -o /dev/null "http://127.0.0.1:$port/api/items"
+  body=$(curl -s -m 30 "http://127.0.0.1:$port/api/messages")
+  stop_server
+
+  assert_equals "alpha" "$(jq -r '.messages[0].project' <<<"$body")" \
+    "the message's own decoy keyword was joined onto worker evidence that already answered it"
+  pass "worker/task evidence is never joined by a keyword match once it has named a project"
+}
+
 test_message_backfill_resolves_only_context_keyed_by_a_task_record() {
   local home wt result row
   home="$TMP_ROOT/backfill"
@@ -2434,6 +2506,8 @@ test_a_taskless_message_is_matched_to_the_one_task_it_names
 test_a_message_naming_two_tasks_is_left_blank_rather_than_guessed
 test_a_message_for_a_task_whose_meta_is_gone_gets_its_backlog_repo
 test_a_message_matched_to_a_registered_project_when_it_names_no_task
+test_a_message_shows_every_project_a_turns_tool_calls_touched
+test_a_worker_evidenced_project_is_not_joined_by_a_keyword_guess
 test_message_backfill_resolves_only_context_keyed_by_a_task_record
 test_message_backfill_attributes_by_the_same_turn_evidence
 test_a_captured_message_carries_the_one_task_its_turn_touched

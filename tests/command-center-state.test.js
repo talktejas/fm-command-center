@@ -10,6 +10,7 @@ const {
   shapeMessage, orderRows, replyTarget, foldSaid, wordsAfter,
   listSignature, mayRelease, logRead, sendState, sendKeys, spokenFor, sameWords,
   heldWith, captureBand, saidDigest, mergeMessages,
+  wordConversationKey, orderWordsByLastReply,
 } = require(path.join(__dirname, '..', 'web', 'command-center-state.js'));
 
 // Quiet on success: tests/command-center.test.sh runs this and reports the
@@ -269,6 +270,28 @@ test('the outcome of a send supersedes its acceptance', () => {
     ['sent', 'sending', 'note']);
   assert.deepStrictEqual(foldSaid(undefined), [],
     'a record that could not be read must fold to nothing, not throw');
+});
+
+// --- My words, grouped by conversation ------------------------------------------
+// His ruling 2026-09-21: a conversation he replied to a minute ago goes to the
+// top, even when an older reply to it sits further down the newest-first log.
+test('My words bubbles a conversation to the top of its most recent reply', () => {
+  const rows = [   // newest first, as read_said serves them
+    { at: 't4', msg: 'm1', text: 'one more thing' },     // m1's latest
+    { at: 't3', item_key: 'k2', text: 'merging now' },   // k2's only reply
+    { at: 't2', item_key: 'k3', text: 'noted' },          // k3's only reply
+    { at: 't1', msg: 'm1', text: 'first reply' },          // m1's older reply
+  ];
+  assert.deepStrictEqual(orderWordsByLastReply(rows).map(r => r.at),
+    ['t4', 't1', 't3', 't2'],
+    'm1 groups under its newest reply (t4) instead of splitting across the list');
+});
+
+test('a conversation key matches what the row itself opens by', () => {
+  assert.strictEqual(wordConversationKey({ msg: 'm1', item_key: 'k2' }), 'msg/m1');
+  assert.strictEqual(wordConversationKey({ item_key: 'k2' }), 'k2');
+  assert.strictEqual(wordConversationKey({ key: 'note-1' }), 'note-1');
+  assert.strictEqual(wordConversationKey({}), '');
 });
 
 // --- what an arrived outcome does to his words ---------------------------------

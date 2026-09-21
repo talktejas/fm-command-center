@@ -592,7 +592,20 @@ def read_said(home, limit=LOG_LIMIT):
 # serves a body, the same promise the rest of this page makes.
 BACKLOG_LINE_RE = re.compile(r'^- \[[ x]\] (\S+) - ')
 BACKLOG_REPO_RE = re.compile(r'\(repo: ([^()]*)\)')
-PROJECTS_LINE_RE = re.compile(r'^- (\S+) ')
+PROJECTS_LINE_RE = re.compile(r'^- (\S+)(?:\s+\[[^\]]*\])?\s*-\s*(.*)$')
+PROJECTS_REPO_RE = re.compile(r'talktejas/([A-Za-z0-9._-]+)')
+
+# Words the captain uses for a project that its own data/projects.md line
+# never spells out (a nickname, a module, a page name) - his own list, kept
+# by hand rather than guessed from the record.
+FIXED_PROJECT_ALIASES = {
+    "jt2627s": {"jeweltrek", "currency", "diamond", "metals", "manufacturing",
+                "sale", "sales order"},
+    "interactp": {"interact"},
+    "b2becom": {"karatcraft", "b2b"},
+    "fm-command-center": {"command center", "archive", "work tab", "waiting on you"},
+    "firstmate": {"firstmate"},
+}
 
 
 def _tasks_toml_backlog_rel(firstmate_root):
@@ -634,28 +647,42 @@ def backlog_index(firstmate_root, home):
     return idx
 
 
-def project_slugs(home):
-    """The registered project slugs (data/projects.md), the vocabulary a
-    message's own words are matched against when it names no task."""
-    slugs = set()
+def project_aliases(home):
+    """slug -> the words that name it: its own slug, its repo name(s) from
+    data/projects.md (so a PR URL's talktejas/<repo> matches by the same
+    word-boundary search as any other word), the plain-English name leading
+    its description, and FIXED_PROJECT_ALIASES - the vocabulary a message's
+    own words are matched against when it names no task."""
+    aliases = {slug: set(words) for slug, words in FIXED_PROJECT_ALIASES.items()}
     try:
         with open(os.path.join(home, "data", "projects.md"), encoding="utf-8") as fh:
-            for line in fh:
-                m = PROJECTS_LINE_RE.match(line)
-                if m:
-                    slugs.add(m.group(1))
+            lines = fh.readlines()
     except OSError:
-        pass
-    return slugs
+        lines = []
+    for line in lines:
+        m = PROJECTS_LINE_RE.match(line)
+        if not m:
+            continue
+        slug, desc = m.group(1), m.group(2)
+        bucket = aliases.setdefault(slug, set())
+        bucket.add(slug)
+        for repo in PROJECTS_REPO_RE.findall(line):
+            bucket.add(repo)
+        name = re.split(r'[,;(]', desc, maxsplit=1)[0].strip()
+        if name:
+            bucket.add(name)
+    return aliases
 
 
-def _word_present(haystack, token):
-    """Is `token` in `haystack` as its own word, not as a slice of a longer
-    one? An id or slug is never a substring match away from a false one."""
+def _word_present(haystack, token, ignore_case=False):
+    """Is `token` in `haystack` as its own word (or phrase), not as a slice of
+    a longer one? An id, slug, repo name or alias phrase is never a substring
+    match away from a false one."""
     if not token:
         return False
+    flags = re.IGNORECASE if ignore_case else 0
     return re.search(r'(?<![A-Za-z0-9_-])' + re.escape(token) + r'(?![A-Za-z0-9_-])',
-                      haystack) is not None
+                      haystack, flags) is not None
 
 
 def _item_for_task(view, task_id):
@@ -677,36 +704,166 @@ def _task_context(task_id, view, backlog_idx):
     return None, None, None
 
 
-def message_context(row, view, backlog_idx, project_slugs_set):
+def _projects_named_in(haystack, project_aliases_map):
+    """Every project whose own vocabulary (slug, repo name, description name,
+    fixed alias) appears in `haystack` as a standalone word or phrase -
+    never just one arbitrarily picked when several are named."""
+    return {slug for slug, aliases in project_aliases_map.items()
+            if any(len(a) > 2 and _word_present(haystack, a, ignore_case=True)
+                   for a in aliases)}
+
+
+def transcript_dir(home):
+    """Where the Claude conversation record for this home's own sessions
+    lives - the same derivation bin/fm-captain-message-sweep.py's
+    default_transcript_dir uses, so a captured row's own `session` is found
+    in the one place it was ever written."""
+    base = os.environ.get("CLAUDE_CONFIG_DIR") or os.path.expanduser("~/.claude")
+    encoded = re.sub(r"[^A-Za-z0-9]", "-", os.path.abspath(home))
+    return os.path.join(base, "projects", encoded)
+
+
+def _turn_is_prompt(entry):
+    content = (entry.get("message") or {}).get("content")
+    if isinstance(content, str):
+        return True
+    return isinstance(content, list) and not any(
+        isinstance(b, dict) and b.get("type") == "tool_result" for b in content)
+
+
+def session_turns(a_transcript_dir, session):
+    """requestId -> the raw text of that turn: the user/system turn that
+    triggered it (a prompt entry resets the turn, exactly as
+    bin/fm-captain-message-sweep.py's own turn boundary does) plus every tool
+    call input made since. Read fresh from the transcript on every call and
+    never written anywhere - the same one-step-further-at-read-time promise
+    the rest of this page's enrichment makes."""
+    turns = {}
+    parts = []
+    try:
+        with open(os.path.join(a_transcript_dir, session + ".jsonl"), encoding="utf-8") as fh:
+            for raw in fh:
+                try:
+                    entry = json.loads(raw)
+                except json.JSONDecodeError:
+                    continue
+                if not isinstance(entry, dict) or entry.get("isSidechain"):
+                    continue
+                etype = entry.get("type")
+                if etype == "user":
+                    if _turn_is_prompt(entry):
+                        parts = [json.dumps((entry.get("message") or {}).get("content"),
+                                            ensure_ascii=False)]
+                    continue
+                if etype != "assistant":
+                    continue
+                message = entry.get("message")
+                if not isinstance(message, dict):
+                    continue
+                for block in message.get("content") or []:
+                    if isinstance(block, dict) and block.get("type") == "tool_use":
+                        parts.append(json.dumps(block.get("input"), ensure_ascii=False))
+                req = entry.get("requestId") or entry.get("uuid") or ""
+                if req:
+                    turns[req] = "\n".join(parts)
+    except OSError:
+        pass
+    return turns
+
+
+def transcript_task_ids(row, a_transcript_dir, known_ids, cache):
+    """Every known task id the transcript turn behind this message's own
+    req/session touched - a state/<id>.* path, a data/<id>/ path, a
+    fm-*.sh <id> argument, a wake line naming it, or anything else that puts
+    the id in the turn's own tool calls or the words that started it, since a
+    known id is never a boundary match away from a false one wherever it
+    appears. A row with no session, or one this machine has no transcript
+    for (another home's crewmate, a hand-written row), yields nothing."""
+    session, req = row.get("session"), row.get("req")
+    if not session or not req:
+        return set()
+    if session not in cache:
+        cache[session] = session_turns(a_transcript_dir, session)
+    text = cache[session].get(req)
+    if not text:
+        return set()
+    return {tid for tid in known_ids if _word_present(text, tid)}
+
+
+def message_context(row, view, backlog_idx, project_aliases_map,
+                     a_transcript_dir=None, transcript_cache=None):
     """(project, worktree, branch, source) to fill in beyond what the row
     already carries, or all-None when nothing more can be said honestly.
-    `source` names where a filled value came from, for a quiet note beside
-    it - never set when nothing was actually filled."""
+    The captain's own order of precedence: which worker/task the turn that
+    said this was handling - its explicit task, or every id its transcript
+    turn touched - mapped through that task's own record, is checked FIRST
+    and is the only source used once it names anything at all. Only when
+    that finds nothing does the message's own words get checked, against
+    every task id and every registered project's vocabulary. `project` may
+    name several projects, joined by " · ", when that tier's own evidence
+    names more than one; `worktree`/`branch` are only ever filled when
+    exactly one task resolves them. `source` names where a filled value
+    came from, for a quiet note beside it - never set when nothing was
+    actually filled."""
     have = {f: bool(row.get(f)) for f in ("project", "worktree", "branch")}
     if all(have.values()):
         return None, None, None, None
 
+    haystack = (row.get("title") or "") + "\n" + (row.get("text") or "")
+    known_ids = ({t for t in backlog_idx if len(t) > 2}
+                 | {it["id"] for it in view.get("items", []) if len(it.get("id") or "") > 2})
+
+    # Tier 1: the worker/task itself, the most correct source there is.
     task = row.get("task")
+    task_ids = {task} if task else set()
+    sources = []
     if task:
-        project, worktree, branch = _task_context(task, view, backlog_idx)
-        source = "task %s" % task if (project or worktree or branch) else None
-    else:
-        haystack = (row.get("title") or "") + "\n" + (row.get("text") or "")
-        task_ids = ({t for t in backlog_idx if len(t) > 2 and _word_present(haystack, t)}
-                    | {it["id"] for it in view.get("items", [])
-                       if len(it.get("id") or "") > 2 and _word_present(haystack, it["id"])})
+        sources.append("task %s" % task)
+    if a_transcript_dir is not None:
+        from_transcript = transcript_task_ids(
+            row, a_transcript_dir, known_ids,
+            transcript_cache if transcript_cache is not None else {})
+        new_ids = from_transcript - task_ids
+        if new_ids:
+            sources.append("matched task %s from where it was said"
+                           % " · ".join(sorted(new_ids)))
+            task_ids |= new_ids
+
+    worktree = branch = None
+    projects = set()
+    if task_ids:
         if len(task_ids) == 1:
-            matched = next(iter(task_ids))
-            project, worktree, branch = _task_context(matched, view, backlog_idx)
-            source = ("matched task %s in the message" % matched
-                      if (project or worktree or branch) else None)
+            only = next(iter(task_ids))
+            p, worktree, branch = _task_context(only, view, backlog_idx)
+            if p:
+                projects.add(p)
         else:
-            projects = {p for p in project_slugs_set if len(p) > 1 and _word_present(haystack, p)}
-            if len(projects) == 1:
-                project, worktree, branch = next(iter(projects)), None, None
-                source = "matched project %s in the message" % project
-            else:
-                project = worktree = branch = source = None
+            for tid in task_ids:
+                p, _, _ = _task_context(tid, view, backlog_idx)
+                if p:
+                    projects.add(p)
+    else:
+        # Tier 2, only reached when the worker/task named nothing at all:
+        # the message's own words. A word matching several task ids at once
+        # is exactly as ambiguous as a word matching none - left blank rather
+        # than guessed - but its words may still name a project outright.
+        matched_in_text = {t for t in known_ids if _word_present(haystack, t)}
+        if len(matched_in_text) == 1:
+            only = next(iter(matched_in_text))
+            p, worktree, branch = _task_context(only, view, backlog_idx)
+            if p:
+                projects.add(p)
+            if p or worktree or branch:
+                sources.append("matched task %s in the message" % only)
+
+        named = _projects_named_in(haystack, project_aliases_map)
+        extra_named = named - projects
+        if extra_named:
+            sources.append("matched project %s in the message" % " · ".join(sorted(extra_named)))
+        projects |= named
+
+    project = " · ".join(sorted(projects)) if projects else None
+    source = "; ".join(sources) or None
 
     return (None if have["project"] else project,
             None if have["worktree"] else worktree,
@@ -714,8 +871,10 @@ def message_context(row, view, backlog_idx, project_slugs_set):
             source)
 
 
-def enrich_message(row, view, backlog_idx, project_slugs_set):
-    project, worktree, branch, source = message_context(row, view, backlog_idx, project_slugs_set)
+def enrich_message(row, view, backlog_idx, project_aliases_map,
+                    a_transcript_dir=None, transcript_cache=None):
+    project, worktree, branch, source = message_context(
+        row, view, backlog_idx, project_aliases_map, a_transcript_dir, transcript_cache)
     if not (project or worktree or branch):
         return row
     out = dict(row)
@@ -733,8 +892,11 @@ def enrich_message(row, view, backlog_idx, project_slugs_set):
 def enrich_messages(rows, records):
     view = records.view() if records.etag is not None else {"items": []}
     backlog_idx = backlog_index(FIRSTMATE_ROOT, records.home)
-    slugs = project_slugs(records.home)
-    return [enrich_message(row, view, backlog_idx, slugs) for row in rows]
+    aliases = project_aliases(records.home)
+    a_transcript_dir = transcript_dir(records.home)
+    cache = {}
+    return [enrich_message(row, view, backlog_idx, aliases, a_transcript_dir, cache)
+            for row in rows]
 
 
 MESSAGE_WINDOW = 200
