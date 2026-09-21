@@ -408,6 +408,55 @@ def said_log(home):
     return os.path.join(home, "data", "command-center", "said.jsonl")
 
 
+def parked_log(home):
+    """Where Archive and Hold live for a Waiting-on-you item or a My words
+    conversation - browser localStorage was fragile (gone on a refresh in a
+    private window, invisible from another browser), so this is the
+    command center's own durable record, the same promise said.jsonl already
+    makes for what he typed. A message's own Archive stays on the log it
+    already had (captain-messages.jsonl, record_archive) since that already
+    works and is shared with Messages/Archived; only a message's Hold - which
+    never had a server record at all - lands here too, target "message".
+    """
+    return os.path.join(home, "data", "command-center", "parked.jsonl")
+
+
+def record_parked(home, target, key, state):
+    """Append one parking amendment. `state` is "archived", "held" or "none"
+    (back to its ordinary list) - the latest amendment for a (target, key)
+    pair wins, read back by read_parked.
+    """
+    entry = {"kind": "park", "target": target, "of": key,
+             "state": state, "at": utc_now()}
+    try:
+        path = parked_log(home)
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "a", encoding="utf-8") as fh:
+            fh.write(json.dumps(entry, ensure_ascii=False) + "\n")
+    except OSError as exc:
+        return f"the archive/hold record could not be written: {exc}"
+    return None
+
+
+def read_parked(home):
+    """{(target, key): "archived"|"held"} for every row still parked - a row
+    whose latest amendment is "none" is left out entirely, the same as one
+    never parked at all. Newest first, so the first amendment seen per pair
+    is the one that stands.
+    """
+    rows, _error, _dropped = read_log(parked_log(home), limit=200000)
+    seen = set()
+    parked = {}
+    for row in rows:
+        pair = (row.get("target"), row.get("of"))
+        if pair in seen or not pair[1]:
+            continue
+        seen.add(pair)
+        if row.get("state") in ("archived", "held"):
+            parked[pair] = row["state"]
+    return parked
+
+
 # Appends to said.jsonl come from request threads and delivery threads alike;
 # one lock keeps each line whole. SENDING holds the ids of deliveries this
 # process is still running, so a "sending" record with no outcome yet is
@@ -576,7 +625,22 @@ def read_said(home, limit=LOG_LIMIT):
         elif row.get("outcome") == "sending" and sid not in in_flight:
             row = dict(row, outcome="unknown", detail=RESTART_DETAIL)
         merged.append(row)
+    parked = read_parked(home)
+    merged = [dict(r, archived=parked.get(("word", word_conversation_key(r))) == "archived",
+                   held=parked.get(("word", word_conversation_key(r))) == "held")
+              for r in merged]
     return merged, None, dropped
+
+
+def word_conversation_key(row):
+    """The same grouping key My words itself uses (wordConversationKey in
+    web/command-center-state.js): a message it replied to, or the item/note
+    key otherwise. Archive and Hold are per conversation, not per send, so
+    every row in one conversation shares one parked state.
+    """
+    if row.get("msg"):
+        return "msg/" + row["msg"]
+    return row.get("item_key") or row.get("key") or ""
 
 
 # --- message context enrichment ----------------------------------------------
@@ -1023,7 +1087,9 @@ def messages_etag(home, capture):
     its contents can have changed; the capture health travels in the same
     response and its band's own facts are part of the tag, because the band
     that says this list may be incomplete must never be held back by a quiet
-    log.
+    log. A message's Hold lives in parked.jsonl, a different file, so its own
+    stat is folded in too - a hold with nothing else changing must still bust
+    a poll that would otherwise answer 304 over the stale flag.
     """
     path = message_log(home)
     try:
@@ -1033,6 +1099,7 @@ def messages_etag(home, capture):
         key = "none"
     except OSError:
         return None
+    key += "/" + (log_etag(parked_log(home)) or "none")
     return '"m' + hashlib.sha1(
         (key + dump(band_facts(capture)).decode("utf-8")).encode("utf-8")
     ).hexdigest()[:16] + '"'
@@ -1187,6 +1254,7 @@ def read_messages(home, limit=MESSAGE_WINDOW, before=None, query=None, archived=
     mark = b'"' + before.encode() + b'"' if before else b""
     rows = []
     archive_state = {}
+    held = read_parked(home)
     try:
         with open(message_log(home), "rb") as fh:
             for raw in reversed_lines(fh):
@@ -1209,7 +1277,8 @@ def read_messages(home, limit=MESSAGE_WINDOW, before=None, query=None, archived=
                     continue
                 if len(rows) == limit:
                     return rows, True, None
-                rows.append(dict(row, archived=archived))
+                rows.append(dict(row, archived=archived,
+                                  held=held.get(("message", row["id"])) == "held"))
     except FileNotFoundError:
         return [], False, None
     except OSError as exc:
@@ -1342,7 +1411,7 @@ class Handler(BaseHTTPRequestHandler):
     def _json(self, code, obj):
         self._send(code, dump(obj))
 
-    def _log_response(self, name, path, read):
+    def _log_response(self, name, path, read, extra_path=None):
         """Serve one log under a change check, but never cache a FAILED read.
 
         A read error carries no rows, and its (mtime, size) is the same one a
@@ -1354,10 +1423,17 @@ class Handler(BaseHTTPRequestHandler):
         process's own knowledge - a delivery it is still carrying out reads
         differently from one a restart orphaned - so a tag issued before a
         restart must not answer 304 for a log that now reads differently.
+
+        `extra_path`: a second log this response's rows also depend on (said
+        rows carry Archive/Hold folded in from parked.jsonl) - its own stat
+        is folded into the tag too, so a park action busts a poll that would
+        otherwise answer 304 over the now-stale flag.
         """
         etag = log_etag(path)
         if etag:
-            etag = hashlib.sha256((RUN + etag).encode()).hexdigest()[:32]
+            etag = hashlib.sha256(
+                (RUN + etag + (log_etag(extra_path) or "none" if extra_path else "")
+                 ).encode()).hexdigest()[:32]
         if etag and self.headers.get("If-None-Match") == etag:
             self.send_response(304)
             self.send_header("ETag", etag)
@@ -1451,15 +1527,26 @@ class Handler(BaseHTTPRequestHandler):
                 self._json(503, {"error": self.records.error
                                  or "the records have not been read yet"})
                 return
-            if self.headers.get("If-None-Match") == etag and not self.records.error:
+            # Archive/Hold for an item lives in parked.jsonl, not the scan: a
+            # park action must bust a poll that would otherwise answer 304
+            # over the now-stale flag, so its own stat is folded into the tag.
+            combined_etag = hashlib.sha256(
+                (etag + (log_etag(parked_log(self.records.home)) or "none")
+                 ).encode()).hexdigest()[:32]
+            if self.headers.get("If-None-Match") == combined_etag and not self.records.error:
                 self.send_response(304)
-                self.send_header("ETag", etag)
+                self.send_header("ETag", combined_etag)
                 self.send_header("Content-Length", "0")
                 self.end_headers()
                 return
             view = json.loads(body)
             view["error"] = self.records.error
-            self._send(200, dump(view), etag=etag)
+            parked = read_parked(self.records.home)
+            for it in view.get("items", []):
+                key = item_key(it)
+                it["archived"] = parked.get(("item", key)) == "archived"
+                it["held"] = parked.get(("item", key)) == "held"
+            self._send(200, dump(view), etag=combined_etag)
             return
 
         if path == "/api/messages":
@@ -1485,7 +1572,8 @@ class Handler(BaseHTTPRequestHandler):
                 # from anywhere - his own reply to it, months back.
                 row, error = find_message(self.records.home, msg_id)
                 if row is not None:
-                    row = dict(row, archived=archived_messages(self.records.home).get(msg_id, False))
+                    row = dict(row, archived=archived_messages(self.records.home).get(msg_id, False),
+                               held=read_parked(self.records.home).get(("message", msg_id)) == "held")
                     row = enrich_messages([row], self.records)[0]
                 current, archived_total = message_totals(self.records.home)
                 self._send(200, dump({"messages": [row] if row else [],
@@ -1521,7 +1609,8 @@ class Handler(BaseHTTPRequestHandler):
             return
 
         if path == "/api/said":
-            self._log_response("said", said_log(self.records.home), read_said)
+            self._log_response("said", said_log(self.records.home), read_said,
+                               extra_path=parked_log(self.records.home))
             return
 
         if path == "/api/work":
@@ -1567,6 +1656,28 @@ class Handler(BaseHTTPRequestHandler):
                 self._json(503, {"ok": False, "error": error})
                 return
             self._json(200, {"ok": True, "archived": archived})
+            return
+        if path == "/api/park":
+            # Archive and Hold for a Waiting-on-you item or a My words
+            # conversation, and Hold for a message (its Archive stays on
+            # /api/archive above): one durable record instead of browser
+            # storage, so it survives a refresh and reads the same from any
+            # browser. No confirmation and no undo route beyond sending the
+            # opposite state - the same one-click shape /api/archive already
+            # has.
+            target = payload.get("target")
+            key = payload.get("key")
+            state = payload.get("state")
+            if target not in ("item", "word", "message") \
+                    or not isinstance(key, str) or not key or len(key) > 400 \
+                    or state not in ("archived", "held", "none"):
+                self._json(400, {"ok": False, "error": "unknown park request"})
+                return
+            error = record_parked(self.records.home, target, key, state)
+            if error:
+                self._json(503, {"ok": False, "error": error})
+                return
+            self._json(200, {"ok": True, "target": target, "key": key, "state": state})
             return
         text, err = self._text_field(payload)
         if err:
