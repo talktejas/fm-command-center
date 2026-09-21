@@ -512,7 +512,7 @@ const isUnread = it => !state.seen[itemKey(it)];
 // shapeMessage and the ordering rule come from bin/command-center-state.js.
 const msgKey = m => 'msg/' + m.id;
 const repliesTo = m => state.said.filter(r => r.msg === m.id);
-const projectOf = it => it.project || 'No project';
+const projectOf = it => it.project || 'Not recorded';
 const homeOf = id => state.view.homes.find(h => h.id === id) || {id, name:id};
 const homeColour = id => HOME_COLOURS[
   Math.max(0, state.view.homes.findIndex(h => h.id === id)) % HOME_COLOURS.length];
@@ -784,7 +784,7 @@ function renderWords(){
   const drafts = Object.entries(state.draft)
     .filter(([key, t]) => t && t.trim() && !spokenFor(state.pending, key, t))
     .map(([key, text]) => ({ kind:'draft', at:null, text, key }));
-  const rows = drafts.concat(state.said)
+  const rows = drafts.concat(orderWordsByLastReply(state.said))
     .filter(r => !q || String(r.text || '').toLowerCase().includes(q));
   const head = `<div class="archive-note">What you typed and where it went, as far as this
     log got it. <strong>Firstmate keeps an answer that closes a decision, and drops the
@@ -817,8 +817,7 @@ function renderWords(){
       : r.kind === 'note' ? 'Note to firstmate — not about one item'
       : esc(r.title || r.item || '—');
     const out = wordOutcome(r);
-    return `<button class="word" data-key="${esc(r.msg ? 'msg/' + r.msg
-      : (r.item_key || r.key || ''))}">
+    return `<button class="word" data-key="${esc(wordConversationKey(r))}">
       <span class="word-top">
         <span class="word-when">${esc(draft ? 'unsent' : localTime(r.at))}</span>
         <span class="word-where">${where}</span>
@@ -1102,7 +1101,7 @@ function rowsHtml(rows, rowFn, emptyText, isMessage, label){
 function messageRow(m){
   const replied = repliesTo(m).length;
   const where = [
-    m.project || 'no project',
+    m.project || 'Not recorded',
     m.worktree ? m.worktree.replace(/^.*\//, '') : 'no worktree',
     m.branch || 'no branch',
   ];
@@ -1114,7 +1113,7 @@ function messageRow(m){
         : replied ? '<span class="flag f-sent">replied</span>' : ''}
       <span class="age" title="from the time firstmate sent it">${ageLabel(m)}</span>
     </span>
-    <span class="item-sub" title="${esc([m.project || 'no project',
+    <span class="item-sub" title="${esc([m.project || 'Not recorded',
         m.worktree || 'no worktree', m.branch || 'no branch'].join(' · '))}">
       ${where.map((w, i) => (i ? '<span class="sep">·</span>' : '') +
         `<span class="${i ? 'mono' : ''}">${esc(w)}</span>`).join('')}
