@@ -2,9 +2,11 @@
 # command-center.py - the captain's permanent command center.
 #
 # One page at a fixed address showing everything waiting on the captain across
-# every local firstmate home, with his answer going straight back through the
-# scripts that already own delivery. bin/command-center-scan.sh is the reading
-# half; docs/command-center.md is the operator guide.
+# every local firstmate home. His Waiting-on-you answer goes straight to
+# firstmate's captain inbox (fm-inbox.sh note) and nowhere else - no
+# fm-captain-hold.sh, no fm-send.sh, from this send path; firstmate closes the
+# decision itself once it reads the note. bin/command-center-scan.sh is the
+# reading half; docs/command-center.md is the operator guide.
 #
 # Usage:
 #   command-center.py --home <FM_HOME> [--port 8765] [--firstmate-root <dir>]
@@ -69,7 +71,6 @@ import os
 import re
 import subprocess
 import sys
-import tempfile
 import threading
 import time
 import urllib.parse
@@ -1129,85 +1130,6 @@ def find_message(home, msg_id):
     return None, None
 
 
-def send_answer(home_path, item, text):
-    """Deliver one answer through the script that owns its delivery.
-
-    A captain hold and a stopped worker are different records answered by
-    different commands, and the item's own `source` decides which - the server
-    never guesses. Both record the captain's words durably as part of the same
-    act that closes the decision.
-
-    Returns (outcome, route, detail, mode), the outcome read from the exit code
-    and nothing else.
-    The output carries the captain's own answer back (fm-send.sh echoes its argv
-    on the remote leg), so reading prose here would let his words decide whether
-    his send was delivered. A killed child is the same question by another name,
-    so each route answers it here too rather than anywhere else.
-    """
-    env = dict(os.environ, FM_HOME=home_path)
-    if item["source"] == "hold":
-        # bin/fm-captain-hold.sh mints a question of its own with `--kind
-        # captain`; a WORK item it holds keeps its own kind. Answering the
-        # question closes it, but answering the gate must LIFT the hold so the
-        # work resumes - closing it would mark unstarted work complete.
-        kind = item.get("kind") or ""
-        if not kind:
-            return ("failed", f"fm-captain-hold.sh answer {item['id']}",
-                    "this row records no kind, so the command center cannot tell a "
-                    "question from work held pending your answer; nothing was sent. "
-                    "Answer it with fm-captain-hold.sh, which can see the task itself.",
-                    "none")
-        mode = "close" if kind == "captain" else "release"
-        args = [firstmate_bin("fm-captain-hold.sh"), "answer", item["id"]]
-        if mode == "release":
-            args.append("--release")
-        route = " ".join(["fm-captain-hold.sh", "answer", item["id"]]
-                         + (["--release"] if mode == "release" else []))
-        fd, tmp = tempfile.mkstemp(prefix="cc-decision-", text=True)
-        try:
-            with os.fdopen(fd, "w", encoding="utf-8") as fh:
-                fh.write(text)
-            proc = subprocess.run(
-                args + ["--decision-file", tmp],
-                capture_output=True, text=True, timeout=SEND_TIMEOUT,
-                env=env, stdin=subprocess.DEVNULL, check=False,
-            )
-        except subprocess.SubprocessError as exc:
-            return "failed", route, str(exc), mode
-        finally:
-            os.unlink(tmp)
-        # A hold is a LOCAL record write with no delivery plane, and
-        # bin/fm-captain-hold.sh documents an exact retry as idempotent, so a
-        # refusal or a killed child is a plain failure he may simply send again.
-        outcome = "sent" if proc.returncode == 0 else "failed"
-    else:
-        mode = "close"
-        route = f"fm-send.sh {item['id']}"
-        args = [firstmate_bin("fm-send.sh"), item["id"]]
-        if item.get("key"):
-            args += ["--resolve-key", item["key"]]
-        args.append(text)
-        try:
-            proc = subprocess.run(
-                args, capture_output=True, text=True, timeout=SEND_TIMEOUT,
-                env=env, stdin=subprocess.DEVNULL, check=False,
-            )
-        except subprocess.SubprocessError as exc:
-            # Killed mid-flight: the steer may already sit on the worker's
-            # inbox, and saying "not sent" is what invites a second delivery.
-            return "unknown", route, str(exc), mode
-        # fm-send.sh reports confirmed (0), typed-plane unconfirmed (3) and
-        # inbox-plane delivered-but-not-closed (4); its remaining nonzero exits
-        # conflate a refusal with a delivery it could not read back, so delivery
-        # is genuinely unknown and unknown is what a surface that never guesses
-        # has to say. Exit 4 is a delivered steer whose decision-close append
-        # failed, and this server still reads it as unknown; reporting it as its
-        # own outcome is a separate change.
-        outcome = {0: "sent", 3: "unknown"}.get(proc.returncode, "unknown")
-    detail = (proc.stdout + proc.stderr).strip()
-    return outcome, route, detail[:600], mode
-
-
 def send_note(home_path, text):
     # Approved proposal section 3: the captain's words are logged even when they
     # answer no item, so a note with no addressee is a channel this surface owes.
@@ -1230,45 +1152,32 @@ def send_note(home_path, text):
     return outcome, "fm-inbox.sh note", detail
 
 
-def deliver_certainly(home_path, item, text):
-    """Deliver a Waiting-on-you answer the way this page promises: certain,
-    never "not sent".
+def deliver_to_inbox(home_path, item, text):
+    """Deliver a Waiting-on-you answer straight to firstmate's captain inbox,
+    and nothing else.
 
-    His words go to firstmate's captain inbox FIRST, through the exact path
-    the Messages reply box already uses (send_note) - so firstmate is woken
-    and reads them no matter what happens next. Only after that, as a bonus,
-    this also tries the item's own keyed decision route (send_answer:
-    fm-captain-hold.sh answer for a hold, fm-send.sh for a stopped worker).
-    When the bonus lands, its own route and mode are what he is told, because
-    that is the more useful truth. When it does not, the failure is never
-    reported as "not sent" - the guaranteed note already reached firstmate,
-    so the worst case is a person finishing the filing by hand, not a lost
-    answer - and mode "note" tells the page not to claim a decision closed
-    that only a note carried.
+    fm-captain-hold.sh and fm-send.sh both own a real decision record, but
+    both are bounded by work a click must not wait on (a remote ledger read,
+    a worker's own steering inbox) - so neither runs from this send path any
+    more. His words reach firstmate the same way a Messages reply already
+    does (send_note): durable and woken the moment this returns. Firstmate
+    reads the note and closes the decision itself; this page only has to say
+    his words got there.
 
-    Either call can raise something other than SubprocessError (a missing
-    script is a bare OSError, not that) - caught broadly here for the same
-    reason accept_said catches broadly around a delivery thread: the note is
-    the guarantee, so nothing the bonus route does, including raising, may
-    take that guarantee away.
+    The note carries the item's id and title, never just his bare answer -
+    without that, nothing reading the note back could tell which decision it
+    resolves.
+
+    Returns (outcome, route, detail). Only two outcomes ever reach him: "sent"
+    (the note is durably queued) or "failed" (it never made it, so he keeps
+    his words to try again).
     """
+    body = f"Answer to {item['id']} — {item.get('title') or '(no title)'}:\n{text}"
     try:
-        note_outcome, note_route, note_detail = send_note(home_path, text)
-    except Exception as exc:  # noqa: BLE001 - the guarantee must survive whatever this throws
-        note_outcome, note_route, note_detail = "unknown", "fm-inbox.sh note", str(exc)
-
-    try:
-        bonus_outcome, bonus_route, bonus_detail, bonus_mode = send_answer(home_path, item, text)
-    except Exception as exc:  # noqa: BLE001 - a bonus failure must never look like a lost answer
-        bonus_outcome, bonus_route, bonus_detail, bonus_mode = "failed", "", str(exc), "none"
-
-    if bonus_outcome == "sent":
-        return "sent", bonus_route, bonus_detail, bonus_mode
-
-    detail = note_detail
-    if bonus_detail:
-        detail = f"{detail} — the decision route also ran and said: {bonus_detail}"
-    return note_outcome, note_route, detail[:600], "note"
+        outcome, route, detail = send_note(home_path, body)
+    except Exception as exc:  # noqa: BLE001 - a failed wake must never look like a lost answer
+        outcome, route, detail = "unknown", "fm-inbox.sh note", str(exc)
+    return ("sent" if outcome == "sent" else "failed"), route, detail
 
 
 def record_archive(home, msg_id, archived):
@@ -1620,11 +1529,11 @@ class Handler(BaseHTTPRequestHandler):
                     return {"outcome": "failed", "route": "", "home": "main",
                             "detail": unread}
                 if item:
-                    outcome, route, detail, mode = deliver_certainly(home_path, item, text)
-                    if outcome != "failed":
+                    outcome, route, detail = deliver_to_inbox(home_path, item, text)
+                    if outcome == "sent":
                         records.invalidate()
                     return {"resolved": "answer", "outcome": outcome,
-                            "route": route, "detail": detail, "mode": mode,
+                            "route": route, "detail": detail, "mode": "note",
                             "home": item["home"], "item": item["id"],
                             "source": item["source"], "key": item.get("key"),
                             "item_key": item_key(item),
@@ -1644,12 +1553,11 @@ class Handler(BaseHTTPRequestHandler):
             if error:
                 self._json(503, {"ok": False, "error": error})
                 return
-            # A reply is the captain's completed action on this conversation, so
-            # it is archived once accepted; a later delivery failure does not
-            # put it back in his active list.
-            archived = record_archive(self.records.home, msg_id, True) is None
+            # A reply never moves anything to Archived on its own - only his own
+            # explicit Archive click does that (/api/archive), because a reply is
+            # sometimes just a comment he wants to keep checking on.
             self._json(202, {"ok": True, "sid": sid, "outcome": "sending",
-                             "item_key": entry.get("item_key"), "archived": archived})
+                             "item_key": entry.get("item_key")})
             return
 
         if path == "/api/answer":
@@ -1680,11 +1588,11 @@ class Handler(BaseHTTPRequestHandler):
             records = self.records
 
             def deliver_answer():
-                outcome, route, detail, mode = deliver_certainly(home_path, item, text)
-                if outcome != "failed":
+                outcome, route, detail = deliver_to_inbox(home_path, item, text)
+                if outcome == "sent":
                     records.invalidate()     # force a rescan on the next poll
                 return {"outcome": outcome, "route": route, "detail": detail,
-                        "mode": mode}
+                        "mode": "note"}
 
             sid, error = accept_said(self.records.home, {
                 "kind": "answer", "home": home_id, "item": task_id,

@@ -107,30 +107,21 @@ test('a read time is never derived from unchanged content', () => {
 
 // --- what a dropped send means, per route -----------------------------------------
 
-// A hold writes a local record with no delivery plane and fm-captain-hold.sh
-// documents an exact retry as idempotent, so there is nothing to duplicate.
-test('the hold route never receives a locking outcome', () => {
-  const dropped = transportFailure('hold', 'Failed to fetch');
-  assert.strictEqual(dropped.outcome, undefined, 'a plain failure, not unknown');
-  assert.strictEqual(dropped.error, 'Failed to fetch');
-  for (const outcome of ['unknown', 'failed', 'sent', undefined])
-    assert.strictEqual(verdictFor('hold', outcome, 'why', 0), null,
-      'no outcome may lock the hold route: ' + outcome);
+// Every Waiting-on-you answer and every note now goes only to firstmate's
+// captain inbox - a local record write with no worker-facing delivery plane -
+// so a resend is never a second steer landing on a worker, and nothing here
+// ever locks against it, on any source.
+test('a dropped send is always a plain failure, never a locking outcome', () => {
+  for (const source of ['hold', 'status'])
+    for (const detail of ['Failed to fetch', ''])
+      assert.deepStrictEqual(transportFailure(source, detail), { error: detail });
 });
 
-// On the send route the steer may already sit on the worker's inbox, and a
-// second try is a second steer.
-test('a dropped send on the worker route is unknown, not failed', () => {
-  const dropped = transportFailure('status', 'Failed to fetch');
-  assert.strictEqual(dropped.outcome, 'unknown');
-  assert.strictEqual(dropped.error, undefined, 'it must not read as a failure');
-  assert.deepStrictEqual(verdictFor('status', 'unknown', 'why', 2),
-    { outcome: 'unknown', detail: 'why', sent: 2 });
-});
-
-test('only an unknown delivery locks, and only off the hold route', () => {
-  assert.strictEqual(verdictFor('status', 'failed', 'why', 0), null);
-  assert.strictEqual(verdictFor('status', 'sent', '', 0), null);
+test('no outcome on any route ever locks a resend', () => {
+  for (const source of ['hold', 'status'])
+    for (const outcome of ['unknown', 'failed', 'sent', undefined])
+      assert.strictEqual(verdictFor(source, outcome, 'why', 0), null,
+        'no outcome may lock any route: ' + source + '/' + outcome);
 });
 
 // --- when a verdict ends ----------------------------------------------------------

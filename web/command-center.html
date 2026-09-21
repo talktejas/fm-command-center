@@ -111,6 +111,14 @@
     padding-left:14px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
   .grp .g2.none{font-family:inherit;font-style:italic}
 
+  .row{display:flex;align-items:center}
+  .row .item{flex:1;min-width:0}
+  .rowarchive{flex:none;align-self:center;margin:0 6px;padding:4px 8px;font-size:10.5px;
+    border:1px solid var(--line);border-radius:5px;background:transparent;color:var(--dim);
+    cursor:pointer;white-space:nowrap}
+  .rowarchive:hover{background:var(--line2)}
+  .rowarchive + .rowarchive{margin-left:0}
+
   .item{width:100%;text-align:left;border:0;background:transparent;cursor:pointer;
     display:block;padding:9px 16px 10px;border-left:3px solid transparent}
   .item:hover{background:#fafbfc}
@@ -324,6 +332,7 @@
         <button class="tab" role="tab" data-tab="work" aria-selected="false">Work <span class="n" id="n-work"></span></button>
         <button class="tab" role="tab" data-tab="words" aria-selected="false">My words <span class="n" id="n-words"></span></button>
         <button class="tab" role="tab" data-tab="archived" aria-selected="false">Archived <span class="n" id="n-archived"></span></button>
+        <button class="tab" role="tab" data-tab="hold" aria-selected="false">On hold <span class="n" id="n-hold"></span></button>
       </div>
       <div class="groupbar">
         <label for="grouping">Group by</label>
@@ -434,6 +443,17 @@ const state = {
   capture:null, more:false, archivedMore:false, found:null, archivedFound:null,
   total:0, archivedTotal:0, openMsg:null, openNote:'', archiving:null,
   applied:load('cc.applied',{}),
+  // A Waiting-on-you item and a My words conversation have no durable archive
+  // record of their own (an item is re-read from the live scan every poll; a
+  // said row is append-only), so their archive state is kept here, the same
+  // way their draft and do-not-resend state already are. A Messages row's
+  // archive state stays server-durable (record_archive) - moveArchived below.
+  archivedItems:load('cc.archivedItems',{}), archivedWords:load('cc.archivedWords',{}),
+  // Hold is only ever his own parking, never sent anywhere, so all three kinds
+  // are kept client-side the same way, including messages - there is no
+  // server concept of "held" at all.
+  heldItems:load('cc.heldItems',{}), heldWords:load('cc.heldWords',{}),
+  heldMessages:load('cc.heldMessages',{}),
   // A send in flight, by sid: what he typed and where he typed it. His words
   // leave the box only when the outcome row says the send landed.
   pending:load('cc.pending',{}), failed:load('cc.failed',{}),
@@ -504,6 +524,45 @@ const isDeferred = it => Boolean(it.deferred_until) &&
 // two are answered by different commands, so home+id alone would merge them into
 // one row and one draft. itemKey comes from bin/command-center-state.js.
 const isUnread = it => !state.seen[itemKey(it)];
+// --- explicit archiving --------------------------------------------------------
+// One click, no confirmation, on any row: Messages, Waiting-on-you, My words.
+// Never automatic - a reply or an answer never moves anything here on its own.
+const isItemArchived = it => !!state.archivedItems[itemKey(it)];
+function setItemArchived(it, archived){
+  if (archived) state.archivedItems[itemKey(it)] = true;
+  else delete state.archivedItems[itemKey(it)];
+  save('cc.archivedItems', state.archivedItems);
+}
+const isWordArchived = r => !!(r.sid && state.archivedWords[r.sid]);
+function setWordArchived(r, archived){
+  if (!r.sid) return;
+  if (archived) state.archivedWords[r.sid] = true;
+  else delete state.archivedWords[r.sid];
+  save('cc.archivedWords', state.archivedWords);
+}
+// --- explicit holding -----------------------------------------------------------
+// His own parking, so he can come back and check on it - never sent to
+// firstmate, and never confused with Archive: a held row keeps showing in
+// On hold until he explicitly moves it back.
+const isItemHeld = it => !!state.heldItems[itemKey(it)];
+function setItemHeld(it, held){
+  if (held) state.heldItems[itemKey(it)] = true;
+  else delete state.heldItems[itemKey(it)];
+  save('cc.heldItems', state.heldItems);
+}
+const isWordHeld = r => !!(r.sid && state.heldWords[r.sid]);
+function setWordHeld(r, held){
+  if (!r.sid) return;
+  if (held) state.heldWords[r.sid] = true;
+  else delete state.heldWords[r.sid];
+  save('cc.heldWords', state.heldWords);
+}
+const isMsgHeld = m => !!state.heldMessages[m.id];
+function setMsgHeld(m, held){
+  if (held) state.heldMessages[m.id] = true;
+  else delete state.heldMessages[m.id];
+  save('cc.heldMessages', state.heldMessages);
+}
 // --- what firstmate SAID -----------------------------------------------------
 // bin/fm-captain-message.sh writes one record per message; this page is the
 // only place they are read back. A message carries the same project, worktree
@@ -537,9 +596,10 @@ function visibleMessages(){
   // rule that cannot be true of them. Until the server has answered what he is
   // typing now, its last answer stays on screen under its own query.
   const archived = state.tab === 'archived';
-  if (!state.q.trim()) return archived ? state.archivedMessages : state.messages;
+  if (!state.q.trim())
+    return (archived ? state.archivedMessages : state.messages).filter(m => !isMsgHeld(m));
   const found = archived ? state.archivedFound : state.found;
-  return (found && found.rows) || [];
+  return ((found && found.rows) || []).filter(m => !isMsgHeld(m));
 }
 
 let SEARCH_SEQ = 0, SEARCH_TIMER = null;
@@ -603,9 +663,16 @@ function passesState(it){
 function visible(){
   const q = state.q.trim().toLowerCase();
   return (state.view.items || []).filter(it =>
+    !isItemArchived(it) && !isItemHeld(it) &&
     (!state.homes.size || state.homes.has(it.home)) &&
     passesState(it) && (!q || haystack(it).includes(q)));
 }
+const archivedItemsList = () => (state.view.items || []).filter(isItemArchived);
+const archivedWordsList = () => state.said.filter(isWordArchived);
+const heldItemsList = () => (state.view.items || []).filter(isItemHeld);
+const heldWordsList = () => state.said.filter(isWordHeld);
+const heldMessagesList = () => state.messages.concat(state.archivedMessages)
+  .filter((m, i, all) => all.findIndex(x => x.id === m.id) === i && isMsgHeld(m));
 
 // --- grouping ----------------------------------------------------------------
 // These three drop the grouping. "Latest first" and "Oldest first" order by the
@@ -716,7 +783,21 @@ function renderWatcher(){
   $('#watcher').innerHTML = notices.join('');
 }
 
-function itemRow(it){
+// One button set for every row that can be archived or held: Archive + Hold
+// side by side in its own list, a single Restore in Archived, a single Back
+// to list in On hold. `kind` is 'item', 'msg' or 'word' (the data-*-<kind>
+// attribute the click handler reads); `key` is that row's own id/key.
+function parkButtons(mode, kind, key, restoreLabel){
+  const k = esc(key);
+  if (mode === 'archived')
+    return `<button class="rowarchive" data-archive-${kind}="${k}">${restoreLabel || 'Restore'}</button>`;
+  if (mode === 'held')
+    return `<button class="rowarchive" data-unhold-${kind}="${k}">Back to list</button>`;
+  return `<button class="rowarchive" data-archive-${kind}="${k}">Archive</button>`
+       + `<button class="rowarchive" data-hold-${kind}="${k}">Hold</button>`;
+}
+
+function itemRow(it, mode){
   const bits = [];
   if (state.group !== 'project' || FLAT.has(state.group))
     bits.push(`<span>${esc(projectOf(it))}</span>`);
@@ -728,7 +809,7 @@ function itemRow(it){
   else if (isPending(it)) flag = '<span class="flag f-sent">sent</span>';
   else if (isDeferred(it)) flag = `<span class="flag f-sent">until ${esc(it.deferred_until)}</span>`;
   const old = it.since_epoch && (nowSecs() - it.since_epoch) > 86400;
-  return `<button class="item ${isUnread(it) ? '' : 'answered'} ${state.flash === itemKey(it) ? 'fresh' : ''}"
+  return `<div class="row"><button class="item ${isUnread(it) ? '' : 'answered'} ${state.flash === itemKey(it) ? 'fresh' : ''}"
       data-key="${esc(itemKey(it))}" aria-current="${state.open === itemKey(it)}">
     <span class="item-top">
       <span class="lamp ${esc(it.listen)}" title="${esc((LISTEN[it.listen]||LISTEN.unknown).label)}"></span>
@@ -740,7 +821,7 @@ function itemRow(it){
       ${bits.map(b => `<span class="sep">·</span>${b}`).join('')}
       <span class="sep">·</span><span class="kind k-${it.source === 'hold' ? 'decision' : 'blocker'}">${it.source === 'hold' ? 'decision' : esc(it.status_verb || 'blocked')}</span>
     </span>
-  </button>`;
+  </button>${parkButtons(mode, 'item', itemKey(it))}</div>`;
 }
 
 // Approved proposal sections 3 and 4: the archive and My words are where a
@@ -756,23 +837,50 @@ function wordOutcome(r){
            + 'may not have arrived';
     // Written down and on its way. The command has not answered yet, so
     // nothing is claimed about delivery until it does.
-    case 'sending': return 'Recorded here. Going out now — the outcome appears when the command answers';
-    // Both routes close the decision they answer; a held WORK item is the one
-    // case that is released instead, and the record says which act ran.
+    case 'sending': return 'Going out now — the outcome appears when it answers';
+    // An answer or a note now only ever reaches firstmate's captain inbox:
+    // it is durably queued there, and firstmate closes the decision itself
+    // once it reads it - never claimed closed here.
     case 'sent':
-      if (r.kind !== 'answer') return 'Delivered through ' + esc(r.route);
-      // mode 'note' means only the guaranteed inbox note landed - the item's
-      // own decision route (deliver_certainly, bin/command-center.py) was a
-      // bonus that did not close anything, so nothing here may claim it did.
-      return 'Delivered through ' + esc(r.route) + (r.mode === 'release'
-        ? ' — the hold lifted, so the work resumes'
-        : r.mode === 'close'
-        ? ' — the decision closed'
-        : ' — firstmate was told; this still needs finishing by hand');
+      return r.kind === 'answer' ? 'Sent to firstmate.' : 'Delivered through ' + esc(r.route);
     case 'unknown':
       return 'Delivery unknown — it may already have arrived: ' + esc(r.detail || '');
-    default: return 'Not delivered: ' + esc(r.detail || '');
+    default:
+      return r.kind === 'answer'
+        ? 'Not sent — try again. ' + esc(r.detail || '')
+        : 'Not sent: ' + esc(r.detail || '');
   }
+}
+
+// One row builder for My words, shared with its Archived-tab section, so the
+// two cannot drift into two different renderings of the same conversation.
+function wordRow(r, mode){
+  const draft = r.kind === 'draft';
+  const item = (state.view.items || []).find(i => itemKey(i) === (r.item_key || r.key));
+  // An unsent reply's key names a MESSAGE, which is not a scanned item, so it
+  // is resolved where messages live or the row would have no name at all.
+  const msg = state.messages.find(m => msgKey(m) === r.key);
+  const where = r.msg ? 'Reply to “' + esc(r.title || 'a message') + '”'
+    : msg ? 'Reply to “' + esc(msg.title) + '”'
+    : item ? esc(item.title)
+    : r.kind === 'note' ? 'Note to firstmate — not about one item'
+    : esc(r.title || r.item || '—');
+  const out = wordOutcome(r);
+  // A draft is never in the durable said.jsonl log (r.sid), so it has nothing
+  // to archive or hold - it is removed from this list by being sent or
+  // deleted, not by parking something that was never recorded.
+  const btns = r.sid ? parkButtons(mode, 'word', r.sid) : '';
+  return `<div class="row"><button class="word" data-key="${esc(wordConversationKey(r))}">
+    <span class="word-top">
+      <span class="word-when">${esc(draft ? 'unsent' : localTime(r.at))}</span>
+      <span class="word-where">${where}</span>
+      ${draft ? '<span class="flag f-stuck">unsent draft</span>'
+              : r.kind === 'note' ? '<span class="kind k-decision">note</span>' : ''}
+    </span>
+    <span class="word-text ${draft ? 'draftbox'
+      : r.kind === 'note' ? 'notebox' : ''}">${esc(r.text)}</span>
+    <span class="word-out">${out}</span>
+  </button>${btns}</div>`;
 }
 
 function renderWords(){
@@ -784,7 +892,8 @@ function renderWords(){
   const drafts = Object.entries(state.draft)
     .filter(([key, t]) => t && t.trim() && !spokenFor(state.pending, key, t))
     .map(([key, text]) => ({ kind:'draft', at:null, text, key }));
-  const rows = drafts.concat(orderWordsByLastReply(state.said))
+  const rows = drafts.concat(
+      orderWordsByLastReply(state.said.filter(r => !isWordArchived(r) && !isWordHeld(r))))
     .filter(r => !q || String(r.text || '').toLowerCase().includes(q));
   const head = `<div class="archive-note">What you typed and where it went, as far as this
     log got it. <strong>Firstmate keeps an answer that closes a decision, and drops the
@@ -805,30 +914,7 @@ function renderWords(){
       state.saidError ? 'The record could not be read.' : 'Nothing yet.'}</div>`;
     return;
   }
-  $('#list').innerHTML = head + note + rows.map(r => {
-    const draft = r.kind === 'draft';
-    const item = (state.view.items || []).find(i => itemKey(i) === (r.item_key || r.key));
-    // An unsent reply's key names a MESSAGE, which is not a scanned item, so it
-    // is resolved where messages live or the row would have no name at all.
-    const msg = state.messages.find(m => msgKey(m) === r.key);
-    const where = r.msg ? 'Reply to “' + esc(r.title || 'a message') + '”'
-      : msg ? 'Reply to “' + esc(msg.title) + '”'
-      : item ? esc(item.title)
-      : r.kind === 'note' ? 'Note to firstmate — not about one item'
-      : esc(r.title || r.item || '—');
-    const out = wordOutcome(r);
-    return `<button class="word" data-key="${esc(wordConversationKey(r))}">
-      <span class="word-top">
-        <span class="word-when">${esc(draft ? 'unsent' : localTime(r.at))}</span>
-        <span class="word-where">${where}</span>
-        ${draft ? '<span class="flag f-stuck">unsent draft</span>'
-                : r.kind === 'note' ? '<span class="kind k-decision">note</span>' : ''}
-      </span>
-      <span class="word-text ${draft ? 'draftbox'
-        : r.kind === 'note' ? 'notebox' : ''}">${esc(r.text)}</span>
-      <span class="word-out">${out}</span>
-    </button>`;
-  }).join('');
+  $('#list').innerHTML = head + note + rows.map(r => wordRow(r, 'list')).join('');
 }
 
 // Nothing in either list is drawn from a draft except the unsent-draft row on
@@ -837,7 +923,7 @@ function renderWords(){
 // Exactly the rows My words shows: a draft the record already speaks for is
 // not counted a second time.
 function draftCount(){
-  return state.said.length +
+  return state.said.filter(r => !isWordArchived(r) && !isWordHeld(r)).length +
     Object.entries(state.draft)
       .filter(([k, t]) => t && t.trim() && !spokenFor(state.pending, k, t)).length;
 }
@@ -850,8 +936,10 @@ function draftTyped(){
 function renderList(){
   const items = state.view.items || [];
   $('#n-messages').textContent = Math.max(state.total, state.messages.length);
-  $('#n-archived').textContent = Math.max(state.archivedTotal, state.archivedMessages.length);
-  $('#n-waiting').textContent = items.filter(i => !isDeferred(i)).length;
+  $('#n-archived').textContent = Math.max(state.archivedTotal, state.archivedMessages.length)
+    + archivedItemsList().length + archivedWordsList().length;
+  $('#n-hold').textContent = heldItemsList().length + heldWordsList().length + heldMessagesList().length;
+  $('#n-waiting').textContent = items.filter(i => !isDeferred(i) && !isItemArchived(i) && !isItemHeld(i)).length;
   $('#n-words').textContent = draftCount();
   // The count is what needs him, same convention as Waiting on you: Underway,
   // Recently landed and Charted next are read-only context, not asks.
@@ -865,14 +953,47 @@ function renderList(){
   renderHomes(); renderWatcher();
   if (state.tab === 'words'){ renderWords(); return; }
   if (state.tab === 'messages'){ renderMessages(); return; }
-  if (state.tab === 'archived'){ renderMessages(true); return; }
+  if (state.tab === 'archived'){ renderArchived(); return; }
+  if (state.tab === 'hold'){ renderHold(); return; }
   if (state.tab === 'work'){ renderWork(); return; }
 
   const rows = ordered(visible());
   const empty = state.q || state.sfilter ? 'Nothing matches.'
     : !state.scanned ? 'The records have not been read yet.'
     : 'Nothing is waiting on you.<br>Firstmate is getting on with it.';
-  $('#list').innerHTML = rowsHtml(rows, itemRow, empty);
+  $('#list').innerHTML = rowsHtml(rows, it => itemRow(it, 'list'), empty);
+}
+
+// The Archived tab is every kind of row he can archive, together: messages
+// (durable, server-side), items and My words conversations (kept in the
+// browser - see state.archivedItems/archivedWords above).
+function renderArchived(){
+  renderMessages(true);
+  const items = ordered(archivedItemsList());
+  const words = archivedWordsList();
+  let extra = '';
+  if (items.length) extra += `<div class="worksection"><h3>Waiting-on-you items
+    <span class="n">${items.length}</span></h3>${items.map(it => itemRow(it, 'archived')).join('')}</div>`;
+  if (words.length) extra += `<div class="worksection"><h3>My words
+    <span class="n">${words.length}</span></h3>${words.map(r => wordRow(r, 'archived')).join('')}</div>`;
+  if (extra) $('#list').insertAdjacentHTML('beforeend', extra);
+}
+
+// On hold is only ever his own parking - nothing here was ever sent to
+// firstmate, and nothing here is server-durable, unlike Archived's messages.
+function renderHold(){
+  const items = ordered(heldItemsList());
+  const words = heldWordsList();
+  const msgs = ordered(heldMessagesList(), true);
+  const sections = [
+    ['Messages', msgs, m => messageRow(m, 'held')],
+    ['Waiting-on-you items', items, it => itemRow(it, 'held')],
+    ['My words', words, r => wordRow(r, 'held')],
+  ].filter(([, rows]) => rows.length);
+  $('#list').innerHTML = sections.length
+    ? sections.map(([title, rows, fn]) => `<div class="worksection"><h3>${esc(title)}
+        <span class="n">${rows.length}</span></h3>${rows.map(fn).join('')}</div>`).join('')
+    : `<div class="empty">Nothing on hold.</div>`;
 }
 
 // Messages are the default list and the reason this page exists: everything
@@ -916,7 +1037,7 @@ function renderMessages(archived){
         ${held.length} of ${Math.max(total, held.length)} loaded,
         the rest are in the log</button>` : '');
   $('#list').innerHTML = note
-    + rowsHtml(rows, messageRow, empty, true, asked ? answered : '') + older;
+    + rowsHtml(rows, m => messageRow(m, archived ? 'archived' : 'list'), empty, true, asked ? answered : '') + older;
 }
 
 // --- Work: the /bearings lavish board's four sections, in the rail itself ---
@@ -1098,14 +1219,14 @@ function rowsHtml(rows, rowFn, emptyText, isMessage, label){
 
 // His standing rule: every row names the project, the worktree and the branch.
 // A field the record does not carry says so; none of the three is ever guessed.
-function messageRow(m){
+function messageRow(m, mode){
   const replied = repliesTo(m).length;
   const where = [
     m.project || 'Not recorded',
     m.worktree ? m.worktree.replace(/^.*\//, '') : 'no worktree',
     m.branch || 'no branch',
   ];
-  return `<button class="item ${state.seen[msgKey(m)] ? 'answered' : ''}"
+  return `<div class="row"><button class="item ${state.seen[msgKey(m)] ? 'answered' : ''}"
       data-key="${esc(msgKey(m))}" aria-current="${state.open === msgKey(m)}">
     <span class="item-top">
       <span class="item-title">${esc(m.title)}</span>
@@ -1118,7 +1239,7 @@ function messageRow(m){
       ${where.map((w, i) => (i ? '<span class="sep">·</span>' : '') +
         `<span class="${i ? 'mono' : ''}">${esc(w)}</span>`).join('')}
     </span>
-  </button>`;
+  </button>${parkButtons(mode, 'msg', m.id, 'Restore to Messages')}</div>`;
 }
 
 function trackHtml(m){
@@ -1232,6 +1353,9 @@ function renderMessagePane(m){
     <div class="reply-foot">
       <button class="defer" id="archive" ${state.archiving === m.id ? 'disabled' : ''}>${
         m.archived ? 'Restore to Messages' : state.archiving === m.id ? 'Archiving…' : 'Archive'}</button>
+      ${isMsgHeld(m)
+        ? `<button class="defer" data-unhold-msg="${esc(m.id)}">Back to list</button>`
+        : `<button class="defer" data-hold-msg="${esc(m.id)}">Hold</button>`}
     </div>
   </div>`);
   const ta = $('#reply');
@@ -1273,12 +1397,19 @@ function renderMain(){
   const anyway = verdict
     ? '<button class="defer" id="sendanyway">Send anyway — this may be a second copy</button>'
     : '';
-  // Derived from the durable record, not from an in-memory notice: the last
-  // thing he sent about this item and what became of it.
-  const last = state.said.find(r => r.item_key === itemKey(it));
-  const lastLine = last
-    ? `<div class="hits">You last sent “${esc(last.text)}” — ${wordOutcome(last)}.</div>`
-    : '';
+  // What he has answered here, in the same format the Messages queue shows
+  // his own words in - a proper "You" entry with its time and its outcome,
+  // never a bare quoted fragment. Derived from the durable record, oldest
+  // first like any other conversation, so a superseding answer reads as what
+  // it is rather than replacing what came before it.
+  const answered = state.said.filter(r => r.item_key === itemKey(it)).slice().reverse();
+  const answeredHtml = answered.length ? `<div class="thread"><h3>What you answered</h3>${
+    answered.map(r => `<div class="msg you">
+        <div class="msg-who">You<span class="t">${esc(localTime(r.at))}</span></div>
+        <div class="msg-text">${esc(r.text)}</div>
+        <div class="proof">${wordOutcome(r)}</div>
+      </div>`).join('')
+  }</div>` : '';
   const cell = (label, value, na) =>
     `<div><dt>${label}</dt><dd class="${value ? '' : 'na'}">${esc(value || na)}</dd></div>`;
   const deadWarn = it.listen === 'dead' ? `<div class="dead-warn">
@@ -1301,7 +1432,7 @@ function renderMain(){
       ${cell('Branch', it.branch, it.branch_state === 'detached' ? 'Detached — no branch' : 'Not started')}
     </div>
     <div class="body">${detail || '<p class="quiet">No detail recorded.</p>'}</div>
-    ${lastLine}
+    ${answeredHtml}
     ${threadHtml(it)}
     <div class="reply">
       ${deadWarn}
@@ -1324,6 +1455,13 @@ function renderMain(){
           || 'Goes through ' + (it.source === 'hold' ? 'the decision record'
                                                     : 'the worker’s steering inbox') + '.'}</span>
       </div>
+    </div>
+    <div class="reply-foot">
+      <button class="defer" data-archive-item="${esc(itemKey(it))}">${
+        isItemArchived(it) ? 'Restore' : 'Archive'}</button>
+      ${isItemHeld(it)
+        ? `<button class="defer" data-unhold-item="${esc(itemKey(it))}">Back to list</button>`
+        : `<button class="defer" data-hold-item="${esc(itemKey(it))}">Hold</button>`}
     </div>
   </div>`);
 
@@ -1383,6 +1521,16 @@ function render(){
     $('#open-note').textContent = noteButtonLabel();
 }
 
+// After an Archive or Hold click removes the currently open row from its own
+// list, the pane moves on: the next key in that same pre-removal order, the
+// previous one if it was the last, or nothing if the list is now empty.
+function advanceTo(orderedKeys, removedKey){
+  const i = orderedKeys.indexOf(removedKey);
+  const rest = orderedKeys.filter(k => k !== removedKey);
+  if (!rest.length){ state.open = null; render(); return; }
+  open(rest[Math.min(i, rest.length - 1)]);
+}
+
 function open(key){
   state.open = key;
   // A message found in the log is held here for as long as it is open, so the
@@ -1432,16 +1580,28 @@ function moveArchived(m, archived){
   }
 }
 
-async function archiveMessage(){
-  const m = openedMessage();
+function findMessageById(id){
+  const find = rows => (rows || []).find(x => x.id === id);
+  return find(state.messages) || find(state.archivedMessages)
+    || find(state.found && state.found.rows) || find(state.archivedFound && state.archivedFound.rows)
+    || (state.openMsg && state.openMsg.id === id ? state.openMsg : null);
+}
+
+// `advance` is true only from a row's own Archive button or the pane's -
+// never from a plain state refresh - so the pane moves on to the next
+// message in whichever list it was archived out of.
+async function archiveMessageById(id, advance){
+  const m = id && findMessageById(id);
   if (!m || state.archiving) return;
   const archived = !m.archived;
+  const keys = advance && archived ? ordered(visibleMessages(), true).map(msgKey) : null;
   state.archiving = m.id;
-  renderMain();
+  render();
   try {
     const {ok, data} = await post('/api/archive', {msg:m.id, archived});
     if (!ok || !data.ok) throw new Error(data.error || 'the archive record could not be written');
     moveArchived(m, archived);
+    if (keys && state.open === msgKey(m)){ state.archiving = null; advanceTo(keys, msgKey(m)); return; }
   } catch (e) {
     state.openNote = 'The archive change did not land: ' + (e.message || e);
   } finally {
@@ -1812,10 +1972,9 @@ async function sendReply(){
   try {
     ({ ok, data } = await post('/api/reply', { msg: m.id, text }));
   } catch (err) {
-    // The request never came back, so delivery is genuinely unknown: the steer
-    // may already sit on the worker's inbox and the note may already be saved.
-    // Which route ran is unknown too, so this takes the locking outcome - the
-    // reply that may have been delivered is not offered a second time.
+    // The request never came back. A reply now only ever reaches firstmate's
+    // captain inbox, so the worst case is a second note, never a second steer
+    // landing on a worker - safe to just say it failed and let him try again.
     data = transportFailure('status', String(err.message || err));
   } finally {
     state.sending = false;
@@ -1826,7 +1985,9 @@ async function sendReply(){
     state.pending[data.sid] = {key, item: data.item_key || null, text,
                                at: Date.now()};
     delete state.failed[key];
-    if (data.archived) moveArchived(m, true);
+    // A reply never archives anything on its own any more - only his own
+    // explicit Archive click does that. Sometimes a reply is just a comment
+    // he wants to keep checking on.
     save('cc.pending', state.pending); save('cc.failed', state.failed);
     await loadSaid();
     render();
@@ -1886,11 +2047,96 @@ document.addEventListener('click', async e => {
     await sendWorkAnswer(id, text);
     return;
   }
+  // Every archive button: one click, no confirmation, and the pane moves on to
+  // the next row in that same list (the previous one if it was the last, or
+  // the empty state if the list is now empty) - checked before the row click
+  // below, though it never nests inside `.item`/`.word` anyway, since each row
+  // builder puts it as a sibling, never a child, of the clickable button.
+  const archiveItemBtn = e.target.closest('[data-archive-item]');
+  if (archiveItemBtn){
+    const key = archiveItemBtn.dataset.archiveItem;
+    const it = (state.view.items || []).find(i => itemKey(i) === key);
+    if (it){
+      const wasArchiving = !isItemArchived(it);
+      const keys = ordered(visible()).map(itemKey);
+      setItemArchived(it, wasArchiving);
+      if (wasArchiving && state.open === key) advanceTo(keys, key);
+    }
+    renderList();
+    return;
+  }
+  const archiveWordBtn = e.target.closest('[data-archive-word]');
+  if (archiveWordBtn){
+    const sid = archiveWordBtn.dataset.archiveWord;
+    const r = state.said.find(x => x.sid === sid);
+    if (r){
+      const key = wordConversationKey(r);
+      const wasArchiving = !isWordArchived(r);
+      const keys = (state.said.filter(x => !isWordArchived(x) && !isWordHeld(x)))
+        .map(wordConversationKey);
+      setWordArchived(r, wasArchiving);
+      if (wasArchiving && state.open === key) advanceTo(keys, key);
+    }
+    renderList();
+    return;
+  }
+  const archiveMsgBtn = e.target.closest('[data-archive-msg]');
+  if (archiveMsgBtn){
+    await archiveMessageById(archiveMsgBtn.dataset.archiveMsg, true);
+    return;
+  }
+  // Hold is only ever his own parking: nothing here is sent to firstmate, and
+  // nothing here is server-durable, so this only ever touches browser state -
+  // the same one-click, advance-to-next shape as Archive.
+  const holdItemBtn = e.target.closest('[data-hold-item], [data-unhold-item]');
+  if (holdItemBtn){
+    const key = holdItemBtn.dataset.holdItem || holdItemBtn.dataset.unholdItem;
+    const it = (state.view.items || []).find(i => itemKey(i) === key);
+    if (it){
+      const toHold = !isItemHeld(it);
+      const keys = ordered(visible()).map(itemKey);
+      setItemHeld(it, toHold);
+      if (toHold && state.open === key) advanceTo(keys, key);
+    }
+    renderList();
+    return;
+  }
+  const holdWordBtn = e.target.closest('[data-hold-word], [data-unhold-word]');
+  if (holdWordBtn){
+    const sid = holdWordBtn.dataset.holdWord || holdWordBtn.dataset.unholdWord;
+    const r = state.said.find(x => x.sid === sid);
+    if (r){
+      const key = wordConversationKey(r);
+      const toHold = !isWordHeld(r);
+      const keys = (state.said.filter(x => !isWordArchived(x) && !isWordHeld(x)))
+        .map(wordConversationKey);
+      setWordHeld(r, toHold);
+      if (toHold && state.open === key) advanceTo(keys, key);
+    }
+    renderList();
+    return;
+  }
+  const holdMsgBtn = e.target.closest('[data-hold-msg], [data-unhold-msg]');
+  if (holdMsgBtn){
+    const id = holdMsgBtn.dataset.holdMsg || holdMsgBtn.dataset.unholdMsg;
+    const m = findMessageById(id);
+    if (m){
+      const toHold = !isMsgHeld(m);
+      const keys = ordered(visibleMessages(), true).map(msgKey);
+      setMsgHeld(m, toHold);
+      if (toHold && state.open === msgKey(m)) advanceTo(keys, msgKey(m));
+    }
+    renderList();
+    return;
+  }
   const row = e.target.closest('.item, .word');
   if (row){ if (row.dataset.key) open(row.dataset.key); return; }
   if (e.target.id === 'send'){ await sendAnswer(); return; }
   if (e.target.id === 'sendreply'){ await sendReply(); return; }
-  if (e.target.id === 'archive'){ await archiveMessage(); return; }
+  if (e.target.id === 'archive'){
+    await archiveMessageById(openedMessage() && openedMessage().id, true);
+    return;
+  }
   if (e.target.id === 'defer'){ state.open = null; render(); return; }
   if (e.target.id === 'sendanyway'){
     // heldWith comes from bin/command-center-state.js: one deliberate decision

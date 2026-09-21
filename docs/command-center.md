@@ -107,19 +107,17 @@ The server refuses to start if either is missing, but a file can still fail to b
 
 ## Where your answer goes
 
-Every answer in **Waiting on you** goes to firstmate's captain inbox first, through `bin/fm-inbox.sh note` — the exact path a plain note already takes — so firstmate is woken and reads your words no matter what happens next. That is the guarantee: once the inbox write succeeds the item reads sent, and it never reads "not sent" again over anything that happens after.
+Every answer in **Waiting on you** goes to firstmate's captain inbox, through `bin/fm-inbox.sh note` — the exact path a plain note already takes — and nowhere else. Nothing on this send path calls `bin/fm-captain-hold.sh` or `bin/fm-send.sh`: both own a real decision record, but both are bounded by work a click must not wait on (a remote ledger read, a worker's own steering inbox). Firstmate reads the note and closes the decision itself, on its own next turn, whatever kind of row it was.
 
-Only then, as a bonus, does the item's own keyed decision route also run:
+There are exactly two outcomes, because there is exactly one route: **sent** (the note is durably queued) or **failed** (it never made it, so your text stays in the box and sending again is safe — a second note is at worst a duplicate, never a duplicate steer). The note carries the item's id and title ahead of your words, so firstmate can tell which decision it resolves.
 
-| You answered | The bonus route |
-|---|---|
-| a question held for you (`kind: captain`) | `bin/fm-captain-hold.sh answer`, which records your exact words and closes the call in the same act |
-| work held pending your answer (any other kind) | `bin/fm-captain-hold.sh answer --release`, which records your words and lifts the hold so the work resumes — it is never marked done |
-| a stopped worker | `bin/fm-send.sh --resolve-key`, which puts your words in the worker's steering inbox and closes the decision |
-
-When the bonus route lands, that is what the item shows you — which route ran, and whether it closed the decision or lifted a hold. When it does not — a held row that records no kind at all cannot be told apart from work, a script is missing, a call fails — that failure is folded into the detail of a send that already landed: the worst case is that a person has to finish filing the decision by hand, never a lost answer. Answering a no-kind row directly with `fm-captain-hold.sh`, which can see the task itself, still works and still closes it properly.
+Replying never removes the item from **Waiting on you**, and never archives the message it answers, on its own — only your own explicit Archive click does that (see **Archive**), because a reply is sometimes just a comment you want to keep checking on.
 
 A note that answers nothing (typed with no item open) goes through `bin/fm-inbox.sh note` alone, the same as it always has.
+
+## Archive
+
+Every row you can act on — a Messages row, a Waiting-on-you item (in its list row and its opened pane), a My words conversation — carries its own **Archive** button, and one click moves it to the Archived tab with no confirmation. A Messages row's archive state is durable, recorded beside the message log itself, so it survives a restart and reads the same from Archived or restored back to Messages. A Waiting-on-you item has no durable record of its own to carry an archived flag — it is re-read from the live backlog scan on every poll — so its archive state is kept in the browser, the same way its draft and its do-not-resend state already are.
 
 ## Where your reply to a message goes
 
@@ -139,8 +137,7 @@ The server decides the route from the recorded message and the current scan, nev
 A reply naming a message this home never recorded is refused, and a task id is only ever matched against the home this page was started on, because two homes on one machine can hold the same one.
 A reply to a recorded question whose scan could not be read is not sent at all and reads as failed, so your words come back and sending again is safe; it is never quietly delivered as a note, because a reply that cannot rule out the answer route must not become one.
 A reply to a message that is not a question is routed by the record alone: no scan can change where it goes, so a backlog that will not parse has nothing to say about it.
-A reply carries the same do-not-resend protection an answer does: on an unconfirmed delivery it keeps your words, stops offering Reply, and waits until you say to send it anyway.
-When the reply steers a worker still waiting, that protection covers the item too, so the same worker cannot be reached a second time by answering it from the waiting list instead.
+A dropped request (the fetch itself failed) keeps your words in the box and reads as a plain failure — never a locked, do-not-resend state — because the only route a reply or an answer ever takes now is a local inbox-note write: a resend there is at worst a duplicate note, never a duplicate steer landing on a worker.
 
 ## What it stores
 
@@ -157,8 +154,7 @@ That is why one send writes two rows under the same `sid`: **sending** when your
 The page folds the pair and shows the outcome in place on the row you answered, so nothing is claimed about delivery until the command has said it.
 Until then the box says your words were written down and are going out, never that they arrived, and the button that sent them does not offer to send them again.
 
-The outcome is read from the exit code of the command that ran and nothing else: **sent**, **failed** (a captain hold refused the record and nothing left this machine — answering it again is safe, and `fm-captain-hold.sh` documents an exact retry as idempotent), or **unknown** (the command reported neither, so the page never guesses which: the page reads only a confirmed `fm-send.sh` exit as sent, and every other exit is unknown to it — including the one that says the answer was delivered but its decision close failed, which the page does not yet report as a state of its own; and `fm-inbox.sh` saves a note before it wakes firstmate, so its failure may mean only that the wake did not land).
-An answer in **Waiting on you** never reads **failed** once it has actually been sent: the guaranteed inbox note (see **Where your answer goes**) makes **sent** the floor, and the only way one reads anything else is if that guaranteed note itself could not be confirmed, which reads **unknown** exactly as any other unconfirmed `fm-inbox.sh` send does. A reply that steers an item gets the same guarantee, with one exception that is decided before either route ever runs: a reply to a question whose scan could not be read is refused outright and reads **failed**, because nothing can rule out the answer route without it (see **Where your reply to a message goes**).
+An answer or a reply that steers an item reads **sent** or **failed** only (see **Where your answer goes**) — never **unknown** and never locked against a resend, because the only route it ever takes is a local inbox-note write with no worker-facing delivery plane. A plain note (one typed with no item open) still reads **unknown** on a nonzero exit, because `fm-inbox.sh` saves the note before it wakes firstmate, so a failed wake there may mean only that the wake did not land, not that nothing was saved. A reply to a question whose scan could not be read is refused outright and reads **failed**, because nothing can rule out the answer route without it (see **Where your reply to a message goes**).
 On **unknown** the page keeps your text, says plainly that delivery could not be confirmed, and does not offer Send again until the steering record appears — or until you say so yourself, knowing it may be a second copy.
 On any other non-success it keeps your text too, so nothing you typed is cleared by a send that did not land.
 A record still marked as being delivered by a server that is no longer delivering it - it restarted in between - reads back as **unknown**, because that delivery may or may not have happened.

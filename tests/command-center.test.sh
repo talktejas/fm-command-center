@@ -65,6 +65,42 @@ test_only_live_captain_holds_are_carded() {
   pass "only open captain holds reach the captain's list"
 }
 
+# The real incident: a narrative section reporting old captain rulings, quoted
+# in exactly the "- [ ] <id> - <title> ... (hold: ...) (hold-kind: captain)"
+# shape, sits outside every section tasks-axi itself ever writes an open task
+# under. tasks-axi correctly has no such task at all - it was never one - so
+# carding it hands him a question that can never be answered because there was
+# never a row to answer. Only `## Queued` and `## In flight` are task-bearing;
+# anything else, however task-shaped its lines look, is prose.
+test_prose_outside_a_task_section_is_never_carded_as_a_live_hold() {
+  local home out
+  home="$TMP_ROOT/narrative"
+  mkdir -p "$home/data" "$home/state"
+  cat > "$home/data/backlog.md" <<'EOF'
+# Backlog
+
+## In flight
+
+## Queued
+- [ ] cc-real-live - Blue or green? (repo: demo) (kind: ship) (since 2026-09-01) (hold: The colour call) (hold-kind: captain)
+
+## Done
+
+## Captain rulings 2026-08-12 on the manufacturing-study decisions
+- [ ] jt-sale-decision-oversell-policy - Refuse a sale when goods are not on hand, or allow with a warning? (repo: jt2627s) (kind: captain) (hold: Oversell policy for POS checkout) (hold-kind: captain)
+  Captain ruled: can sell, with a warning.
+- [ ] jt-sale-decision-fx-rate-authority - Who sets the FX rate at sale time? (repo: jt2627s) (kind: captain) (hold: FX rate authority) (hold-kind: captain)
+EOF
+  out=$(scan "$home") || fail "the scan failed on a seeded home"
+  assert_contains "$out" '"id":"cc-real-live"' \
+    "a real live captain hold under Queued was not carded"
+  assert_not_contains "$out" 'jt-sale-decision-oversell-policy' \
+    "a narrative line outside a task-bearing section was carded as a live captain hold"
+  assert_not_contains "$out" 'jt-sale-decision-fx-rate-authority' \
+    "a second narrative line outside a task-bearing section was carded as a live captain hold"
+  pass "a narrative section quoting an old decision in task shape is never carded as a live one"
+}
+
 test_body_survives_the_record_separator() {
   local home detail
   home="$TMP_ROOT/body"
@@ -612,7 +648,7 @@ test_server_refuses_bad_input_before_running_anything() {
 
 # The whole point of the surface: his words reach the durable record, and the
 # one thing firstmate does not keep is kept here.
-test_answering_a_hold_records_the_captains_words_and_clears_the_item() {
+test_answering_a_hold_records_the_captains_words_and_reaches_the_inbox() {
   local home port result resolved
   home="$TMP_ROOT/answer"
   mkdir -p "$home/data" "$home/state"
@@ -640,31 +676,34 @@ test_answering_a_hold_records_the_captains_words_and_clears_the_item() {
   resolved=$(wait_outcome "$home" "$(jq -r .sid <<<"$result")") \
     || fail "the outcome of the send never reached the record"
   assert_contains "$resolved" '"outcome":"sent"' "the answer was not delivered"
-  assert_contains "$resolved" 'fm-captain-hold.sh answer' \
-    "a held decision was not answered through the script that owns decision records"
+  assert_contains "$resolved" 'fm-inbox.sh note' \
+    "an item answer did not go through the guaranteed inbox note, and nothing else"
 
-  wait_for "the captain's exact words never reached the durable task record" \
-    grep -q 'Green. Blue reads as disabled.' "$home/data/backlog.md"
-  # The page's "you last sent … — …" line is derived from this record alone, so
-  # it has to carry the item, his exact words, the outcome, which route ran, and
-  # whether that act closed the task or lifted its hold.
+  wait_for "his exact words never reached firstmate's own inbox" \
+    bash -c "grep -q 'Green. Blue reads as disabled.' '$home'/state/inbox/*.note 2>/dev/null"
+  assert_not_contains "$(cat "$home/data/backlog.md")" 'Green. Blue reads as disabled.' \
+    "an item answer called a decision-closing script instead of only the note route"
+  # The page's "you last sent … — …" line is derived from this record alone.
   wait_for "the outcome never landed on the record of what he said" \
     said_has "$port" '.item == "cc-answer" and .outcome == "sent"'
-  assert_equals "main/hold/cc-answer/cc-answer|Green. Blue reads as disabled.|sent|hold|close|fm-captain-hold.sh answer cc-answer" \
+  assert_equals "main/hold/cc-answer/cc-answer|Green. Blue reads as disabled.|sent|hold|note|fm-inbox.sh note" \
     "$(curl -s -m 30 "http://127.0.0.1:$port/api/said" \
         | jq -r '[.said[] | select(.item == "cc-answer")][0]
                  | [.item_key, .text, .outcome, .source, .mode, .route] | join("|")')" \
-    "the record the item line is derived from did not carry what he sent, what became of it, and the script that owns decision records"
-  wait_for "an answered decision stayed in the waiting list" \
-    bash -c "! curl -s -m 120 'http://127.0.0.1:$port/api/items' | grep -q '\"id\":\"cc-answer\"'"
+    "the record the item line is derived from did not carry what he sent, what became of it, and the route that ran"
+  # A reply never removes anything from its list on its own - only an explicit
+  # Archive click does - so the answered item is still listed.
+  assert_contains "$(curl -s -m 120 "http://127.0.0.1:$port/api/items")" '"id":"cc-answer"' \
+    "an answered item vanished from the waiting list without an explicit archive"
   stop_server
-  pass "an accepted answer reaches the task record, the captain's log, and leaves the list"
+  pass "an accepted answer reaches the captain's log and firstmate's inbox, and stays listed until archived"
 }
 
-# A question held for the captain IS the task, so answering it closes the task.
-# Work held pending his answer is not: answering it must lift the hold so the
-# work resumes, because marking unstarted work complete cannot be undone.
-test_answering_held_work_releases_it_instead_of_closing_it() {
+# No firstmate script runs from this send path any more, so a captain-kind hold
+# and work held pending an answer are delivered identically: firstmate reads
+# the note and decides for itself whether to close or release. `kind` no
+# longer changes anything about delivery.
+test_answering_held_work_reaches_the_inbox_the_same_way() {
   local home port shown result
   home="$TMP_ROOT/release"
   mkdir -p "$home/data" "$home/state"
@@ -685,30 +724,32 @@ test_answering_held_work_releases_it_instead_of_closing_it() {
   assert_contains "$result" '"ok":true' "held work could not be answered"
   wait_outcome "$home" "$(jq -r .sid <<<"$result")" >/dev/null \
     || fail "the outcome of the send never reached the record"
-  wait_for "answering held work was not recorded as lifting its hold" \
-    said_has "$port" '.item == "cc-work" and .mode == "release" and .outcome == "sent"'
+  wait_for "answering held work did not reach firstmate's inbox" \
+    said_has "$port" '.item == "cc-work" and .mode == "note" and .outcome == "sent"'
   stop_server
 
   shown=$(FM_HOME="$home" FM_ROOT_OVERRIDE="$FIRSTMATE_ROOT" \
     "$TASKS_AXI" show cc-work --full 2>/dev/null)
   assert_not_contains "$shown" 'state: done' \
     "answering work held pending his answer marked that work complete"
-  assert_grep 'Go with green.' "$home/data/backlog.md" \
-    "the captain's exact words did not reach the durable task record"
-  pass "answering held work lifts its hold and never marks the work done"
+  assert_not_contains "$(cat "$home/data/backlog.md")" 'Go with green.' \
+    "the send path called a decision-closing script instead of only the note route"
+  assert_grep 'Go with green.' "$home"/state/inbox/*.note \
+    "the captain's exact words did not reach firstmate's inbox"
+  pass "answering held work reaches firstmate's inbox and never marks the work done itself"
 }
 
-# Closing real work as done is not a guess worth making - but his words must
-# still reach firstmate. deliver_certainly (bin/command-center.py) writes the
-# guaranteed inbox note before it ever tries the row's own keyed decision
-# route, so a row that cannot be classified never comes back as "not sent":
-# the bonus refusal is folded into the detail of a send that landed.
-test_a_held_row_with_no_kind_still_reaches_firstmate_as_a_note() {
+# The note carries the item's own id and title, never just his bare words -
+# without that, nothing reading the note back could tell which decision it
+# resolves. A row with no `kind` at all is delivered exactly the same way as
+# any other, because kind no longer decides a route.
+test_a_held_row_with_no_kind_still_names_itself_in_the_note() {
   local home port result resolved
   home="$TMP_ROOT/nokind"
   mkdir -p "$home/data" "$home/state"
   {
     printf '# Backlog\n'
+    printf '## Queued\n'
     printf -- '- [ ] cc-bare - Which palette? (repo: demo) (hold: pick one) (hold-kind: captain)\n'
   } > "$home/data/backlog.md"
   start_server "$home" || fail "the server did not start"
@@ -721,14 +762,12 @@ test_a_held_row_with_no_kind_still_reaches_firstmate_as_a_note() {
     || fail "the outcome of the send never reached the record"
   stop_server
   assert_contains "$resolved" '"outcome":"sent"' \
-    "the guaranteed note did not land, so a row that cannot be classified read as not sent"
-  assert_contains "$resolved" 'cannot tell a question from work' \
-    "the bonus route's refusal was not explained on the record"
-  assert_not_contains "$(cat "$home/data/backlog.md")" 'Green.' \
-    "a row that cannot be classified was filed as a decision anyway"
+    "a row with no kind was not delivered the same way as any other"
   assert_contains "$(cat "$home"/state/inbox/*.note 2>/dev/null)" 'Green.' \
     "his words never reached firstmate's own inbox"
-  pass "a held row with no kind still reaches firstmate as a note, never as a lost answer"
+  assert_contains "$(cat "$home"/state/inbox/*.note 2>/dev/null)" 'cc-bare' \
+    "the note did not name which item it answers"
+  pass "a row with no kind is delivered exactly like any other, and the note names the item"
 }
 
 # The page clears his box the moment a send is accepted, so "accepted" has to
@@ -838,71 +877,49 @@ test_an_unreadable_log_is_reported_not_shown_as_empty() {
 # fm-send.sh's exit 3 means the text WAS delivered and only the read-back stayed
 # unconfirmed; its own message forbids a blind resend. Reporting that as a
 # failure is how the captain sends the same steer twice.
-test_the_send_outcome_is_decided_by_the_exit_code_alone() {
+test_deliver_to_inbox_only_ever_reports_sent_or_failed() {
   local home out
-  home="$TMP_ROOT/unconfirmed"
+  home="$TMP_ROOT/note-only"
   seed_home "$home"
   out=$(FM_CC_HOME="$home" python3 - "$SERVER" <<'PYEOF'
 import importlib.util, subprocess, sys, os
 spec = importlib.util.spec_from_file_location("cc", sys.argv[1])
 cc = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(cc)
-status_item = {"source": "status", "id": "t-1", "key": "k"}
-# A captain hold is a local record write with no delivery plane, and its script
-# documents an exact retry as idempotent: a refusal there is a plain failure.
-hold_item = {"source": "hold", "id": "t-1", "key": "t-1", "kind": "captain"}
-# fm-send.sh echoes its own argv back on the remote leg, so this output can
-# carry the captain's answer verbatim. The same prose under a different exit
-# code must never move the verdict, in either direction.
-quotes_him = ("error: steer to remote secondmate box is unconfirmed (transport lost "
-              "twice). Resend: FM_HOME=/h fm-send.sh t-1 'the build status is "
-              "unconfirmed (see CI)'")
-cases = [
-    (status_item, 0, quotes_him),
-    (status_item, 0, ""),
-    (status_item, 3, ""),
-    (status_item, 1, quotes_him),
-    (status_item, 1, "error: no such task"),
-    (hold_item, 0, ""),
-    (hold_item, 1, "error: that task is no longer held"),
-    (hold_item, 2, "error: mode mismatch"),
+# No item field decides the route any more - captain and status items, held
+# and unkindled ones, all take the exact same fm-inbox.sh note path.
+items = [
+    {"source": "hold", "id": "t-1", "key": "t-1", "kind": "captain", "title": "Blue or green?"},
+    {"source": "status", "id": "t-2", "key": "k", "title": "Ship the palette"},
+    {"source": "hold", "id": "t-3", "key": "t-3", "title": "Which palette?"},  # no kind
 ]
 real = subprocess.run
-for item, rc, err in cases:
-    subprocess.run = lambda *a, rc=rc, err=err, **k: subprocess.CompletedProcess(
-        a[0] if a else [], rc, "", err)
-    print(cc.send_answer(os.environ["FM_CC_HOME"], item, "answer text")[0])
-# A killed child asks the same question, so each route answers it its own way.
+for item in items:
+    for rc in (0, 1, 2):
+        subprocess.run = lambda *a, rc=rc, **k: subprocess.CompletedProcess(
+            a[0] if a else [], rc, "", "")
+        outcome, route, detail = cc.deliver_to_inbox(os.environ["FM_CC_HOME"], item, "Green.")
+        print(outcome, route)
 def killed(*a, **k):
     raise subprocess.TimeoutExpired(a[0] if a else [], 120)
-for item in (status_item, hold_item):
-    subprocess.run = killed
-    outcome, route = cc.send_answer(os.environ["FM_CC_HOME"], item, "answer text")[:2]
-    print(outcome, route)
-# fm-inbox.sh publishes the note record before it wakes firstmate, so a nonzero
-# exit there cannot mean nothing was saved.
-for rc in (0, 1):
-    subprocess.run = lambda *a, rc=rc, **k: subprocess.CompletedProcess(
-        a[0] if a else [], rc, "",
-        "fm-inbox: note n-1 is saved at /h/inbox/n-1.note but firstmate was NOT woken")
-    print(cc.send_note(os.environ["FM_CC_HOME"], "a note")[0])
+subprocess.run = killed
+outcome, route, detail = cc.deliver_to_inbox(os.environ["FM_CC_HOME"], items[0], "Green.")
+print(outcome, route)
 subprocess.run = real
 PYEOF
 )
-  assert_equals "sent
-sent
-unknown
-unknown
-unknown
-sent
-failed
-failed
-unknown fm-send.sh t-1
-failed fm-captain-hold.sh answer t-1
-sent
-unknown" "$out" \
-    "the outcome or route was not taken from the route that actually ran"
-  pass "each route's outcome is decided by its own exit code alone"
+  assert_equals "sent fm-inbox.sh note
+failed fm-inbox.sh note
+failed fm-inbox.sh note
+sent fm-inbox.sh note
+failed fm-inbox.sh note
+failed fm-inbox.sh note
+sent fm-inbox.sh note
+failed fm-inbox.sh note
+failed fm-inbox.sh note
+failed fm-inbox.sh note" "$out" \
+    "an item answer must read as sent or failed only, on every source, kind and exit code"
+  pass "deliver_to_inbox only ever reports sent or failed, whatever the item or the exit code"
 }
 
 # The module header promises the expensive scan runs once per actual change
@@ -1325,14 +1342,16 @@ test_a_reply_takes_the_answer_route_when_the_task_is_still_waiting() {
   assert_contains "$resolved" '"outcome":"sent"' "the reply was not delivered"
   assert_equals "main/hold/cc-live/cc-live" "$(jq -r '.item_key // ""' <<<"$resolved")" \
     "the reply did not name the item it steers"
-  assert_contains "$resolved" 'fm-captain-hold.sh answer cc-live' \
-    "a reply about a task still waiting did not take the answer route"
+  assert_contains "$resolved" 'fm-inbox.sh note' \
+    "a reply about a task still waiting did not take the guaranteed inbox note route"
   assert_equals "$id" \
     "$(jq -r 'select(.text == "Go blue.") | .msg' "$home/data/command-center/said.jsonl" | head -1)" \
     "the reply was not recorded against the message it answered"
-  assert_contains "$(cat "$home/data/backlog.md")" 'Go blue.' \
-    "his exact words did not reach the durable record"
-  pass "a reply about a task still waiting is answered through the answer route"
+  assert_not_contains "$(cat "$home/data/backlog.md")" 'Go blue.' \
+    "a reply about a task called a decision-closing script instead of only the note route"
+  assert_contains "$(cat "$home"/state/inbox/*.note 2>/dev/null)" 'Go blue.' \
+    "his exact words never reached firstmate's own inbox"
+  pass "a reply about a task still waiting reaches firstmate's inbox as its answer"
 }
 
 test_a_reply_with_nothing_waiting_is_queued_for_firstmate() {
@@ -1626,11 +1645,10 @@ test_the_ask_user_machine_line_is_stated_plainly_and_real_questions_are_not() {
   pass "the ask-user machine line is stated plainly and real questions are shown as written"
 }
 
-# The bonus route can be gone entirely - a bare OSError, not a
-# SubprocessError - and deliver_certainly (bin/command-center.py) still owes
-# him a landed send: the guaranteed note went out through fm-inbox.sh, which
-# is untouched here, so the bonus raising must never read as "not sent".
-test_a_send_whose_bonus_route_cannot_run_at_all_still_reaches_firstmate() {
+# fm-captain-hold.sh can be entirely gone from the firstmate checkout and an
+# item answer still lands: nothing on this send path calls it any more, only
+# fm-inbox.sh note.
+test_an_item_answer_never_needs_fm_captain_hold_at_all() {
   local home fakeroot port f result resolved
   home="$TMP_ROOT/norunner"
   seed_home "$home"
@@ -1638,9 +1656,7 @@ test_a_send_whose_bonus_route_cannot_run_at_all_still_reaches_firstmate() {
   mkdir -p "$fakeroot/bin"
   for f in "$FIRSTMATE_ROOT"/bin/*; do ln -s "$f" "$fakeroot/bin/$(basename "$f")"; done
   ln -s "$FIRSTMATE_ROOT/.tasks.toml" "$fakeroot/.tasks.toml"
-  # The script that owns the bonus decision route is gone: subprocess.run
-  # raises, and that is not a SubprocessError.
-  rm -f "$fakeroot/bin/fm-captain-hold.sh"
+  rm -f "$fakeroot/bin/fm-captain-hold.sh" "$fakeroot/bin/fm-send.sh"
 
   port=$(python3 -c 'import socket;s=socket.socket();s.bind(("127.0.0.1",0));print(s.getsockname()[1]);s.close()')
   python3 "$SERVER" \
@@ -1660,12 +1676,12 @@ test_a_send_whose_bonus_route_cannot_run_at_all_still_reaches_firstmate() {
     || fail "the outcome of the send never reached the record"
   stop_server
   assert_contains "$resolved" '"outcome":"sent"' \
-    "a bonus route that cannot run at all left the item reading as not sent"
+    "an item answer failed with neither fm-captain-hold.sh nor fm-send.sh present"
   assert_not_contains "$(cat "$home/data/backlog.md")" 'Go blue.' \
-    "a bonus route that never ran was somehow recorded as having closed the decision"
+    "the send path reached a decision-closing script that should not exist here"
   assert_contains "$(cat "$home"/state/inbox/*.note 2>/dev/null)" 'Go blue.' \
-    "his words never reached firstmate's own inbox when the bonus route could not run"
-  pass "a send whose bonus route cannot run at all still reaches firstmate through the guaranteed note"
+    "his words never reached firstmate's own inbox"
+  pass "an item answer never needs fm-captain-hold.sh or fm-send.sh at all"
 }
 
 # A message the recorder never marked as a question has no answer route to rule
@@ -1840,26 +1856,30 @@ test_an_archived_message_leaves_messages_and_can_be_restored() {
   pass "archiving is durable beside the message and can be restored"
 }
 
-test_a_reply_archives_its_message_before_delivery_finishes() {
+
+# The captain: sometimes a reply is just a comment he wants to keep checking
+# on, so a reply must never remove anything from its list on its own. Only his
+# own explicit Archive click (/api/archive) does that.
+test_a_reply_never_archives_its_message() {
   local home port id body sid
-  home="$TMP_ROOT/reply-archives"
+  home="$TMP_ROOT/reply-no-archive"
   seed_home "$home"
-  id=$(say "$home" "Reply to this" "Your reply clears this conversation.") \
+  id=$(say "$home" "Reply to this" "Your reply does not clear this conversation.") \
     || fail "the recorder refused the message"
   start_server "$home" || fail "the server did not start"
   port=$SERVER_PORT
   body=$(post "$port" /api/reply "$(jq -cn --arg m "$id" '{msg:$m,text:"Done."}')")
-  assert_equals true "$(printf '%s' "$body" | jq -r .archived)" \
-    "a reply did not archive its conversation with its acceptance"
+  assert_not_contains "$body" '"archived"' \
+    "a reply's acceptance still claimed an archive change"
   sid=$(printf '%s' "$body" | jq -r .sid)
   assert_contains "$(wait_outcome "$home" "$sid")" 'fm-inbox.sh note' \
     "the reply was not still delivered through its normal route"
-  assert_equals 0 "$(curl -s -m 30 "http://127.0.0.1:$port/api/messages" | jq '.messages | length')" \
-    "a replied-to message stayed in Messages"
-  assert_equals "$id" "$(curl -s -m 30 "http://127.0.0.1:$port/api/messages?archived=1" | jq -r '.messages[0].id')" \
-    "a replied-to message was not kept in Archived"
+  assert_equals "$id" "$(curl -s -m 30 "http://127.0.0.1:$port/api/messages" | jq -r '.messages[0].id')" \
+    "a replied-to message was archived out of Messages on its own"
+  assert_equals 0 "$(curl -s -m 30 "http://127.0.0.1:$port/api/messages?archived=1" | jq '.messages | length')" \
+    "a replied-to message was archived without an explicit archive click"
   stop_server
-  pass "replying archives the conversation while preserving its delivery"
+  pass "a reply never archives its message; only an explicit archive click does"
 }
 
 test_an_unchanged_message_poll_is_answered_without_the_log() {
@@ -1920,8 +1940,10 @@ test_a_search_finds_text_however_the_record_escapes_it() {
   body=$(post "$port" /api/reply "$(jq -cn --arg m "$id" '{msg:$m,text:"ship the blue one"}')")
   wait_outcome "$home" "$(jq -r .sid <<<"$body")" >/dev/null \
     || fail "the reply never reached the record"
+  # A reply never archives its message on its own any more, so it is still
+  # found in Messages, not Archived.
   body=$(curl -s -m 30 --get --data-urlencode 'q=ship the blue one' \
-    "http://127.0.0.1:$port/api/messages?archived=1")
+    "http://127.0.0.1:$port/api/messages")
   assert_equals "The palette fix" "$(printf '%s' "$body" | jq -r '.messages[0].title')" \
     "a search by the words he replied did not find the message he replied to"
 
@@ -1933,7 +1955,7 @@ test_a_search_finds_text_however_the_record_escapes_it() {
       at:"2026-01-01T00:00:00Z",text:("filler "+$i),outcome:"sent"}'
   done >> "$home/data/command-center/said.jsonl"
   body=$(curl -s -m 30 --get --data-urlencode 'q=ship the blue one' \
-    "http://127.0.0.1:$port/api/messages?archived=1")
+    "http://127.0.0.1:$port/api/messages")
   assert_equals "The palette fix" "$(printf '%s' "$body" | jq -r '.messages[0].title')" \
     "a reply stopped being searchable once newer sends pushed it back"
 
@@ -2473,6 +2495,7 @@ test_the_stop_hook_captures_in_a_primary_and_stays_inert_elsewhere() {
 trap stop_server EXIT
 
 test_only_live_captain_holds_are_carded
+test_prose_outside_a_task_section_is_never_carded_as_a_live_hold
 test_body_survives_the_record_separator
 test_a_title_keeps_a_trailing_parenthetical
 test_only_captain_kind_holds_are_his_to_answer
@@ -2491,13 +2514,13 @@ test_server_serves_the_page_and_the_records
 test_the_work_board_is_served
 test_server_refuses_bad_input_before_running_anything
 test_a_server_with_no_scan_yet_refuses_both_the_list_and_a_send
-test_answering_a_hold_records_the_captains_words_and_clears_the_item
-test_answering_held_work_releases_it_instead_of_closing_it
-test_a_held_row_with_no_kind_still_reaches_firstmate_as_a_note
+test_answering_a_hold_records_the_captains_words_and_reaches_the_inbox
+test_answering_held_work_reaches_the_inbox_the_same_way
+test_a_held_row_with_no_kind_still_names_itself_in_the_note
 test_a_note_of_just_a_dash_is_queued_and_never_hangs_the_server
 test_a_send_whose_words_cannot_be_recorded_is_refused
 test_an_unreadable_log_is_reported_not_shown_as_empty
-test_the_send_outcome_is_decided_by_the_exit_code_alone
+test_deliver_to_inbox_only_ever_reports_sent_or_failed
 test_concurrent_polls_produce_one_scan
 test_the_pages_decision_rules_hold
 test_the_server_serves_the_pages_decision_rules
@@ -2526,12 +2549,12 @@ test_the_click_returns_before_the_command_finishes
 test_a_failed_read_is_never_cached_as_the_state_of_the_log
 test_the_recorder_takes_a_body_that_looks_like_a_flag
 test_the_ask_user_machine_line_is_stated_plainly_and_real_questions_are_not
-test_a_send_whose_bonus_route_cannot_run_at_all_still_reaches_firstmate
+test_an_item_answer_never_needs_fm_captain_hold_at_all
 test_a_reply_that_is_not_a_question_is_sent_even_with_no_scan
 test_every_captured_message_is_reachable_without_serving_them_all
 test_a_message_far_behind_the_window_is_served_by_id
 test_an_archived_message_leaves_messages_and_can_be_restored
-test_a_reply_archives_its_message_before_delivery_finishes
+test_a_reply_never_archives_its_message
 test_an_unchanged_message_poll_is_answered_without_the_log
 test_a_search_finds_text_however_the_record_escapes_it
 test_an_unreadable_message_log_is_reported_not_shown_as_empty

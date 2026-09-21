@@ -134,12 +134,23 @@ backlog_path() {  # <home>
 # keeps its hold annotation after the answer landed, and carding it again would
 # put every settled decision back in front of him.
 #
+# ONLY UNDER A SECTION TASKS-AXI ITSELF WRITES OPEN TASKS UNDER. `## Queued`
+# and `## In flight` are the only two headings tasks-axi ever puts a `- [ ]`
+# row beneath; nothing else in this file is a task, however task-shaped a line
+# looks. A hand-written or reported narrative section - "## Captain rulings
+# 2026-08-12 on the manufacturing-study decisions", say - can quote an old
+# decision in exactly this bullet shape without being one, and answering it
+# was never possible: there was no row a backend command could ever act on.
+#
 # The body has newlines and the record is TSV, so newlines travel as US (\037)
 # and the caller restores them. A record field that can contain the record
 # separator is the classic way a parser quietly eats the next row.
 held_tasks() {  # <backlog-file>
   [ -f "$1" ] && [ -r "$1" ] || return 0
   awk '
+    # Before the first heading a real tasks-axi file has none of its own yet,
+    # so bullets there are read as tasks, same as always.
+    BEGIN { insection = 1 }
     function flush(   b) {
       if (id == "") return
       # Only hold-kind "captain", exactly. An ABSENT hold kind does not mean
@@ -157,6 +168,16 @@ held_tasks() {  # <backlog-file>
       id = ""; title = ""; repo = ""; kind = ""; since = ""
       hold = ""; holdkind = ""; until = ""; body = ""
     }
+    # Only a real `##` section heading ever changes insection: the file title
+    # line ("# Backlog") and any deeper subheading are flushed like any other
+    # heading but leave section membership exactly as it was.
+    /^## / {
+      flush()
+      insection = ($0 == "## Queued" || $0 == "## In flight")
+      next
+    }
+    /^#/ { flush(); next }
+    !insection { next }   # a narrative or otherwise foreign section: no task here
     /^- \[[ x]\] / {
       flush()
       if ($0 !~ /^- \[ \] /) next          # closed row: never a live captain call
@@ -182,7 +203,6 @@ held_tasks() {  # <backlog-file>
       }
       next
     }
-    /^#/ { flush(); next }
     /^  / { if (id != "") { l = $0; sub(/^  /, "", l); body = body l "\n" } ; next }
     /^$/ { if (id != "") body = body "\n"; next }
     { flush() }
