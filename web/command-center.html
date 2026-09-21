@@ -1,0 +1,1857 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Firstmate Command Center</title>
+<style>
+  :root{
+    --bg:#f6f7f9; --panel:#ffffff; --ink:#15191f; --dim:#5d6672; --faint:#8a929e;
+    --line:#e2e6ec; --line2:#eef1f5;
+    --accent:#1f5fd0; --accent-soft:#eaf1fd;
+    --warn:#b45309; --warn-soft:#fdf3e3; --warn-line:#f0dcb8;
+    --ok:#177245; --ok-soft:#e7f5ec; --ok-line:#c6e4d2;
+    --hot:#b3261e; --hot-soft:#fdecea; --hot-line:#f3cdc8;
+    --merge:#6b34b8; --merge-soft:#f2ebfc;
+    --grey:#6b7480; --grey-soft:#eef1f5;
+    --radius:9px;
+    --mono:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+  }
+  *{box-sizing:border-box;min-width:0}
+  html,body{height:100%}
+  body{
+    margin:0; background:var(--bg); color:var(--ink);
+    font:15px/1.55 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
+    -webkit-font-smoothing:antialiased;
+  }
+  button,select{font:inherit;color:inherit}
+
+  .shell{display:grid;grid-template-columns:minmax(0,392px) minmax(0,1fr);height:100vh}
+  @media (max-width:900px){
+    .shell{grid-template-columns:minmax(0,1fr);grid-template-rows:auto minmax(0,1fr)}
+    .rail{max-height:46vh}
+  }
+
+  /* ---------- left rail ---------- */
+  .rail{border-right:1px solid var(--line);background:var(--panel);display:flex;flex-direction:column;overflow:hidden}
+  .rail-head{padding:13px 16px 10px;border-bottom:1px solid var(--line2)}
+  .brand{display:flex;align-items:center;gap:9px;margin-bottom:10px}
+  .brand h1{font-size:15px;margin:0;letter-spacing:-.01em;flex:1}
+  .proto{font-size:10.5px;text-transform:uppercase;letter-spacing:.09em;color:var(--faint);
+    border:1px solid var(--line);border-radius:20px;padding:1px 7px}
+  .live{display:flex;align-items:center;gap:5px;font-size:11.5px;color:var(--ok);font-weight:600}
+  .live .beat{width:7px;height:7px;border-radius:50%;background:var(--ok);animation:beat 2s ease-in-out infinite}
+  @keyframes beat{0%,100%{opacity:1;transform:scale(1)}50%{opacity:.35;transform:scale(.8)}}
+
+  .watcher{display:flex;align-items:center;gap:6px;font-size:11.5px;color:var(--dim);
+    background:var(--ok-soft);border:1px solid var(--ok-line);border-radius:6px;
+    padding:5px 9px;margin-bottom:8px}
+  .watcher .beat{width:6px;height:6px;border-radius:50%;background:var(--ok);flex:none}
+  .watcher b{color:var(--ok)}
+
+  .addr{display:flex;align-items:center;gap:7px;font-size:11.5px;color:var(--dim);
+    background:var(--line2);border-radius:6px;padding:5px 9px;margin-bottom:9px}
+  .addr code{font-family:var(--mono);font-size:11.5px;color:var(--ink);font-weight:600}
+  .addr .tag{margin-left:auto;font-size:10px;text-transform:uppercase;letter-spacing:.07em;
+    color:var(--faint);flex:none}
+
+  .search{position:relative;margin-bottom:9px}
+  .search input{width:100%;border:1px solid var(--line);border-radius:7px;
+    padding:6px 26px 6px 28px;font:inherit;font-size:13px;background:#fcfdfe}
+  .search input:focus{outline:2px solid var(--accent);outline-offset:-1px;background:#fff}
+  .search .mag{position:absolute;left:9px;top:50%;transform:translateY(-50%);
+    color:var(--faint);font-size:12px;pointer-events:none}
+  .search .clr{position:absolute;right:5px;top:50%;transform:translateY(-50%);
+    border:0;background:transparent;color:var(--faint);cursor:pointer;font-size:14px;padding:2px 5px}
+  .hits{font-size:11px;color:var(--faint);margin:-4px 0 8px 2px}
+
+  /* ---------- my words ---------- */
+  .word{width:100%;text-align:left;border:0;background:transparent;cursor:pointer;display:block;
+    padding:10px 16px 11px;border-left:3px solid transparent}
+  .word:hover{background:#fafbfc}
+  .word-top{display:flex;align-items:center;gap:7px;margin-bottom:4px}
+  .word-when{font-size:11.5px;color:var(--faint);font-variant-numeric:tabular-nums;flex:none}
+  .word-where{font-size:11.5px;color:var(--dim);flex:1;overflow:hidden;
+    text-overflow:ellipsis;white-space:nowrap}
+  .word-text{font-size:13px;background:var(--accent-soft);border:1px solid #cfdefa;
+    border-radius:7px;padding:8px 10px;line-height:1.45}
+  .word-text.draftbox{background:var(--warn-soft);border-color:var(--warn-line)}
+  .word-text.notebox{background:var(--grey-soft);border-color:var(--line)}
+  .word-out{font-size:11.5px;color:var(--dim);margin-top:5px;padding-left:2px}
+  mark{background:#fff2a8;color:inherit;border-radius:2px;padding:0 1px}
+
+  .tabs{display:flex;gap:4px;margin-bottom:9px}
+  .tab{border:0;background:transparent;border-radius:6px;padding:5px 10px;font-size:13px;
+    color:var(--dim);cursor:pointer}
+  .tab:hover{background:var(--line2)}
+  .tab[aria-selected="true"]{background:var(--ink);color:#fff}
+  .tab .n{opacity:.65;margin-left:5px;font-variant-numeric:tabular-nums}
+
+  .groupbar{display:flex;align-items:center;gap:7px;margin-bottom:9px}
+  .groupbar label{font-size:11.5px;color:var(--faint);text-transform:uppercase;letter-spacing:.07em;flex:none}
+  .groupbar select{flex:1;border:1px solid var(--line);border-radius:6px;padding:4px 7px;
+    font-size:12.5px;background:#fcfdfe;color:var(--ink)}
+
+  .homes{display:flex;flex-wrap:wrap;gap:5px}
+  .chip{border:1px solid var(--line);background:transparent;border-radius:20px;padding:2.5px 9px;
+    font-size:12px;color:var(--dim);cursor:pointer;display:flex;align-items:center;gap:6px}
+  .chip:hover{border-color:#c8cfd9}
+  .chip[aria-pressed="true"]{background:var(--accent-soft);border-color:#bcd3f6;color:var(--accent)}
+  .chip .dot{width:7px;height:7px;border-radius:50%}
+  .chip .n{font-variant-numeric:tabular-nums;opacity:.7}
+
+  .list{overflow-y:auto;flex:1;padding:4px 0 30px}
+  .grp{position:sticky;top:0;background:linear-gradient(#fff 76%,rgba(255,255,255,0));
+    padding:13px 16px 6px;z-index:1}
+  .grp .g1{font-size:11.5px;font-weight:700;letter-spacing:.055em;text-transform:uppercase;
+    color:var(--dim);display:flex;align-items:center;gap:7px}
+  .grp .g1 .dot{width:7px;height:7px;border-radius:50%;flex:none}
+  .grp .g1 .cnt{margin-left:auto;font-weight:600;color:var(--faint);font-variant-numeric:tabular-nums}
+  .grp .g2{font-size:11.5px;color:var(--faint);font-family:var(--mono);margin-top:2px;
+    padding-left:14px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .grp .g2.none{font-family:inherit;font-style:italic}
+
+  .item{width:100%;text-align:left;border:0;background:transparent;cursor:pointer;
+    display:block;padding:9px 16px 10px;border-left:3px solid transparent}
+  .item:hover{background:#fafbfc}
+  .item[aria-current="true"]{background:var(--accent-soft);border-left-color:var(--accent)}
+  .item.answered{opacity:.6}
+  .item.answered:hover{opacity:.85}
+  .item.fresh{animation:arrive 1.6s ease-out}
+  @keyframes arrive{0%{background:#fff6d8}70%{background:#fffcf0}100%{background:transparent}}
+  .item-top{display:flex;align-items:center;gap:7px;margin-bottom:3px}
+  .lamp{width:8px;height:8px;border-radius:50%;flex:none}
+  .lamp.busy{background:var(--ok)}
+  .lamp.idle{background:var(--accent)}
+  .lamp.unknown{background:#c3c9d2;box-shadow:inset 0 0 0 1.5px #aeb5bf;background:transparent}
+  .lamp.dead{background:var(--hot)}
+  .lamp.none{background:var(--line)}
+  .item-title{font-size:13.5px;font-weight:600;letter-spacing:-.005em;flex:1;
+    overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .item.answered .item-title{font-weight:500}
+  .age{font-size:11.5px;color:var(--faint);font-variant-numeric:tabular-nums;flex:none}
+  .age.old{color:var(--hot);font-weight:600}
+  .item-sub{font-size:11.5px;color:var(--dim);display:flex;align-items:center;gap:6px;
+    padding-left:15px;overflow:hidden;white-space:nowrap;text-overflow:ellipsis}
+  .src{display:inline-flex;align-items:center;gap:5px;flex:none}
+  .src .dot{width:6px;height:6px;border-radius:50%}
+  .sep{color:#d6dbe2;flex:none}
+  .mono{font-family:var(--mono);font-size:11px}
+  .kind{font-size:10px;text-transform:uppercase;letter-spacing:.06em;
+    border-radius:4px;padding:1px 5px;flex:none;font-weight:700}
+  .k-decision{background:var(--accent-soft);color:var(--accent)}
+  .k-blocker{background:var(--hot-soft);color:var(--hot)}
+  .k-merge{background:var(--merge-soft);color:var(--merge)}
+  .k-credential{background:var(--warn-soft);color:var(--warn)}
+  .flag{font-size:10px;font-weight:700;letter-spacing:.05em;text-transform:uppercase;
+    border-radius:4px;padding:1px 5px;flex:none}
+  .f-stuck{background:var(--hot-soft);color:var(--hot)}
+  .f-sent{background:var(--ok-soft);color:var(--ok)}
+  .empty{padding:34px 20px;text-align:center;color:var(--faint);font-size:13px}
+  .older{display:block;width:100%;margin:6px 0 2px;padding:9px 12px;border:1px dashed var(--line);
+    border-radius:8px;background:transparent;color:var(--faint);font:inherit;font-size:12px;cursor:pointer}
+  .older:hover{color:var(--ink);border-style:solid}
+  .archive-note{margin:8px 16px 4px;padding:9px 11px;background:var(--line2);border-radius:7px;
+    font-size:11.5px;color:var(--dim);line-height:1.45}
+
+  .rail-foot{border-top:1px solid var(--line2);padding:9px 16px;background:#fbfcfd}
+  .notebtn{width:100%;border:1px dashed var(--line);background:#fff;border-radius:var(--radius);
+    padding:8px;font-size:12.5px;color:var(--dim);cursor:pointer}
+  .notebtn:hover{border-color:#c8cfd9;color:var(--ink)}
+
+  /* ---------- main pane ---------- */
+  .main{overflow-y:auto;padding:26px 30px 90px}
+  .main-inner{max-width:770px;margin:0 auto}
+  .blank{display:flex;flex-direction:column;align-items:center;justify-content:center;
+    height:100%;color:var(--faint);gap:8px;text-align:center;padding:20px}
+  .blank strong{color:var(--dim);font-weight:600;font-size:15px}
+
+  .crumbs{display:flex;align-items:center;gap:8px;flex-wrap:wrap;font-size:12.5px;
+    color:var(--dim);margin-bottom:12px}
+  h2.subject{font-size:22px;line-height:1.3;margin:0 0 14px;letter-spacing:-.02em}
+
+  .listen{display:flex;align-items:center;gap:9px;border-radius:var(--radius);
+    padding:9px 13px;margin-bottom:16px;font-size:13px;border:1px solid}
+  .listen .lamp{width:9px;height:9px}
+  .listen b{font-weight:700}
+  .listen.busy{background:var(--ok-soft);border-color:var(--ok-line);color:#14603b}
+  .listen.idle{background:var(--accent-soft);border-color:#bcd3f6;color:#17458f}
+  .listen.unknown{background:var(--grey-soft);border-color:var(--line);color:var(--dim)}
+  .listen.dead{background:var(--hot-soft);border-color:var(--hot-line);color:#8f1f18}
+  .listen.none{background:var(--grey-soft);border-color:var(--line);color:var(--dim)}
+
+  .where{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:1px;
+    background:var(--line);border:1px solid var(--line);border-radius:var(--radius);
+    overflow:hidden;margin-bottom:18px}
+  .where div{background:var(--panel);padding:9px 12px;min-width:0}
+  .where dt{font-size:10.5px;text-transform:uppercase;letter-spacing:.07em;color:var(--faint);margin-bottom:2px}
+  .where dd{margin:0;font-size:12.5px;font-family:var(--mono);word-break:break-all;line-height:1.4}
+  .where dd.na{font-family:inherit;font-style:italic;color:var(--faint)}
+
+  .body{background:var(--panel);border:1px solid var(--line);border-radius:var(--radius);
+    padding:17px 19px;margin-bottom:18px}
+  .body p{margin:0 0 11px}
+  .body p:last-child{margin-bottom:0}
+  .body code{background:var(--line2);border-radius:4px;padding:1px 5px;font-size:12.5px;
+    font-family:var(--mono);word-break:break-word}
+  .body a{color:var(--accent);word-break:break-all}
+  .body .quiet{color:var(--dim);font-size:13.5px}
+
+  /* ---------- thread ---------- */
+  .thread{margin-bottom:18px}
+  .thread h3{font-size:11.5px;text-transform:uppercase;letter-spacing:.07em;color:var(--faint);
+    margin:0 0 9px}
+  .msg{border-radius:var(--radius);padding:12px 14px;margin-bottom:9px;border:1px solid}
+  .msg.you{background:var(--accent-soft);border-color:#cfdefa;margin-left:34px}
+  .msg.them{background:var(--panel);border-color:var(--line);margin-right:34px}
+  .msg-who{font-size:11.5px;font-weight:700;color:var(--dim);margin-bottom:5px;
+    display:flex;align-items:center;gap:7px}
+  .msg-who .t{margin-left:auto;font-weight:500;color:var(--faint);font-variant-numeric:tabular-nums}
+  .msg-text{font-size:14px;white-space:pre-wrap;word-break:break-word}
+  .msg-text a{color:var(--accent);word-break:break-all}
+
+  .track{display:flex;flex-wrap:wrap;gap:6px;margin-top:10px;padding-top:9px;
+    border-top:1px solid rgba(0,0,0,.07)}
+  .step{display:inline-flex;align-items:center;gap:5px;font-size:11.5px;border-radius:20px;
+    padding:2.5px 9px;border:1px solid;font-weight:600}
+  .step .ic{font-size:11px;line-height:1}
+  .step.done{background:var(--ok-soft);border-color:var(--ok-line);color:var(--ok)}
+  .step.now{background:#fff;border-color:#bcd3f6;color:var(--accent)}
+  .step.now .ic{animation:spin 1s linear infinite;display:inline-block}
+  @keyframes spin{to{transform:rotate(360deg)}}
+  .step.wait{background:transparent;border-color:var(--line);color:#a8afb9}
+  .step.bad{background:var(--hot-soft);border-color:var(--hot-line);color:var(--hot)}
+  .step .when{font-weight:500;opacity:.75}
+  .proof{font-size:11px;color:var(--faint);font-family:var(--mono);margin-top:7px;
+    word-break:break-all}
+
+  .stuck-bar{background:var(--hot-soft);border:1px solid var(--hot-line);border-radius:var(--radius);
+    padding:11px 14px;font-size:13px;color:#8f1f18;margin-top:9px;margin-left:34px}
+  .stuck-bar b{font-weight:700}
+  .stuck-bar .sub{color:#a4443c;font-size:12px;margin-top:4px}
+
+  .ask{font-size:13px;text-transform:uppercase;letter-spacing:.07em;color:var(--faint);margin:0 0 9px}
+  .opts{display:flex;flex-direction:column;gap:8px;margin-bottom:16px}
+  .opt{display:flex;gap:11px;align-items:flex-start;text-align:left;width:100%;
+    background:var(--panel);border:1px solid var(--line);border-radius:var(--radius);
+    padding:12px 14px;cursor:pointer}
+  .opt:hover{border-color:#b9c4d2}
+  .opt[aria-pressed="true"]{border-color:var(--accent);background:var(--accent-soft);
+    box-shadow:inset 0 0 0 1px var(--accent)}
+  .radio{width:16px;height:16px;border-radius:50%;border:1.5px solid #b6bec9;flex:none;margin-top:2px}
+  .opt[aria-pressed="true"] .radio{border-color:var(--accent);border-width:5px}
+  .opt-txt{flex:1}
+  .opt-label{font-weight:600;font-size:14px;display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+  .opt-hint{font-size:12.5px;color:var(--dim);margin-top:2px}
+  .pill{font-size:10.5px;font-weight:700;letter-spacing:.05em;text-transform:uppercase;
+    background:var(--ok-soft);color:var(--ok);border-radius:4px;padding:1px 6px}
+
+  .reply{background:var(--panel);border:1px solid var(--line);border-radius:var(--radius);padding:13px 14px}
+  .reply label{display:block;font-size:12.5px;color:var(--dim);margin-bottom:7px}
+  .reply textarea{width:100%;min-height:82px;resize:vertical;border:1px solid var(--line);
+    border-radius:7px;padding:10px 11px;font:inherit;font-size:14px;background:#fcfdfe;color:var(--ink)}
+  .reply textarea:focus{outline:2px solid var(--accent);outline-offset:-1px;background:#fff}
+  .reply-foot{display:flex;align-items:center;gap:11px;margin-top:11px;flex-wrap:wrap}
+  .send{background:var(--ink);color:#fff;border:0;border-radius:7px;padding:9px 17px;
+    font-weight:600;font-size:14px;cursor:pointer}
+  .send:disabled{background:#c6ccd4;cursor:not-allowed}
+  .send-note{font-size:12px;color:var(--faint);flex:1;min-width:150px}
+  .defer{background:transparent;border:1px solid var(--line);border-radius:7px;
+    padding:8px 13px;font-size:13px;color:var(--dim);cursor:pointer}
+  .defer:hover{border-color:#c8cfd9;color:var(--ink)}
+  .draft-flag{font-size:11.5px;color:var(--warn);background:var(--warn-soft);
+    border-radius:4px;padding:1px 6px;font-weight:600}
+  .dead-warn{background:var(--hot-soft);border:1px solid var(--hot-line);border-radius:7px;
+    padding:10px 12px;font-size:12.5px;color:#8f1f18;margin-bottom:11px}
+
+  /* ---------- toast ---------- */
+  .toast{position:fixed;left:50%;bottom:26px;transform:translateX(-50%);
+    background:var(--ink);color:#fff;border-radius:9px;padding:11px 17px;font-size:13.5px;
+    box-shadow:0 10px 30px rgba(15,25,40,.25);display:flex;align-items:center;gap:11px;
+    z-index:50;max-width:min(560px,92vw)}
+  .toast button{background:#3a424e;border:0;border-radius:6px;padding:5px 11px;
+    color:#fff;font-size:12.5px;cursor:pointer;flex:none}
+
+  dialog{border:0;border-radius:12px;padding:0;width:min(560px,92vw);
+    box-shadow:0 20px 50px rgba(15,25,40,.22)}
+  dialog::backdrop{background:rgba(20,26,34,.36)}
+  .dlg{padding:20px 22px}
+  .dlg h3{margin:0 0 4px;font-size:16px}
+  .dlg p{margin:0 0 14px;font-size:13px;color:var(--dim)}
+  .dlg textarea{width:100%;min-height:110px;resize:vertical;border:1px solid var(--line);
+    border-radius:7px;padding:10px 11px;font:inherit;font-size:14px}
+  .dlg-foot{display:flex;gap:9px;justify-content:flex-end;margin-top:13px}
+</style></head>
+<body>
+
+<div class="shell">
+  <aside class="rail">
+    <div class="rail-head">
+      <div class="brand">
+        <h1>Command Center</h1>
+        <span class="live" id="live"><span class="beat"></span>Live</span>
+      </div>
+      <div id="watcher"><div class="watcher"><span class="beat"></span><span>Checking…</span></div></div>
+      <div class="search">
+        <span class="mag">⌕</span>
+        <input id="q" type="search" autocomplete="off"
+               placeholder="Search everything — messages, items, your words…">
+        <button class="clr" id="clr" hidden>×</button>
+      </div>
+      <div class="tabs" role="tablist">
+        <button class="tab" role="tab" data-tab="messages" aria-selected="true">Messages <span class="n" id="n-messages"></span></button>
+        <button class="tab" role="tab" data-tab="waiting" aria-selected="false">Waiting on you <span class="n" id="n-waiting"></span></button>
+        <button class="tab" role="tab" data-tab="words" aria-selected="false">My words <span class="n" id="n-words"></span></button>
+        <button class="tab" role="tab" data-tab="archived" aria-selected="false">Archived <span class="n" id="n-archived"></span></button>
+      </div>
+      <div class="groupbar">
+        <label for="grouping">Group by</label>
+        <select id="grouping">
+          <option value="project">Project</option>
+          <option value="worktree">Project + worktree</option>
+          <option value="branch">Project + branch</option>
+          <option value="latest">Latest first</option>
+          <option value="oldest">Oldest first</option>
+          <!-- Approved proposal section 6 names flat as its own selector entry. -->
+          <option value="none">Nothing — one flat list</option>
+        </select>
+        <!-- Approved proposal section 4: a state filter, so things are findable without scrolling. -->
+        <select id="statefilter" title="Filter by state">
+          <option value="">Waiting now</option>
+          <option value="stuck">Stuck</option>
+          <option value="sent">Sent, not acted on</option>
+          <option value="dead">Nobody listening</option>
+          <option value="deferred">Deferred</option>
+        </select>
+      </div>
+      <div class="homes" id="homes"></div>
+    </div>
+    <div class="list" id="list"></div>
+    <div class="rail-foot">
+      <button class="notebtn" id="open-note">✎&nbsp; Tell firstmate something — not an answer</button>
+    </div>
+  </aside>
+  <main class="main" id="main"></main>
+</div>
+
+<!-- Approved proposal section 3: everything the captain types is logged, a note included. -->
+<dialog id="note-dlg">
+  <form method="dialog" class="dlg">
+    <h3>Note to firstmate</h3>
+    <p>Not answering anything — a thought, an instruction, a correction. It is queued for
+       firstmate's next turn.</p>
+    <textarea id="note-text" placeholder="Stop everything on JewelTrek until I have looked at 183."></textarea>
+    <div class="dlg-foot">
+      <button class="defer" value="cancel">Cancel</button>
+      <button class="send" value="send">Queue it</button>
+    </div>
+  </form>
+</dialog>
+
+<script src="command-center-state.js"></script>
+<script>
+"use strict";
+// The rules above are a second request, so they can fail while this one does
+// not. Every decision below is made by them, so without them the page would
+// poll into a ReferenceError and sit showing an empty list and a Live beat -
+// the silent false reassurance this surface exists to end. Say it instead.
+if (typeof pollFacts !== 'function' || typeof captureBand !== 'function'){
+  document.querySelector('#live').innerHTML =
+    '<span class="lamp dead"></span>Page incomplete';
+  document.querySelector('#watcher').innerHTML =
+    '<div class="watcher" style="background:var(--hot-soft)"><span class="lamp dead"></span>' +
+    '<span><b>This page did not load completely.</b> Its decision rules ' +
+    '(command-center-state.js) are missing, so nothing here can be trusted or ' +
+    'sent. Reload; if that does not fix it, restart the command center.</span></div>';
+  throw new Error('command-center-state.js did not load');
+}
+
+// The page is a view. Every fact it shows comes from /api/items, which is
+// bin/command-center-scan.sh reading firstmate's own records; the only thing
+// the browser keeps is what is genuinely the captain's and nowhere else: an
+// unsent draft, and which items he has already looked at.
+
+// This page's own thresholds, defaulted to match firstmate's retry ladder
+// (FM_TASK_INBOX_GRACE_SECS and FM_TASK_INBOX_RING_MAX in
+// bin/fm-task-inbox-lib.sh). Nothing serves that environment to the browser, so
+// if either is overridden there, change these to match.
+const GRACE_SECS = 90, RING_MAX = 3;
+const STUCK_SECS = GRACE_SECS * RING_MAX;
+const POLL_MS = 3000;
+
+const LISTEN = {
+  busy:    { label:'Working right now',  say:'Mid-turn. It sees your answer when this turn ends.' },
+  idle:    { label:'Waiting for you',    say:'Alive and idle. Your answer arrives straight away.' },
+  unknown: { label:'Cannot tell',        say:'No trustworthy signal recently. Your answer is still saved, but nobody can promise it is being watched.' },
+  dead:    { label:'Not running',        say:'Nobody is listening. Your answer is saved and firstmate picks it up — nothing is lost, but nothing happens until it does.' },
+  none:    { label:'No worker',          say:'Nobody is working on this. It is a question held for you; firstmate acts on your answer.' },
+};
+const HOME_COLOURS = ['#1f5fd0','#177245','#6b34b8','#b45309','#b3261e'];
+
+// An unconfirmed delivery leaves a standing verdict on the item, not a line of
+// text the next poll's re-render wipes, because it forbids a resend. A plain
+// failure leaves none: nothing was delivered, so sending again is the fix.
+const SEND_VERDICT = {
+  unknown: {
+    label: 'Delivery unknown — do not resend',
+    note: '<b>Delivery could not be confirmed.</b> It may already have reached the '
+        + 'worker, so do not send it again until you know. The reason follows:',
+  },
+};
+
+const $ = s => document.querySelector(s);
+const esc = s => String(s == null ? '' : s)
+  .replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+
+const state = {
+  tab:'messages', group:'project', sfilter:'', q:'', homes:new Set(),
+  open:null, view:{homes:[],items:[]}, said:[], messages:[], archivedMessages:[], msgError:null,
+  saidDropped:0, msgEtag:null, saidEtag:null,
+  // The page holds the newest window of the log; the rest is one click away
+  // and searchable whole, and `capture` is the health of the automatic
+  // recording that fills it.
+  capture:null, more:false, archivedMore:false, found:null, archivedFound:null,
+  total:0, archivedTotal:0, openMsg:null, openNote:'', archiving:null,
+  applied:load('cc.applied',{}),
+  // A send in flight, by sid: what he typed and where he typed it. His words
+  // leave the box only when the outcome row says the send landed.
+  pending:load('cc.pending',{}), failed:load('cc.failed',{}),
+  msgRead:false, etag:null,
+  sending:false, flash:null, error:null, seen:load('cc.seen',{}), draft:load('cc.draft',{}),
+  note:load('cc.note',''), outcome:load('cc.outcome',{}), scanned:false, saidError:null,
+  offline:null, unread:null, confirmed:false, readAt:null,
+};
+
+// Browser storage, wrapped: a private window or cleared site data must degrade
+// to "no draft remembered", never to a broken page.
+function load(key, fallback){
+  try { return JSON.parse(localStorage.getItem(key)) || fallback; }
+  catch (e) { return fallback; }
+}
+function save(key, value){
+  try { localStorage.setItem(key, JSON.stringify(value)); } catch (e) { /* not fatal */ }
+}
+
+// --- honest time -------------------------------------------------------------
+// since_kind says which clock a row actually has. A row with none is never given
+// a guessed position or a made-up age; it says so instead.
+const nowSecs = () => Math.floor(Date.now() / 1000);
+const agoWords = s => s < 60 ? Math.max(0, s) + ' seconds' : Math.round(s / 60) + ' minutes';
+// Records stay UTC; every time this page SHOWS is his own clock, because that
+// is the clock he reasons against. Half a page in each is worse than either.
+const localTime = iso => {
+  const t = Date.parse(iso || '');
+  return isNaN(t) ? '' : new Date(t).toLocaleString();
+};
+function ageLabel(it){
+  if (!it.since_epoch) return 'no recorded time';
+  const s = Math.max(0, nowSecs() - it.since_epoch);
+  if (s < 3600) return Math.max(1, Math.round(s/60)) + 'm';
+  if (s < 172800) return Math.round(s/3600) + 'h';
+  const d = Math.round(s/86400);
+  return d < 14 ? d + 'd' : Math.round(d/7) + 'w';
+}
+const ageTitle = it => it.since_kind === 'created'
+  ? 'from the date the question was filed'
+  : it.since_kind === 'status-timestamp'
+    ? 'from the moment the worker opened this decision'
+    : it.since_kind === 'status-mtime'
+      ? 'from when the worker last wrote to its log — this line carries no timestamp, so this is the closest honest clock'
+      : 'this record carries no time at all';
+
+// --- derived per-item state --------------------------------------------------
+const sentUnhandled = it => (it.sent || []).filter(m => !m.handled);
+function stuckFor(it){
+  const pending = sentUnhandled(it);
+  if (!pending.length) return 0;
+  const oldest = pending.map(m => Date.parse(m.at || '') / 1000)
+                        .filter(n => !isNaN(n)).sort((a,b) => a - b)[0];
+  if (!oldest) return 0;
+  const waited = nowSecs() - oldest;
+  return waited >= STUCK_SECS ? waited : 0;
+}
+const isStuck   = it => stuckFor(it) > 0;
+const isPending = it => sentUnhandled(it).length > 0 && !isStuck(it);
+const isDeferred = it => Boolean(it.deferred_until) &&
+  /^\d{4}-\d{2}-\d{2}$/.test(it.deferred_until) &&
+  Date.parse(it.deferred_until + 'T00:00:00Z') / 1000 > nowSecs();
+// A task can be captain-held AND stopped on its own status record at once; the
+// two are answered by different commands, so home+id alone would merge them into
+// one row and one draft. itemKey comes from bin/command-center-state.js.
+const isUnread = it => !state.seen[itemKey(it)];
+// --- what firstmate SAID -----------------------------------------------------
+// bin/fm-captain-message.sh writes one record per message; this page is the
+// only place they are read back. A message carries the same project, worktree
+// and branch fields an item does, so the grouping, the ordering and the search
+// below work over both lists unchanged.
+// shapeMessage and the ordering rule come from bin/command-center-state.js.
+const msgKey = m => 'msg/' + m.id;
+const repliesTo = m => state.said.filter(r => r.msg === m.id);
+const projectOf = it => it.project || 'No project';
+const homeOf = id => state.view.homes.find(h => h.id === id) || {id, name:id};
+const homeColour = id => HOME_COLOURS[
+  Math.max(0, state.view.homes.findIndex(h => h.id === id)) % HOME_COLOURS.length];
+
+// The page holds the newest window and whatever older he has asked for; the log
+// itself keeps everything, and ONE search reads it - the server's, over the
+// whole log. A second matcher over the loaded rows would answer a different
+// question with the same box.
+// What the open key names: the rows the page holds, the rows a search served,
+// or - once he has opened it - the message itself, which stays open however the
+// search around it changes.
+function openedMessage(){
+  const find = rows => (rows || []).find(x => msgKey(x) === state.open);
+  return find(state.messages) || find(state.archivedMessages)
+    || find(state.found && state.found.rows) || find(state.archivedFound && state.archivedFound.rows)
+    || (state.openMsg && msgKey(state.openMsg) === state.open ? state.openMsg : null);
+}
+
+function visibleMessages(){
+  // The home chips and the state filter both name facts only a scanned ITEM
+  // has, so neither is applied here rather than quietly hiding messages by a
+  // rule that cannot be true of them. Until the server has answered what he is
+  // typing now, its last answer stays on screen under its own query.
+  const archived = state.tab === 'archived';
+  if (!state.q.trim()) return archived ? state.archivedMessages : state.messages;
+  const found = archived ? state.archivedFound : state.found;
+  return (found && found.rows) || [];
+}
+
+let SEARCH_SEQ = 0, SEARCH_TIMER = null;
+function searchMessages(){
+  clearTimeout(SEARCH_TIMER);
+  const q = state.q.trim();
+  const seq = ++SEARCH_SEQ;
+  if (!q){
+    if (state.tab === 'archived') state.archivedFound = null;
+    else state.found = null;
+    return;
+  }
+  const failed = detail => {
+    if (seq !== SEARCH_SEQ) return;        // he has typed on since
+    // Answered, with what happened: an unresolved search leaves the list
+    // saying it is still searching over nothing, for as long as he looks at it.
+    if (state.tab === 'archived') state.archivedFound = { q, rows: [], more: false, error: detail };
+    else state.found = { q, rows: [], more: false, error: detail };
+    renderList();
+  };
+  SEARCH_TIMER = setTimeout(async () => {
+    try {
+      const res = await fetch('/api/messages?q=' + encodeURIComponent(q)
+        + (state.tab === 'archived' ? '&archived=1' : ''));
+      if (!res.ok){ failed('the server answered ' + res.status); return; }
+      const body = await res.json();
+      if (seq !== SEARCH_SEQ) return;      // he has typed on since
+      // The hits are kept beside what the page holds, never merged into it:
+      // they come from anywhere in the log, while the held rows are one
+      // contiguous newest-first run, which is what walking back through the
+      // rest depends on. openedMessage() resolves either.
+      const found = { q, rows: (body.messages || []).map(shapeMessage), more: !!body.more };
+      if (state.tab === 'archived') state.archivedFound = found;
+      else state.found = found;
+      if (typeof body.total === 'number') {
+        if (state.tab === 'archived') state.archivedTotal = body.total;
+        else state.total = body.total;
+      }
+      renderList();
+    } catch (e) { failed(String(e.message || e)); }
+  }, 200);
+}
+
+function haystack(it){
+  return [it.title, it.detail, it.project, it.worktree, it.branch, it.repo, it.id,
+          ...(it.sent || []).map(m => m.text)]
+    .filter(Boolean).join(' ').toLowerCase();
+}
+
+// Approved proposal section 4: the named state filter, so things are findable without scrolling.
+function passesState(it){
+  switch (state.sfilter){
+    case 'stuck':    return isStuck(it);
+    case 'sent':     return isPending(it);
+    case 'dead':     return it.listen === 'dead';
+    case 'deferred': return isDeferred(it);
+    default:         return !isDeferred(it);   // deferred is out of the way by default
+  }
+}
+
+function visible(){
+  const q = state.q.trim().toLowerCase();
+  return (state.view.items || []).filter(it =>
+    (!state.homes.size || state.homes.has(it.home)) &&
+    passesState(it) && (!q || haystack(it).includes(q)));
+}
+
+// --- grouping ----------------------------------------------------------------
+// These three drop the grouping. "Latest first" and "Oldest first" order by the
+// best time each row actually has, and a row with no honest time is never given
+// a position among the dated ones: it sits in its own tail and says why.
+// 'none' is approved proposal section 6's flat entry and is genuinely unsorted -
+// the order bin/command-center-scan.sh read the records in, nothing more.
+const FLAT = new Set(['none','latest','oldest']);
+// A message is not work: a field its record does not carry was never recorded,
+// which is what the message pane says too. Only an ITEM can be unstarted.
+function groupOf(it, isMessage){
+  const p = projectOf(it);
+  if (state.group === 'project') return { key:p, g1:p, g2:undefined };
+  if (state.group === 'worktree')
+    return { key:p+'\u0000'+(it.worktree||''), g1:p, g2:it.worktree, none:!it.worktree,
+             noneLabel: isMessage ? 'Not recorded' : 'Not started — no working copy yet' };
+  return { key:p+'\u0000'+(it.branch||it.branch_state), g1:p, g2:it.branch,
+           none:!it.branch,
+           noneLabel: isMessage ? 'Not recorded'
+             : it.branch_state === 'detached'
+               ? 'Detached scratch copy — no branch'
+               : 'Not started — no branch yet' };
+}
+
+const ordered = (rows, newestDefault) =>
+  orderRows(rows, state.group, newestDefault);
+
+// --- render ------------------------------------------------------------------
+function renderHomes(){
+  $('#homes').innerHTML = (state.view.homes || []).map(h => {
+    const n = (state.view.items || []).filter(i => i.home === h.id && !isDeferred(i)).length;
+    return `<button class="chip" data-home="${esc(h.id)}" aria-pressed="${state.homes.has(h.id)}">
+      <span class="dot" style="background:${homeColour(h.id)}"></span>${esc(h.name)}<span class="n">${n}</span></button>`;
+  }).join('');
+}
+
+// STANDING RULE for every notice slot on this page: two independent persistent
+// facts never share one slot, and no notice returns early over another. Each
+// one that applies is rendered; none of them can push another off the screen.
+function renderWatcher(){
+  const notices = [];
+  const band = (tone, lamp, html) =>
+    `<div class="watcher" style="background:var(--${tone})"><span class="lamp ${lamp}"></span>
+     <span>${html}</span></div>`;
+  const homes = state.view.homes || [];
+  // Three reachability states, named by what he can DO in each. OFFLINE: the
+  // fetch failed, nothing can be sent. UNREAD: the server answers but no scan
+  // has ever published, so there is no list and it refuses sends too. ERROR: a
+  // scan failed over a list an earlier one published, so the list may be short
+  // but everything on it still answers. The last two leave the view stale, so
+  // facts derived from it are history rather than claims about now.
+  const offline = state.connected === false;
+  // Tense and read time both come from bin/command-center-state.js.
+  const { past, readAt } = tense(state, nowSecs());
+  const asOf = past
+    ? ` As at the last read${state.readAt
+        ? ', ' + esc(new Date(state.readAt * 1000).toLocaleString()) : ''}.`
+    : '';
+
+  if (offline)
+    notices.push(band('hot-soft', 'dead',
+      `<b>Cannot reach the server.</b> ${esc(state.offline || '')} Nothing can be sent
+       until it is back.`));
+  if (state.unread)
+    notices.push(band('hot-soft', 'dead',
+      `<b>The records have not been read yet.</b> ${esc(state.unread)} Nothing here can
+       be answered until they are.`));
+  if (state.error)
+    notices.push(band('hot-soft', 'dead',
+      `<b>The last read of the records failed.</b> ${esc(state.error)} This list may be
+       incomplete — what is on it can still be answered.`));
+
+  // Holds HIDDEN from him - an unsupported backend, or a backlog that is there
+  // and cannot be read. A home with no backlog file yet simply holds nothing.
+  const unread = homes.filter(h => h.backlog_readable === false);
+  if (unread.length)
+    notices.push(band('hot-soft', 'dead',
+      `<b>The backlog of ${unread.map(h => esc(h.name)).join(', ')} could not be read.</b>
+       Anything held for you there is missing from this list — this is not the whole
+       of it.${asOf}`));
+
+  const stale = homes.filter(h =>
+    !h.watcher_beat_epoch || readAt - h.watcher_beat_epoch > 300);
+  if (stale.length)
+    notices.push(band('warn-soft', 'unknown',
+      `<b>Firstmate ${past ? 'was' : 'is'} not watching ${
+        stale.map(h => esc(h.name)).join(', ')}.</b> ${offline
+        ? 'Nothing can be sent anywhere until this page can reach the server again.'
+        : 'An answer you send there is saved, but nothing will ring it until firstmate is back.'
+      }${asOf}`));
+
+  if (!homes.length){
+    // The unread band above already says this, and better; it is the same fact.
+    if (!state.unread)
+      notices.push(band('warn-soft', 'unknown',
+        `<b>No homes read yet.</b> Nothing here is a statement about firstmate's health.`));
+  } else {
+    // Named per home with its own age: the healthiest home's beat is not a
+    // figure for the fleet, and this band can now sit beside a stale one.
+    const fresh = homes.filter(h => !stale.includes(h));
+    if (fresh.length)
+      notices.push(`<div class="watcher"${past ? ' style="background:var(--warn-soft)"' : ''}>
+        <span class="${past ? 'lamp unknown' : 'beat'}"></span><span><b>Firstmate ${
+          past ? 'was' : 'is'} watching ${fresh.map(h =>
+          esc(h.name) + ' (heard ' + agoWords(readAt - h.watcher_beat_epoch) + ' ago)'
+        ).join(', ')}.</b>${asOf}</span></div>`);
+  }
+  $('#watcher').innerHTML = notices.join('');
+}
+
+function itemRow(it){
+  const bits = [];
+  if (state.group !== 'project' || FLAT.has(state.group))
+    bits.push(`<span>${esc(projectOf(it))}</span>`);
+  if (it.branch && state.group !== 'branch') bits.push(`<span class="mono">${esc(it.branch)}</span>`);
+  else if (it.branch_state === 'detached' && state.group !== 'branch') bits.push('<span>detached</span>');
+  let flag = '';
+  if (state.failed[itemKey(it)]) flag = '<span class="flag f-stuck">not sent</span>';
+  else if (isStuck(it))   flag = '<span class="flag f-stuck">stuck</span>';
+  else if (isPending(it)) flag = '<span class="flag f-sent">sent</span>';
+  else if (isDeferred(it)) flag = `<span class="flag f-sent">until ${esc(it.deferred_until)}</span>`;
+  const old = it.since_epoch && (nowSecs() - it.since_epoch) > 86400;
+  return `<button class="item ${isUnread(it) ? '' : 'answered'} ${state.flash === itemKey(it) ? 'fresh' : ''}"
+      data-key="${esc(itemKey(it))}" aria-current="${state.open === itemKey(it)}">
+    <span class="item-top">
+      <span class="lamp ${esc(it.listen)}" title="${esc((LISTEN[it.listen]||LISTEN.unknown).label)}"></span>
+      <span class="item-title">${esc(it.title)}</span>${flag}
+      <span class="age ${old ? 'old' : ''}" title="${esc(ageTitle(it))}">${ageLabel(it)}</span>
+    </span>
+    <span class="item-sub">
+      <span class="src"><span class="dot" style="background:${homeColour(it.home)}"></span>${esc(homeOf(it.home).name)}</span>
+      ${bits.map(b => `<span class="sep">·</span>${b}`).join('')}
+      <span class="sep">·</span><span class="kind k-${it.source === 'hold' ? 'decision' : 'blocker'}">${it.source === 'hold' ? 'decision' : esc(it.status_verb || 'blocked')}</span>
+    </span>
+  </button>`;
+}
+
+// Approved proposal sections 3 and 4: the archive and My words are where a
+// closure can honestly be shown - the server wrote this line as part of the very
+// act that closed the decision, so nothing here is inferred.
+function wordOutcome(r){
+  if (r.kind === 'draft') return 'Not sent. Kept here so it is not lost.';
+  // sendState comes from bin/command-center-state.js: a row still reading
+  // `sending` that the page has already given up on is not a send on its way.
+  switch (sendState(r, state.pending)){
+    case 'given-up':
+      return 'Given up on. Nothing ever reported what became of it, so it may or '
+           + 'may not have arrived';
+    // Written down and on its way. The command has not answered yet, so
+    // nothing is claimed about delivery until it does.
+    case 'sending': return 'Recorded here. Going out now — the outcome appears when the command answers';
+    // Both routes close the decision they answer; a held WORK item is the one
+    // case that is released instead, and the record says which act ran.
+    case 'sent':
+      if (r.kind !== 'answer') return 'Delivered through ' + esc(r.route);
+      return 'Delivered through ' + esc(r.route) + (r.mode === 'release'
+        ? ' — the hold lifted, so the work resumes'
+        : ' — the decision closed');
+    case 'unknown':
+      return 'Delivery unknown — it may already have arrived: ' + esc(r.detail || '');
+    default: return 'Not delivered: ' + esc(r.detail || '');
+  }
+}
+
+function renderWords(){
+  const q = state.q.trim().toLowerCase();
+  // His words stay in the box while a send is in flight, and after one the page
+  // gave up on, so those words are NOT an unsent draft: the record's own row
+  // already says what became of them. spokenFor comes from
+  // bin/command-center-state.js and owns that, for this list and its count.
+  const drafts = Object.entries(state.draft)
+    .filter(([key, t]) => t && t.trim() && !spokenFor(state.pending, key, t))
+    .map(([key, text]) => ({ kind:'draft', at:null, text, key }));
+  const rows = drafts.concat(state.said)
+    .filter(r => !q || String(r.text || '').toLowerCase().includes(q));
+  const head = `<div class="archive-note">What you typed and where it went, as far as this
+    log got it. <strong>Firstmate keeps an answer that closes a decision, and drops the
+    rest</strong> — a steer goes with the task's inbox at cleanup, and a draft was never
+    recorded at all — so for those this log is the only copy.</div>`;
+  // Not readable and nothing there are different states and must read differently.
+  const note = state.saidError
+    ? `<div class="archive-note" style="background:var(--warn-soft)"><b>The record could
+       not be read.</b> ${esc(state.saidError)} Anything below is only what this browser
+       still holds.</div>`
+    : state.saidDropped
+    ? `<div class="archive-note" style="background:var(--warn-soft)"><b>This list is
+       shortened.</b> ${state.saidDropped} older entr${state.saidDropped === 1 ? 'y is' : 'ies are'}
+       not shown. All of them are still in
+       <span class="mono">data/command-center/said.jsonl</span>.</div>` : '';
+  if (!rows.length){
+    $('#list').innerHTML = head + note + `<div class="empty">${
+      state.saidError ? 'The record could not be read.' : 'Nothing yet.'}</div>`;
+    return;
+  }
+  $('#list').innerHTML = head + note + rows.map(r => {
+    const draft = r.kind === 'draft';
+    const item = (state.view.items || []).find(i => itemKey(i) === (r.item_key || r.key));
+    // An unsent reply's key names a MESSAGE, which is not a scanned item, so it
+    // is resolved where messages live or the row would have no name at all.
+    const msg = state.messages.find(m => msgKey(m) === r.key);
+    const where = r.msg ? 'Reply to “' + esc(r.title || 'a message') + '”'
+      : msg ? 'Reply to “' + esc(msg.title) + '”'
+      : item ? esc(item.title)
+      : r.kind === 'note' ? 'Note to firstmate — not about one item'
+      : esc(r.title || r.item || '—');
+    const out = wordOutcome(r);
+    return `<button class="word" data-key="${esc(r.msg ? 'msg/' + r.msg
+      : (r.item_key || r.key || ''))}">
+      <span class="word-top">
+        <span class="word-when">${esc(draft ? 'unsent' : localTime(r.at))}</span>
+        <span class="word-where">${where}</span>
+        ${draft ? '<span class="flag f-stuck">unsent draft</span>'
+                : r.kind === 'note' ? '<span class="kind k-decision">note</span>' : ''}
+      </span>
+      <span class="word-text ${draft ? 'draftbox'
+        : r.kind === 'note' ? 'notebox' : ''}">${esc(r.text)}</span>
+      <span class="word-out">${out}</span>
+    </button>`;
+  }).join('');
+}
+
+// Nothing in either list is drawn from a draft except the unsent-draft row on
+// My words, so a keystroke updates the count and that one list - never a sort
+// and a full repaint of the message log per character.
+// Exactly the rows My words shows: a draft the record already speaks for is
+// not counted a second time.
+function draftCount(){
+  return state.said.length +
+    Object.entries(state.draft)
+      .filter(([k, t]) => t && t.trim() && !spokenFor(state.pending, k, t)).length;
+}
+
+function draftTyped(){
+  $('#n-words').textContent = draftCount();
+  if (state.tab === 'words') renderWords();
+}
+
+function renderList(){
+  const items = state.view.items || [];
+  $('#n-messages').textContent = Math.max(state.total, state.messages.length);
+  $('#n-archived').textContent = Math.max(state.archivedTotal, state.archivedMessages.length);
+  $('#n-waiting').textContent = items.filter(i => !isDeferred(i)).length;
+  $('#n-words').textContent = draftCount();
+  document.querySelectorAll('.tab').forEach(t =>
+    t.setAttribute('aria-selected', String(t.dataset.tab === state.tab)));
+  $('#clr').hidden = !state.q;
+  // Both of these narrow by facts only a scanned item has.
+  $('#statefilter').disabled = state.tab !== 'waiting';
+  $('#homes').hidden = state.tab !== 'waiting';
+  renderHomes(); renderWatcher();
+  if (state.tab === 'words'){ renderWords(); return; }
+  if (state.tab === 'messages'){ renderMessages(); return; }
+  if (state.tab === 'archived'){ renderMessages(true); return; }
+
+  const rows = ordered(visible());
+  const empty = state.q || state.sfilter ? 'Nothing matches.'
+    : !state.scanned ? 'The records have not been read yet.'
+    : 'Nothing is waiting on you.<br>Firstmate is getting on with it.';
+  $('#list').innerHTML = rowsHtml(rows, itemRow, empty);
+}
+
+// Messages are the default list and the reason this page exists: everything
+// firstmate said to him, newest first - the newest window of it, with the rest
+// of the log one click away and searchable whole. The window arrives
+// newest first (bin/command-center.py), so the grouped views are newest first
+// without sorting anything; Latest and Oldest order explicitly as before.
+function renderMessages(archived){
+  const held = archived ? state.archivedMessages : state.messages;
+  const more = archived ? state.archivedMore : state.more;
+  const total = archived ? state.archivedTotal : state.total;
+  const found = archived ? state.archivedFound : state.found;
+  const rows = ordered(visibleMessages(), true);
+  let note = state.msgError
+    ? `<div class="archive-note" style="background:var(--warn-soft)"><b>What firstmate
+       said to you could not be read.</b> ${esc(state.msgError)} This is not the whole
+       of it.</div>` : '';
+  // Capture health is its own fact and gets its own band (captureBand in
+  // bin/command-center-state.js): a broken capture must never look like a
+  // short conversation.
+  const cap = state.msgRead ? captureBand(state.capture) : null;
+  if (cap) note += `<div class="archive-note" style="background:var(--warn-soft)">${esc(cap)}</div>`;
+  const asked = state.q.trim();
+  const answered = found ? found.q : '';
+  const failed = asked && found && answered === asked && found.error;
+  const empty = asked
+    ? (failed ? 'The search could not be run: ' + esc(found.error)
+              + ' — it runs again as you type.'
+       : answered === asked ? 'Nothing matches.' : 'Searching the log…')
+    : state.msgError ? 'The record could not be read.'
+    : !state.msgRead ? 'The record has not been read yet.'
+    : archived ? 'Nothing archived yet.' : 'Firstmate has not said anything to you yet.';
+  // Nothing is dropped: the rest of the log is one click away, and a search
+  // reaches all of it however far back it is - saying so where it found more
+  // than it is showing.
+  const searching = asked && found && answered === asked && !failed;
+  const older = searching
+    ? (found.more ? `<div class="hits">These are the newest matches —
+        narrow the search to reach older ones.</div>` : '')
+    : (more ? `<button class="older" id="older">Show older messages —
+        ${held.length} of ${Math.max(total, held.length)} loaded,
+        the rest are in the log</button>` : '');
+  $('#list').innerHTML = note
+    + rowsHtml(rows, messageRow, empty, true, asked ? answered : '') + older;
+}
+
+// The rest of the log, a window at a time, oldest end of what is loaded first.
+async function loadOlder(){
+  const archived = state.tab === 'archived';
+  const held = archived ? state.archivedMessages : state.messages;
+  const oldest = held[held.length - 1];
+  if (!oldest) return;
+  try {
+    const res = await fetch('/api/messages?before=' + encodeURIComponent(oldest.id)
+      + (archived ? '&archived=1' : ''));
+    if (!res.ok) return;
+    const body = await res.json();
+    // This page was read from the oldest row the list holds, so it continues
+    // that run rather than being merged against it.
+    const have = new Set(held.map(m => m.id));
+    const next = held.concat((body.messages || []).map(shapeMessage).filter(m => !have.has(m.id)));
+    if (archived) { state.archivedMessages = next; state.archivedMore = !!body.more; }
+    else { state.messages = next; state.more = !!body.more; }
+    if (typeof body.total === 'number') {
+      if (archived) state.archivedTotal = body.total;
+      else state.total = body.total;
+    }
+    renderList();
+  } catch (e) { /* the list he has still stands */ }
+}
+
+// One list renderer for both, so the grouping, the flat views and the
+// no-recorded-time tail cannot drift apart between them.
+function rowsHtml(rows, rowFn, emptyText, isMessage, label){
+  const q = label === undefined ? state.q : label;
+  let head = '';
+  if (q || (state.sfilter && state.tab === 'waiting'))
+    head = `<div class="hits">${rows.length} match${rows.length === 1 ? '' : 'es'}${
+      q ? ` for \u201c${esc(q)}\u201d` : ''}</div>`;
+  if (!rows.length) return head + `<div class="empty">${emptyText}</div>`;
+  if (FLAT.has(state.group)){
+    const undatedCount = rows.filter(r => !r.since_epoch).length;
+    // The flat list makes no ordering claim, so it owes no note about the rows
+    // that could not be ordered; the two sorted views do.
+    const note = (undatedCount && state.group !== 'none')
+      ? `<div class="hits">${undatedCount} row${undatedCount === 1 ? '' : 's'} carry no
+         recorded time and cannot be ordered — they follow at the end.</div>` : '';
+    return head + note + rows.map(rowFn).join('');
+  }
+  const buckets = new Map();
+  for (const it of rows){
+    const g = groupOf(it, isMessage);
+    if (!buckets.has(g.key)) buckets.set(g.key, {g, items:[]});
+    buckets.get(g.key).items.push(it);
+  }
+  let html = head;
+  for (const {g, items:bucket} of buckets.values()){
+    const sub = g.g2 === undefined ? ''
+      : g.none ? `<div class="g2 none">${esc(g.noneLabel)}</div>`
+               : `<div class="g2">${esc(g.g2)}</div>`;
+    html += `<div class="grp"><div class="g1">
+      <span class="dot" style="background:${homeColour(bucket[0].home || 'main')}"></span>${esc(g.g1)}
+      <span class="cnt">${bucket.length}</span></div>${sub}</div>` +
+      bucket.map(rowFn).join('');
+  }
+  return html;
+}
+
+// His standing rule: every row names the project, the worktree and the branch.
+// A field the record does not carry says so; none of the three is ever guessed.
+function messageRow(m){
+  const replied = repliesTo(m).length;
+  const where = [
+    m.project || 'no project',
+    m.worktree ? m.worktree.replace(/^.*\//, '') : 'no worktree',
+    m.branch || 'no branch',
+  ];
+  return `<button class="item ${state.seen[msgKey(m)] ? 'answered' : ''}"
+      data-key="${esc(msgKey(m))}" aria-current="${state.open === msgKey(m)}">
+    <span class="item-top">
+      <span class="item-title">${esc(m.title)}</span>
+      ${state.failed[msgKey(m)] ? '<span class="flag f-stuck">not sent</span>'
+        : replied ? '<span class="flag f-sent">replied</span>' : ''}
+      <span class="age" title="from the time firstmate sent it">${ageLabel(m)}</span>
+    </span>
+    <span class="item-sub" title="${esc([m.project || 'no project',
+        m.worktree || 'no worktree', m.branch || 'no branch'].join(' · '))}">
+      ${where.map((w, i) => (i ? '<span class="sep">·</span>' : '') +
+        `<span class="${i ? 'mono' : ''}">${esc(w)}</span>`).join('')}
+    </span>
+  </button>`;
+}
+
+function trackHtml(m){
+  const step = (cls, ic, label, when) =>
+    `<span class="step ${cls}"><span class="ic">${ic}</span>${esc(label)}${
+      when ? `<span class="when">${esc(when)}</span>` : ''}</span>`;
+  const waited = m.at ? nowSecs() - Math.floor(Date.parse(m.at) / 1000) : 0;
+  const stuck = !m.handled && waited >= STUCK_SECS;
+  let html = step('done', '✓', 'Delivered', localTime(m.at));
+  html += m.handled ? step('done', '✓', 'Picked up', '')
+        : stuck     ? step('bad', '!', 'Not picked up', '')
+                    : step('wait', '○', 'Not picked up yet', '');
+  // An item is listed only while its decision is still OPEN, so closure cannot
+  // be shown here at all; My words carries it (approved proposal sections 3, 4).
+  return `<div class="track">${html}</div><div class="proof">record ${esc(m.seq)}.msg ${
+    m.handled ? '→ handled/' + esc(m.seq) + '.msg — the worker acknowledged it'
+              : '· still in the inbox, not in handled/'}</div>`;
+}
+
+function threadHtml(it){
+  if (!(it.sent || []).length) return '';
+  return `<div class="thread"><h3>What you sent</h3>` + it.sent.map(m => {
+    const waited = m.at ? nowSecs() - Math.floor(Date.parse(m.at) / 1000) : 0;
+    const stuck = !m.handled && waited >= STUCK_SECS;
+    const mins = Math.round(waited / 60);
+    return `<div class="msg you">
+        <div class="msg-who">You<span class="t">${esc(localTime(m.at))}</span></div>
+        <div class="msg-text">${esc(m.text)}</div>${trackHtml(m)}
+      </div>` + (stuck ? `<div class="stuck-bar">
+        <b>This has not been picked up for ${mins} minutes.</b>
+        <div class="sub">Firstmate rings an unread message every ${GRACE_SECS} seconds and
+          gives up after ${RING_MAX} tries, so it is now treated as stuck. Your message is
+          safe on disk; nobody has read it.</div></div>` : '');
+  }).join('') + '</div>';
+}
+
+// A message is a conversation: what firstmate said, then what he said back,
+// then the box he says the next thing in. The reply goes to the same place his
+// answer would have gone if he had been at the terminal - to the worker still
+// waiting on that task, or to firstmate itself - and the server decides which
+// from the message's own record.
+function renderMessagePane(m){
+  const key = msgKey(m);
+  const draft = state.draft[key] || '';
+  // The same verdict an answer gets, on the same route: a reply to a waiting
+  // task IS a steer, so an unconfirmed delivery forbids a second one here too.
+  const verdict = SEND_VERDICT[(state.outcome[key] || {}).outcome];
+  // Where it is about to go, by the rule the server routes by. He is told
+  // before he sends, because a reply delivered as the answer to a question he
+  // was not looking at is the worst thing this page could do.
+  const target = replyTarget(m, state.view.items);
+  const sending = isSending(key);
+  const going = (m.question && !(state.scanned && state.confirmed))
+    ? 'Where this goes cannot be told yet: the records have not been read. The server decides it from them when you send.'
+    : target.kind === 'answer'
+    ? `Answers <b>${esc(target.item.title)}</b> — the question this message asked, and
+       nothing else.`
+    : target.settled
+    ? 'Nothing is waiting on that question any more, so this goes to firstmate as a note.'
+    : m.source === 'transcript'
+    ? 'Firstmate did not record this message as a question, so this goes to firstmate as a note — never to a worker.'
+    : 'This message was not a question, so this goes to firstmate as a note — never as the answer to another decision.';
+  const replies = repliesTo(m).slice().reverse();   // the log is newest first
+  const cell = (label, value, na) =>
+    `<div><dt>${label}</dt><dd class="${value ? '' : 'na'}">${esc(value || na)}</dd></div>`;
+  const para = t => esc(t || '').split(/\n{2,}/)
+    .map(x => `<p>${x.replace(/\n/g, '<br>')}</p>`).join('');
+  const thread = replies.map(r => `<div class="msg you">
+      <div class="msg-who">You<span class="t">${esc(localTime(r.at))}</span></div>
+      <div class="msg-text">${esc(r.text)}</div>
+      <div class="proof">${wordOutcome(r)}</div>
+    </div>`).join('');
+  paintMain(key, `<div class="main-inner">
+    <div class="crumbs">
+      <span class="kind k-decision">firstmate said</span>
+      <span class="sep">·</span><span>${esc(localTime(m.at))}</span>
+    </div>
+    <h2 class="subject">${esc(m.title)}</h2>
+    <div class="where">
+      ${cell('Project', m.project, 'Not recorded')}
+      ${cell('Worktree', m.worktree, 'Not recorded')}
+      ${cell('Branch', m.branch, 'Not recorded')}
+    </div>
+    <div class="body">${para(m.text) || '<p class="quiet">No text recorded.</p>'}</div>
+    ${state.saidDropped ? `<div class="archive-note" style="background:var(--warn-soft)"><b>Your
+       own words are shortened here.</b> ${state.saidDropped} older entr${
+       state.saidDropped === 1 ? 'y is' : 'ies are'} not shown, so a reply you
+       sent long ago may be missing from the thread below.</div>` : ''}
+    ${thread ? `<div class="thread"><h3>What you said back</h3>${thread}</div>` : ''}
+    <div class="reply">
+      <label for="reply">Your reply — in your own words</label>
+      <textarea id="reply" placeholder="Type here…">${esc(draft)}</textarea>
+      <div class="reply-foot">
+        <button class="send" id="sendreply" ${
+          draft.trim() && !state.sending && !verdict && !sending ? '' : 'disabled'}>${
+          verdict ? esc(verdict.label)
+                  : sending ? 'Going out now'
+                  : state.sending ? 'Sending…' : 'Reply to firstmate'}</button>
+        ${verdict
+          ? '<button class="defer" id="sendanyway">Send anyway — this may be a second copy</button>'
+          : ''}
+        ${draft.trim() ? '<span class="draft-flag">Draft kept</span>' : ''}
+        <span class="send-note" id="sendnote">${verdict
+          ? verdict.note + ' <span class="mono">' + esc(state.outcome[key].detail || '') + '</span>'
+          : sending
+          ? 'Written down. Going out now — the outcome appears here when the command answers.'
+          : failedNote(key) || going}</span>
+      </div>
+    </div>
+    <div class="reply-foot">
+      <button class="defer" id="archive" ${state.archiving === m.id ? 'disabled' : ''}>${
+        m.archived ? 'Restore to Messages' : state.archiving === m.id ? 'Archiving…' : 'Archive'}</button>
+    </div>
+  </div>`);
+  const ta = $('#reply');
+  ta.addEventListener('input', () => {
+    state.draft[key] = ta.value;
+    save('cc.draft', state.draft);
+    $('#sendreply').disabled = !ta.value.trim() || state.sending || !!verdict || sending;
+    draftTyped();
+  });
+}
+
+function renderMain(){
+  if (String(state.open || '').startsWith('msg/')){
+    const m = openedMessage();
+    if (m){ renderMessagePane(m); return; }
+    // He clicked a message the page does not hold - his own reply to one, far
+    // behind the window. It is being read out of the log; say so rather than
+    // showing him the blank pane over a message that exists.
+    paintMain(state.open, `<div class="blank"><strong>${esc(state.openNote
+      || 'Opening that message…')}</strong></div>`);
+    return;
+  }
+  const it = (state.view.items || []).find(i => itemKey(i) === state.open);
+  if (!it){
+    paintMain('', `<div class="blank"><strong>Pick something on the left.</strong>
+      <span>Everything firstmate has said to you, newest first, with a box to reply in.<br>
+      <b>Waiting on you</b> is the queue it is still holding — questions and stopped workers.<br>
+      New things appear on their own — you never reload, and you never get a new link.</span></div>`);
+    return;
+  }
+  const L = LISTEN[it.listen] || LISTEN.unknown;
+  const detail = esc(it.detail || '').split(/\n{2,}/)
+    .map(p => `<p>${p.replace(/\n/g, '<br>')}</p>`).join('');
+  const draft = state.draft[itemKey(it)] || '';
+  const going = isSending(itemKey(it));
+  const verdict = SEND_VERDICT[(state.outcome[itemKey(it)] || {}).outcome];
+  // Approved proposal section 7 proves delivery by the steering record existing;
+  // until it does, this is the captain's own way out - he is the one who can look.
+  const anyway = verdict
+    ? '<button class="defer" id="sendanyway">Send anyway — this may be a second copy</button>'
+    : '';
+  // Derived from the durable record, not from an in-memory notice: the last
+  // thing he sent about this item and what became of it.
+  const last = state.said.find(r => r.item_key === itemKey(it));
+  const lastLine = last
+    ? `<div class="hits">You last sent “${esc(last.text)}” — ${wordOutcome(last)}.</div>`
+    : '';
+  const cell = (label, value, na) =>
+    `<div><dt>${label}</dt><dd class="${value ? '' : 'na'}">${esc(value || na)}</dd></div>`;
+  const deadWarn = it.listen === 'dead' ? `<div class="dead-warn">
+      <b>Nobody is listening to this one right now.</b> Your answer is written down and will
+      not be lost, but it sits unread until firstmate restarts the worker.</div>` : '';
+
+  paintMain(itemKey(it), `<div class="main-inner">
+    <div class="crumbs">
+      <span class="src"><span class="dot" style="background:${homeColour(it.home)}"></span>${esc(homeOf(it.home).name)}</span>
+      <span class="sep">·</span><span class="kind k-${it.source === 'hold' ? 'decision' : 'blocker'}">${it.source === 'hold' ? 'decision' : esc(it.status_verb || 'blocked')}</span>
+      <span class="sep">·</span><span title="${esc(ageTitle(it))}">waiting ${ageLabel(it)}</span>
+      ${it.deferred_until ? `<span class="sep">·</span><span>deferred to ${esc(it.deferred_until)}</span>` : ''}
+    </div>
+    <h2 class="subject">${esc(it.title)}</h2>
+    <div class="listen ${esc(it.listen)}"><span class="lamp ${esc(it.listen)}"></span>
+      <span><b>${esc(L.label)}.</b> ${esc(L.say)}</span></div>
+    <div class="where">
+      ${cell('Project', it.project, 'No registered project')}
+      ${cell('Worktree', it.worktree, 'Not started')}
+      ${cell('Branch', it.branch, it.branch_state === 'detached' ? 'Detached — no branch' : 'Not started')}
+    </div>
+    <div class="body">${detail || '<p class="quiet">No detail recorded.</p>'}</div>
+    ${lastLine}
+    ${threadHtml(it)}
+    <div class="reply">
+      ${deadWarn}
+      <label for="reply">Your answer — in your own words</label>
+      <textarea id="reply" placeholder="Type here…">${esc(draft)}</textarea>
+      <div class="reply-foot">
+        <button class="send" id="send" ${
+          draft.trim() && !state.sending && !verdict && !going ? '' : 'disabled'}>${
+          verdict ? esc(verdict.label)
+                  : going ? 'Going out now'
+                  : state.sending ? 'Sending…' : 'Send to firstmate'}</button>
+        <button class="defer" id="defer">Not now</button>
+        ${anyway}
+        ${draft.trim() ? '<span class="draft-flag">Draft kept</span>' : ''}
+        <span class="send-note" id="sendnote">${verdict
+          ? verdict.note + ' <span class="mono">' + esc(state.outcome[itemKey(it)].detail || '') + '</span>'
+          : going
+          ? 'Written down. Going out now — the outcome appears here when the command answers.'
+          : failedNote(itemKey(it))
+          || 'Goes through ' + (it.source === 'hold' ? 'the decision record'
+                                                    : 'the worker’s steering inbox') + '.'}</span>
+      </div>
+    </div>
+  </div>`);
+
+  const ta = $('#reply');
+  ta.addEventListener('input', () => {
+    state.draft[itemKey(it)] = ta.value;
+    save('cc.draft', state.draft);
+    $('#send').disabled = !ta.value.trim() || state.sending || !!verdict || going;
+    draftTyped();
+  });
+}
+
+// ONE OWNER OF THE PANE'S HTML. Whatever rebuilds it, his place survives: the
+// pane's scroll offset, and the box with its text (from cc.draft), its focus
+// and its caret. So no caller ever has to choose between showing him the truth
+// and letting him read or type - which is the choice that took his cursor on
+// one path and left the pane stale on another. #main is the scroll container
+// (.main{overflow-y:auto}), and assigning its innerHTML drops that offset to
+// the top, which mid-sentence is the page moving under him.
+//
+// Keeping his place means keeping his place in the thing he is READING, so what
+// is being painted is named rather than inferred: the same pane again restores
+// where he was, and anything else opens at its own top - clicking a message to
+// read it is what this page is for, and it may never open with its title
+// scrolled off screen.
+let painted = null;
+function paintMain(key, html){
+  const pane = $('#main');
+  const same = key === painted;
+  const where = pane.scrollTop;
+  const box = $('#reply');
+  const typing = box && document.activeElement === box
+    ? {start: box.selectionStart, end: box.selectionEnd, scroll: box.scrollTop}
+    : null;
+  pane.innerHTML = html;
+  painted = key;
+  pane.scrollTop = same ? where : 0;
+  const next = $('#reply');
+  if (!same || !typing || !next) return;
+  next.focus({preventScroll: true});
+  next.setSelectionRange(typing.start, typing.end);
+  next.scrollTop = typing.scroll;
+  // Restored to where he was, the caret can still be off screen if the rebuild
+  // changed the pane's height, and typing where he cannot see is the same
+  // complaint by another name.
+  const seen = next.getBoundingClientRect();
+  const view = pane.getBoundingClientRect();
+  if (seen.bottom > view.bottom || seen.top < view.top)
+    next.scrollIntoView({block: 'nearest'});
+}
+
+function render(){
+  renderList(); renderMain();
+  // The note box hangs off no item, so its button is the surface its outcome
+  // lands on. A transient message it is showing right now is left alone.
+  if (Date.now() > (state.noteFlash || 0))
+    $('#open-note').textContent = noteButtonLabel();
+}
+
+function open(key){
+  state.open = key;
+  // A message found in the log is held here for as long as it is open, so the
+  // pane he is reading - and the reply he is typing into it - survive the
+  // search that found it being cleared or typed past.
+  const isMsg = String(key).startsWith('msg/');
+  state.openMsg = isMsg ? openedMessage() : null;
+  state.openNote = '';
+  state.seen[key] = true; save('cc.seen', state.seen);
+  render();
+  if (isMsg && !state.openMsg) fetchMessage(key.slice(4));
+}
+
+// The log holds every message, so anything he can click on is readable - the
+// page just may not have it loaded.
+async function fetchMessage(id){
+  const key = 'msg/' + id;
+  try {
+    const res = await fetch('/api/messages?id=' + encodeURIComponent(id));
+    if (!res.ok) throw new Error('the server answered ' + res.status);
+    const body = await res.json();
+    if (state.open !== key) return;              // he has moved on
+    const m = (body.messages || [])[0];
+    if (m) state.openMsg = shapeMessage(m);
+    else state.openNote = body.error
+      ? 'That message could not be read: ' + body.error
+      : 'That message is not in the record any more.';
+  } catch (e) {
+    if (state.open !== key) return;
+    state.openNote = 'That message could not be read: ' + (e.message || e);
+  }
+  render();
+}
+
+function moveArchived(m, archived){
+  m.archived = archived;
+  state.messages = state.messages.filter(x => x.id !== m.id);
+  state.archivedMessages = state.archivedMessages.filter(x => x.id !== m.id);
+  if (archived) {
+    state.archivedMessages.unshift(m);
+    state.total = Math.max(0, state.total - 1);
+    state.archivedTotal++;
+  } else {
+    state.messages.unshift(m);
+    state.total++;
+    state.archivedTotal = Math.max(0, state.archivedTotal - 1);
+  }
+}
+
+async function archiveMessage(){
+  const m = openedMessage();
+  if (!m || state.archiving) return;
+  const archived = !m.archived;
+  state.archiving = m.id;
+  renderMain();
+  try {
+    const {ok, data} = await post('/api/archive', {msg:m.id, archived});
+    if (!ok || !data.ok) throw new Error(data.error || 'the archive record could not be written');
+    moveArchived(m, archived);
+  } catch (e) {
+    state.openNote = 'The archive change did not land: ' + (e.message || e);
+  } finally {
+    state.archiving = null;
+  }
+  render();
+}
+
+// --- talking to the server ---------------------------------------------------
+// A read that resolved well answers every reachability question at once, so
+// they are all cleared here rather than at each branch's discretion - the
+// per-branch enumeration is what kept leaving one alarm standing.
+// The rules live in bin/command-center-state.js; this applies what they decide
+// and moves the one piece of them that is a pixel rather than a fact.
+function commit(answer){
+  const before = state.connected;
+  Object.assign(state, pollFacts(answer, nowSecs()));
+  if (state.connected !== before)
+    $('#live').innerHTML = state.connected
+      ? '<span class="beat"></span>Live'
+      : '<span class="lamp dead"></span>Not connected';
+}
+
+async function poll(){
+  // A poll being IN FLIGHT says nothing about the view on screen: the last poll
+  // confirmed it, and only a RESOLVED outcome may take that back. So the verdict
+  // is committed when the answer arrives, never optimistically on the way out.
+  try {
+    const res = await fetch('/api/items', {
+      headers: state.etag ? {'If-None-Match': state.etag} : {} });
+    if (res.status === 503){
+      commit({ kind:'unread',
+               detail: (await res.json().catch(() => ({}))).error
+                 || 'the records have not been read yet' });
+      render();
+      return;
+    }
+    if (!res.ok && res.status !== 304) throw new Error('HTTP ' + res.status);
+    if (res.status === 304){
+      commit({ kind:'unchanged' });
+      renderWatcher();
+      return;
+    }
+    state.etag = res.headers.get('ETag');
+    const next = await res.json();
+    const before = new Set((state.view.items || []).map(itemKey));
+    const arrived = (next.items || []).map(itemKey).filter(k => !before.has(k));
+    commit({ kind:'body', error: next.error || null });
+    state.view = next;
+    state.scanned = true;
+    state.outcome = releaseVerdicts(state.outcome, next);
+    save('cc.outcome', state.outcome);
+    if (before.size && arrived.length === 1) state.flash = arrived[0];
+    render();
+    if (state.flash) setTimeout(() => { state.flash = null; renderList(); }, 2000);
+  } catch (err) {
+    commit({ kind:'unreachable', detail: String(err.message || err) });
+    renderWatcher();
+  }
+}
+
+// The message log is read on its own, not through /api/items: what firstmate
+// said to him is still readable when the scan of the work records is not, and
+// the page must not go blank about it because a backlog could not be parsed.
+async function loadMessages(){
+  try {
+    // The log is append-only and the capture's health travels in the same tag,
+    // so an unchanged poll costs neither side a re-read of the whole log.
+    const res = await fetch('/api/messages', {
+      headers: state.msgEtag ? {'If-None-Match': state.msgEtag} : {} });
+    if (res.status === 304){ state.msgRead = true; return false; }
+    if (!res.ok) throw new Error('HTTP ' + res.status);
+    state.msgEtag = res.headers.get('ETag');
+    const body = await res.json();
+    const before = listSignature(state.messages) + '/' + state.msgError
+      + '/' + JSON.stringify(captureBand(state.capture));
+    // Only the newest window is polled, so it is merged into what the page
+    // already holds rather than replacing it: a row that has fallen out of the
+    // window since it was read is still one of the things firstmate said.
+    const fresh = (body.messages || []).map(shapeMessage);
+    state.messages = mergeMessages(fresh, state.messages);
+    state.more = state.messages.length > fresh.length ? state.more : !!body.more;
+    state.total = typeof body.total === 'number' ? body.total : state.messages.length;
+    state.archivedTotal = typeof body.archived_total === 'number'
+      ? body.archived_total : state.archivedTotal;
+    state.msgError = body.error || null;
+    state.capture = body.capture || null;
+    state.msgRead = true;
+    return before !== listSignature(state.messages) + '/' + state.msgError
+      + '/' + JSON.stringify(captureBand(state.capture));
+  } catch (e) {
+    // Reachability already has its own band from the item poll; this only
+    // declines to claim the list is complete.
+    return false;
+  }
+}
+
+async function loadArchivedMessages(){
+  try {
+    const res = await fetch('/api/messages?archived=1');
+    if (!res.ok) return false;
+    const body = await res.json();
+    const fresh = (body.messages || []).map(shapeMessage);
+    state.archivedMessages = mergeMessages(fresh, state.archivedMessages);
+    state.archivedMore = state.archivedMessages.length > fresh.length
+      ? state.archivedMore : !!body.more;
+    state.archivedTotal = typeof body.total === 'number' ? body.total : state.archivedMessages.length;
+    return true;
+  } catch (e) { return false; }
+}
+
+// Returns {read, changed}: whether this poll actually read the record, and
+// whether what it holds moved. They are different facts - a read that threw
+// leaves the page holding an old list, which nothing may be decided on - and
+// collapsing them into one boolean is what let a real delivery be buried.
+async function loadSaid(){
+  try {
+    const res = await fetch('/api/said', {
+      headers: state.saidEtag ? {'If-None-Match': state.saidEtag} : {} });
+    if (res.status === 304) return {read: true, changed: false};
+    if (!res.ok) return {read: false, changed: false};
+    state.saidEtag = res.headers.get('ETag');
+    // logRead and foldSaid come from bin/command-center-state.js: what counts
+    // as a read, and the outcome row superseding the acceptance row.
+    const got = logRead(await res.json(), 'said');
+    if (!got.read){
+      const was = state.saidError;
+      state.saidError = got.error;
+      return {read: false, changed: was !== got.error};
+    }
+    const rows = foldSaid(got.rows);
+    // A log that does not exist yet is served with no change check, so every
+    // poll is a fresh 200: what CHANGED has to be decided here, or the pane
+    // would be rebuilt every three seconds and take his cursor out of a reply.
+    // saidDigest, not the list's head: delivery finishes behind the send, so an
+    // outcome can land on ANY row - a second send while the first is still
+    // going out pushes the first one down the list.
+    const before = saidDigest(state.said) + '/' + state.saidError + '/' + state.saidDropped;
+    state.said = rows;
+    state.saidError = null;
+    state.saidDropped = got.dropped;
+    applyOutcomes();
+    return {read: true,
+            changed: before !== saidDigest(rows) + '/' + state.saidError
+                     + '/' + state.saidDropped};
+  } catch (e) { return {read: false, changed: false}; }   // the list still works without it
+}
+
+// The outcome of a send now arrives in the record rather than in the answer to
+// the click, so the do-not-resend verdict is set from the record. Each send is
+// judged once: after he has said to send it anyway, the same row must not lock
+// it again on the next poll.
+function applyOutcomes(){
+  let changed = false;
+  for (const r of state.said){
+    if (!r.sid || r.outcome === 'sending' || state.applied[r.sid]) continue;
+    state.applied[r.sid] = true;
+    changed = true;
+    const held = state.pending[r.sid];
+    if (held){
+      delete state.pending[r.sid];
+      // wordsAfter and sendKeys come from bin/command-center-state.js: what an
+      // arrived outcome does to the words it is about, and every surface it is
+      // said on. `leave` is the box holding something he has typed since.
+      const surfaces = sendKeys(held.key, held.item);
+      const inBox = held.key === 'note' ? state.note : state.draft[held.key];
+      const fate = wordsAfter(r, inBox, held.text);
+      switch (fate){
+        case 'clear':
+          // It landed, and only now may those words leave the box.
+          if (held.key === 'note') noteText('');
+          else delete state.draft[held.key];
+          break;
+        case 'restore':
+          // It did not land, so his words go back where he typed them.
+          if (held.key === 'note') noteText(held.text);
+          else state.draft[held.key] = held.text;
+          break;
+      }
+      // What became of the send is about the send, not about the box, so it is
+      // said on every surface either way - and no surface goes on warning
+      // about a delivery the record has since confirmed. `kept` is where the
+      // words themselves are now, because on the `leave` branch the box holds
+      // something he typed since and only the record still has what he sent.
+      // `kept` is a fact about the box the READER is looking at, and only the
+      // surface he typed in has a box holding those words: for a reply that
+      // steered an item, that item's own box never held them, so there the only
+      // copy really is the record.
+      for (const k of surfaces){
+        if (r.outcome === 'sent') delete state.failed[k];
+        else state.failed[k] = {outcome: r.outcome, detail: r.detail || '',
+                                kept: k === held.key && fate !== 'leave'
+                                  ? 'box' : 'record'};
+      }
+      save('cc.draft', state.draft);
+      save('cc.pending', state.pending);
+      save('cc.failed', state.failed);
+    }
+    // A reply to a recorded question carries BOTH: the message he answered
+    // from and the item it steered. An unconfirmed delivery forbids a second
+    // one from either surface, so the verdict is held against both.
+    const keys = sendKeys(r.msg ? 'msg/' + r.msg : '', r.item_key);
+    if (!keys.length) continue;
+    const verdict = verdictFor(r.source || 'status', r.outcome, r.detail,
+                               r.sent_count || 0);
+    if (verdict) for (const k of keys) state.outcome[k] = verdict;
+  }
+  if (changed){ save('cc.applied', state.applied); save('cc.outcome', state.outcome); }
+}
+
+// The note box is a dialog that is built once, so its element is the box: a
+// note whose outcome arrives later has to reach the textarea itself, or a
+// delivered note sits there waiting to be sent a second time - and queue_note
+// mints a fresh id, so that would be a genuine duplicate.
+function noteText(text){
+  state.note = text;
+  save('cc.note', state.note);
+  const box = $('#note-text');
+  if (box) box.value = text;
+}
+
+// His words stay in the box until the outcome says they landed, so the button
+// they were sent from has to say they are already going out: otherwise a second
+// click on the same box is a second answer to the same decision.
+function isSending(key){
+  // A reply delivered on the answer route is a steer at an ITEM, so it is in
+  // flight on both surfaces: the message he typed it in and the row it steers.
+  return Object.values(state.pending)
+    .some(p => !p.released && (p.key === key || p.item === key));
+}
+
+// A send the page can never hear the end of. The server answers the click
+// before the command runs, so a process killed under the delivery thread
+// (a restart, a reboot, a SIGTERM inside the send window) leaves an acceptance
+// row with no outcome row after it. Past the window that is not a send in
+// flight any more: it is a send nobody can confirm, so the page says exactly
+// that, puts his words back, and lets him send again. It recovers by itself -
+// a box he can never type in again is the freeze that started this by another
+// road.
+const SEND_WINDOW_MS = 150000;   // bin/command-center.py SEND_TIMEOUT plus slack
+
+// mayRelease comes from bin/command-center-state.js and owns the decision.
+// The record of the send is KEPT, marked released: an outcome row that turns up
+// late still reaches applyOutcomes, which supersedes what was said here - takes
+// his words back out of the box if it landed after all, or re-states the real
+// failure if it did not.
+function reconcilePending(read){
+  let changed = false;
+  for (const [sid, held] of Object.entries(state.pending)){
+    if (!mayRelease(read, held, state.said.find(r => r.sid === sid),
+                    Date.now(), SEND_WINDOW_MS)) continue;
+    state.pending[sid] = Object.assign({}, held, {released: true});
+    // His words are put back only into a box that no longer holds any of his:
+    // whatever is in there now is his, and newer than what was sent. sameWords
+    // comes from bin/command-center-state.js and answers both questions.
+    const inBox = held.key === 'note' ? state.note : state.draft[held.key];
+    const empty = sameWords(inBox, '');
+    if (empty){
+      if (held.key === 'note') noteText(held.text);
+      else state.draft[held.key] = held.text;
+    }
+    // A reply that took the answer route was a steer at an ITEM as well, and
+    // the warning has to stand on both surfaces: otherwise the waiting list
+    // offers Send with nothing said, and the same worker is steered twice.
+    const detail = 'nothing ever reported what became of it: the page or the '
+                 + 'server stopped before the command answered';
+    const inHisBox = empty || sameWords(inBox, held.text);
+    for (const k of sendKeys(held.key, held.item))
+      state.failed[k] = {outcome: 'unknown', detail: detail,
+                         kept: k === held.key && inHisBox ? 'box' : 'record'};
+    changed = true;
+  }
+  if (changed){
+    save('cc.pending', state.pending);
+    save('cc.draft', state.draft);
+    save('cc.failed', state.failed);
+  }
+  return changed;
+}
+
+// One owner of "this send did not land", so the item pane, the reply pane and
+// the note box all say the same thing about it.
+function failedNote(key){
+  const f = state.failed[key];
+  if (!f) return '';
+  // Where the words are is a fact about this box, not about the send, so it is
+  // said as it is: still here, or kept in the record under My words because the
+  // box has moved on to something he typed since.
+  const where = f.kept === 'record'
+    ? 'What you sent is kept under <b>My words</b>.'
+    : 'Your words are still here.';
+  return f.outcome === 'unknown'
+    ? `<b>Delivery could not be confirmed.</b> ${esc(f.detail || '')} — it may already have
+       arrived, so check before sending it again. ${where}`
+    : `<b style="color:var(--hot)">Not sent.</b> ${esc(f.detail || 'the command failed')}
+       — ${where}`;
+}
+
+async function post(url, body){
+  const res = await fetch(url, {
+    method:'POST', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify(body) });
+  return { ok: res.ok, data: await res.json().catch(() => ({})) };
+}
+
+// The click never waits on a shell command. The server writes his words to the
+// durable record and answers 202 before it runs anything, so this returns as
+// soon as they are safe, he moves straight to the next item, and the outcome
+// appears on the row he answered when the command answers (applyOutcomes).
+async function sendAnswer(){
+  const it = (state.view.items || []).find(i => itemKey(i) === state.open);
+  if (!it) return;
+  const text = (state.draft[itemKey(it)] || '').trim();
+  if (!text || state.sending || isSending(itemKey(it))) return;
+  state.sending = true; renderMain();
+  let ok = false, data = {};
+  try {
+    ({ ok, data } = await post('/api/answer',
+      { home: it.home, id: it.id, source: it.source, key: it.key || '', text }));
+  } catch (err) {
+    // The request never came back, so it is not known whether the server took
+    // his words. On the SEND route the steer may already sit on the worker's
+    // inbox, so delivery is unknown and a second try is a second steer. A HOLD
+    // writes a local record with no delivery plane and fm-captain-hold.sh
+    // documents an exact retry as idempotent, so it is a plain failure.
+    data = transportFailure(it.source, String(err.message || err));
+  } finally {
+    state.sending = false;
+  }
+  if (!ok || !data.ok){
+    const verdict = verdictFor(it.source, data.outcome, data.detail,
+                               (it.sent || []).length);
+    if (verdict){
+      state.outcome[itemKey(it)] = verdict;
+      save('cc.outcome', state.outcome);
+      await loadSaid();
+      render();
+      return;
+    }
+    await loadSaid();
+    render();
+    const note = $('#sendnote');
+    if (note) note.innerHTML = `<b style="color:var(--hot)">Not sent.</b> ${
+      esc(data.error || data.detail || 'the command failed')} — your words are still here.`;
+    return;
+  }
+  // Accepted, not delivered: his words stay in the box until the outcome row
+  // says the send landed, and the item he just answered is never the one this
+  // opens next - the view has not been rescanned, so it still lists it and a
+  // second click there would really send a second answer.
+  state.pending[data.sid] = {key: itemKey(it), text, at: Date.now()};
+  delete state.failed[itemKey(it)];
+  save('cc.pending', state.pending); save('cc.failed', state.failed);
+  await loadSaid();
+  const next = ordered(visible()).find(r => itemKey(r) !== itemKey(it));
+  state.open = next ? itemKey(next) : null;
+  render();
+}
+
+async function sendReply(){
+  const m = openedMessage();
+  if (!m) return;
+  const key = msgKey(m);
+  const text = (state.draft[key] || '').trim();
+  if (!text || state.sending || isSending(key)) return;
+  state.sending = true; renderMain();
+  let ok = false, data = {};
+  try {
+    ({ ok, data } = await post('/api/reply', { msg: m.id, text }));
+  } catch (err) {
+    // The request never came back, so delivery is genuinely unknown: the steer
+    // may already sit on the worker's inbox and the note may already be saved.
+    // Which route ran is unknown too, so this takes the locking outcome - the
+    // reply that may have been delivered is not offered a second time.
+    data = transportFailure('status', String(err.message || err));
+  } finally {
+    state.sending = false;
+  }
+  if (ok && data.ok){
+    // The server says which item it is steering, if any; that is what makes
+    // this send visible on the Waiting on you row as well as here.
+    state.pending[data.sid] = {key, item: data.item_key || null, text,
+                               at: Date.now()};
+    delete state.failed[key];
+    if (data.archived) moveArchived(m, true);
+    save('cc.pending', state.pending); save('cc.failed', state.failed);
+    await loadSaid();
+    render();
+    const sent = $('#sendnote');
+    if (sent) sent.innerHTML = `Written down and going out now. The outcome appears under
+      <b>What you said back</b> when the command answers.`;
+    return;
+  }
+  await loadSaid();
+  // An unconfirmed reply forbids a resend for exactly the reason an
+  // unconfirmed answer does, so it leaves the same standing verdict rather
+  // than a line of text the next render wipes. His words stay in the box.
+  const verdict = verdictFor('status', data.outcome, data.detail,
+                             repliesTo(m).length);
+  if (verdict){
+    state.outcome[key] = verdict;
+    // The request never came back, so which route ran is unknown: if this
+    // message named a question that is still waiting, that item is the one the
+    // steer may already have reached, and it is locked here too.
+    const target = replyTarget(m, state.view.items);
+    if (target.kind === 'answer') state.outcome[itemKey(target.item)] = verdict;
+    save('cc.outcome', state.outcome);
+    render();
+    return;
+  }
+  render();
+  const note = $('#sendnote');
+  if (note) note.innerHTML = `<b style="color:var(--hot)">Not sent.</b> ${
+    esc(data.error || data.detail || 'the command failed')} — your words are still here.`;
+}
+
+// --- events ------------------------------------------------------------------
+document.addEventListener('click', async e => {
+  const tab = e.target.closest('.tab');
+  if (tab){
+    state.tab = tab.dataset.tab;
+    if (state.tab === 'messages' || state.tab === 'archived') {
+      searchMessages();
+      if (state.tab === 'archived') await loadArchivedMessages();
+    }
+    renderList(); return;
+  }
+  const chip = e.target.closest('.chip');
+  if (chip){
+    const id = chip.dataset.home;
+    state.homes.has(id) ? state.homes.delete(id) : state.homes.add(id);
+    renderList(); return;
+  }
+  const row = e.target.closest('.item, .word');
+  if (row){ if (row.dataset.key) open(row.dataset.key); return; }
+  if (e.target.id === 'send'){ await sendAnswer(); return; }
+  if (e.target.id === 'sendreply'){ await sendReply(); return; }
+  if (e.target.id === 'archive'){ await archiveMessage(); return; }
+  if (e.target.id === 'defer'){ state.open = null; render(); return; }
+  if (e.target.id === 'sendanyway'){
+    // heldWith comes from bin/command-center-state.js: one deliberate decision
+    // to send again releases that send on every surface it was held against,
+    // so he never dismisses the same send twice.
+    for (const k of heldWith(state.open, state.said, state.pending)){
+      delete state.outcome[k];
+      delete state.failed[k];
+    }
+    // And the record of a send still in flight, so the next load cannot read it
+    // as one still going out and lock the box again. A send already RELEASED
+    // locks nothing (isSending skips it), and its entry is the only record that
+    // the page gave up on it: deciding to send again releases the lock, it does
+    // not rewrite what happened before.
+    for (const [sid, held] of Object.entries(state.pending))
+      if (!held.released && (held.key === state.open || held.item === state.open))
+        delete state.pending[sid];
+    save('cc.outcome', state.outcome);
+    save('cc.pending', state.pending); save('cc.failed', state.failed);
+    renderMain(); return;
+  }
+  if (e.target.id === 'older'){ await loadOlder(); return; }
+  if (e.target.id === 'clr'){
+    state.q = ''; $('#q').value = ''; state.found = null; state.archivedFound = null; searchMessages();
+    renderList(); return;
+  }
+  if (e.target.id === 'open-note'){ $('#note-dlg').showModal(); }
+});
+
+$('#grouping').addEventListener('change', e => { state.group = e.target.value; renderList(); });
+$('#statefilter').addEventListener('change', e => { state.sfilter = e.target.value; renderList(); });
+// Only the Messages list is answered by the server; the other two tabs filter
+// what the page already holds, so typing there asks the log for nothing.
+$('#q').addEventListener('input', e => {
+  state.q = e.target.value;
+  if (state.tab === 'messages' || state.tab === 'archived') searchMessages();
+  renderList();
+});
+
+// The note box keeps what he typed the same way the answer box does: a note
+// that vanishes on a failed send is the loss this whole surface exists to end.
+// The note box hangs off no item, so its own button is where its outcome is
+// said: the record of a note that did not land is otherwise only in My words.
+function noteButtonLabel(){
+  const f = state.failed.note;
+  if (!f) return '✎  Tell firstmate something — not an answer';
+  return f.outcome === 'unknown'
+    ? '?  Your last note may already be saved — check before sending it again'
+    : '✕  Your last note was not queued: ' + (f.detail || 'the command failed');
+}
+
+$('#note-text').value = state.note;
+$('#note-text').addEventListener('input', e => {
+  state.note = e.target.value; save('cc.note', state.note);
+});
+
+$('#note-dlg').addEventListener('close', async function(){
+  const text = $('#note-text').value.trim();
+  if (this.returnValue !== 'send' || !text) return;
+  const btn = $('#open-note');
+  let ok = false, data = {};
+  try {
+    ({ ok, data } = await post('/api/note', { text }));
+  } catch (err) {
+    // As on the answer path: the request never came back, so the server may
+    // have started the note and been restarted before it could answer. A second
+    // note is a second note - queue_note mints a fresh id - so delivery here is
+    // unknown, never failed.
+    data = transportFailure('note', String(err.message || err));
+  }
+  // Acceptance is not delivery: the server has his words, and the command has
+  // not answered yet. So this claims only what it knows, his text stays in the
+  // box, and the outcome lands on this same button when it arrives. Unknown
+  // delivery never reads as a failure, because retyping it is how the captain
+  // sends it twice.
+  if (ok && data.ok){
+    state.pending[data.sid] = {key: 'note', text, at: Date.now()};
+    delete state.failed.note;
+    save('cc.pending', state.pending); save('cc.failed', state.failed);
+    btn.textContent = '✎  Written down — going out now';
+  } else {
+    btn.textContent = data.outcome === 'unknown'
+      ? '?  It may already be saved — check before sending it again. '
+        + (data.detail || '')
+      : '✕  Not queued: ' + (data.error || data.detail || 'the command failed');
+  }
+  const hold = data.outcome === 'unknown' ? 12000 : 3500;
+  state.noteFlash = Date.now() + hold;
+  setTimeout(() => { btn.textContent = noteButtonLabel(); }, hold);
+  await loadSaid(); render();
+});
+
+Promise.all([loadSaid(), loadMessages()]).then(([said]) => {
+  reconcilePending(said.read);
+  return poll();
+});
+setInterval(poll, POLL_MS);
+// The message log is a local file read, so it is polled on the same cadence and
+// re-rendered only when a message actually arrived - his typing survives the
+// re-render either way, because paintMain owns that.
+// Only the LIST is redrawn: a recorded message never changes, and the open pane
+// is built from the message it already holds and the said thread, so rebuilding
+// it earns nothing and can only cost him his place.
+// A search he left in the box is a view of the whole log, so it is asked again
+// whenever the log moved: otherwise the newest message matching what he typed
+// is the one message the page will not show him.
+setInterval(async () => {
+  const changed = await loadMessages();
+  const failed = state.found && state.found.error && state.q.trim() === state.found.q;
+  if ((changed || failed) && state.q.trim() && state.tab === 'messages')
+    searchMessages();
+  if (changed) renderList();
+}, POLL_MS);
+// The outcome of a send is written to the record by the thread carrying the
+// delivery out, so the record is polled on the same cadence and behind the same
+// change check. An unchanged record costs a stat.
+setInterval(async () => {
+  const said = await loadSaid();
+  if (reconcilePending(said.read) || said.changed) render();
+}, POLL_MS);
+setInterval(renderList, 30000);   // keep the ages and stuck flags honest
+</script>
+</body>
+</html>
