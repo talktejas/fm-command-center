@@ -1014,6 +1014,96 @@ test_a_message_names_the_project_the_worktree_and_the_branch() {
   pass "a recorded message names its project, its worktree and its branch"
 }
 
+# firstmate itself (the sweep and the backfill above) only ever resolves a
+# message's project, worktree and branch from the ONE task a turn touched, and
+# only from that task's live meta - by design, neither guesses beyond that.
+# This server fills what those two honestly leave blank, computed at read
+# time from the fleet's own current records, never rewritten into the log.
+test_a_taskless_message_is_matched_to_the_one_task_it_names() {
+  local home port body
+  home="$TMP_ROOT/match-task"
+  seed_home "$home"
+  say "$home" "Status check" "Still working the colour call, see cc-live for details." >/dev/null \
+    || fail "the recorder refused a message"
+
+  start_server "$home" || fail "the server did not start"
+  port=$SERVER_PORT
+  curl -s -m 120 -o /dev/null "http://127.0.0.1:$port/api/items"
+  body=$(curl -s -m 30 "http://127.0.0.1:$port/api/messages")
+  stop_server
+
+  assert_equals "demo" "$(jq -r '.messages[0].project' <<<"$body")" \
+    "a message naming exactly one task in its own words was not matched to that task's project"
+  assert_contains "$(jq -r '.messages[0].context_source' <<<"$body")" "cc-live" \
+    "the matched context did not quietly name the task it came from"
+  pass "a message naming exactly one task in its own words is matched to that task's project"
+}
+
+test_a_message_naming_two_tasks_is_left_blank_rather_than_guessed() {
+  local home port body
+  home="$TMP_ROOT/match-ambiguous"
+  seed_home "$home"
+  say "$home" "Two things" "Working cc-live and cc-deferred both today." >/dev/null \
+    || fail "the recorder refused a message"
+
+  start_server "$home" || fail "the server did not start"
+  port=$SERVER_PORT
+  curl -s -m 120 -o /dev/null "http://127.0.0.1:$port/api/items"
+  body=$(curl -s -m 30 "http://127.0.0.1:$port/api/messages")
+  stop_server
+
+  assert_equals "null" "$(jq -r '.messages[0].project' <<<"$body")" \
+    "a message naming more than one task was guessed at rather than left honestly blank"
+  pass "a message naming more than one task is left blank rather than guessed"
+}
+
+# A closed task keeps its repo in the backlog long after its worktree and its
+# meta are gone; a worktree and a branch it no longer has must stay blank.
+# fm-captain-message.sh itself refuses --task against an id with no live
+# record (its own honesty rule), which is exactly the row the automatic sweep
+# leaves behind once a task's meta is gone - so this writes that row directly,
+# the same shape the sweep or the backfill would have left it in.
+test_a_message_for_a_task_whose_meta_is_gone_gets_its_backlog_repo() {
+  local home port body
+  home="$TMP_ROOT/match-backlog"
+  seed_home "$home"
+  printf '%s\n' '{"id":"m-gone","at":"2026-09-21T00:00:00Z","title":"It shipped",
+    "text":"Settled.","task":"cc-answered","project":null,"worktree":null,"branch":null}' \
+    | jq -c . > "$home/data/captain-messages.jsonl"
+
+  start_server "$home" || fail "the server did not start"
+  port=$SERVER_PORT
+  curl -s -m 120 -o /dev/null "http://127.0.0.1:$port/api/items"
+  body=$(curl -s -m 30 "http://127.0.0.1:$port/api/messages")
+  stop_server
+
+  assert_equals "demo" "$(jq -r '.messages[0].project' <<<"$body")" \
+    "a task whose meta is gone did not fall back to its backlog repo"
+  assert_equals "null" "$(jq -r '.messages[0].worktree' <<<"$body")" \
+    "a backlog-only fallback invented a worktree it cannot know"
+  pass "a message for a task whose meta is gone still gets its backlog repo"
+}
+
+test_a_message_matched_to_a_registered_project_when_it_names_no_task() {
+  local home port body
+  home="$TMP_ROOT/match-project"
+  seed_home "$home"
+  printf '# Projects\n\n- demoproj [direct-PR] - a fixture project (added 2026-09-21)\n' \
+    > "$home/data/projects.md"
+  say "$home" "Heads up" "The demoproj work is moving along nicely." >/dev/null \
+    || fail "the recorder refused a message"
+
+  start_server "$home" || fail "the server did not start"
+  port=$SERVER_PORT
+  curl -s -m 120 -o /dev/null "http://127.0.0.1:$port/api/items"
+  body=$(curl -s -m 30 "http://127.0.0.1:$port/api/messages")
+  stop_server
+
+  assert_equals "demoproj" "$(jq -r '.messages[0].project' <<<"$body")" \
+    "a message naming a registered project by name was not matched to it"
+  pass "a message naming no task but exactly one registered project is matched to it"
+}
+
 test_message_backfill_resolves_only_context_keyed_by_a_task_record() {
   local home wt result row
   home="$TMP_ROOT/backfill"
@@ -2340,6 +2430,10 @@ test_concurrent_polls_produce_one_scan
 test_the_pages_decision_rules_hold
 test_the_server_serves_the_pages_decision_rules
 test_a_message_names_the_project_the_worktree_and_the_branch
+test_a_taskless_message_is_matched_to_the_one_task_it_names
+test_a_message_naming_two_tasks_is_left_blank_rather_than_guessed
+test_a_message_for_a_task_whose_meta_is_gone_gets_its_backlog_repo
+test_a_message_matched_to_a_registered_project_when_it_names_no_task
 test_message_backfill_resolves_only_context_keyed_by_a_task_record
 test_message_backfill_attributes_by_the_same_turn_evidence
 test_a_captured_message_carries_the_one_task_its_turn_touched

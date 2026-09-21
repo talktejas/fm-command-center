@@ -16,6 +16,7 @@ Standalone extraction of firstmate's command center (originally `bin/command-cen
 - When pulling a behavioural change from firstmate's copy of these files (e.g. a PR against `talktejas/firstmate`), port only the command-center-specific diff — firstmate's own script signatures may have drifted independently and should be left alone here.
 - Every answer sent from **Waiting on you** goes through `deliver_certainly` (`command-center.py`): the guaranteed `fm-inbox.sh note` write always runs first, so the item never reads "not sent" once it lands; the item's own keyed decision route (`fm-captain-hold.sh answer` / `fm-send.sh`) then runs as a bonus behind it, and a bonus failure only degrades the item's detail text, never its outcome. See "Where your answer goes" in `docs/command-center.md`.
 - A test that spins up a throwaway `--firstmate-root` (symlinking real `bin/*` in) must also symlink `.tasks.toml` from the real root, or `command-center-scan.sh` reports every backlog as unreadable.
+- `command-center.py`'s `enrich_message*` functions (see the comment above `# --- message context enrichment`) fill a message's project/worktree/branch beyond what firstmate's own sweep/backfill recorded, at read time only, from the live scan, the backlog file and `data/projects.md`. It never guesses when more than one task or project matches a taskless message's own words - see `docs/command-center.md`'s Messages section for the exact rule.
 
 ## Maintaining this file
 

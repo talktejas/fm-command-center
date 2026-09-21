@@ -578,6 +578,165 @@ def read_said(home, limit=LOG_LIMIT):
     return merged, None, dropped
 
 
+# --- message context enrichment ----------------------------------------------
+# What firstmate itself resolves (bin/fm-captain-message-sweep.py at capture
+# time, bin/fm-captain-message-backfill.py after) is only ever the ONE task a
+# turn touched, and only from that task's live state/<id>.meta - by design,
+# neither guesses further than that. Most messages still deserve a project,
+# worktree and branch whenever the fleet's own records make exactly one
+# reading honest: a task whose meta is gone (its backlog line, or the live
+# scan, still knows its repo), and a message that named no task at all
+# (matched against every task id and project slug the fleet knows, kept only
+# when exactly one matches). Nothing here is written back to firstmate's log -
+# it is recomputed from the current records on every read that actually
+# serves a body, the same promise the rest of this page makes.
+BACKLOG_LINE_RE = re.compile(r'^- \[[ x]\] (\S+) - ')
+BACKLOG_REPO_RE = re.compile(r'\(repo: ([^()]*)\)')
+PROJECTS_LINE_RE = re.compile(r'^- (\S+) ')
+
+
+def _tasks_toml_backlog_rel(firstmate_root):
+    """The backlog file's path relative to a HOME, or None off the markdown
+    backend (bin/command-center-scan.sh's backlog_path, read again here)."""
+    try:
+        with open(os.path.join(firstmate_root, ".tasks.toml"), encoding="utf-8") as fh:
+            text = fh.read()
+    except OSError:
+        return "data/backlog.md"
+    backend = "markdown"
+    m = re.search(r'^backend\s*=\s*"([^"]*)"', text, re.MULTILINE)
+    if m:
+        backend = m.group(1)
+    if backend != "markdown":
+        return None
+    m = re.search(r'^path\s*=\s*"([^"]*)"', text, re.MULTILINE)
+    return m.group(1) if m and m.group(1) else "data/backlog.md"
+
+
+def backlog_index(firstmate_root, home):
+    """task id -> repo, for every task line the backlog names, open or
+    closed - unlike bin/command-center-scan.sh's held_tasks, which only ever
+    reads the open captain holds it cards."""
+    idx = {}
+    rel = _tasks_toml_backlog_rel(firstmate_root)
+    if not rel:
+        return idx
+    try:
+        with open(os.path.join(home, rel), encoding="utf-8") as fh:
+            for line in fh:
+                m = BACKLOG_LINE_RE.match(line)
+                if not m:
+                    continue
+                rm = BACKLOG_REPO_RE.search(line)
+                idx[m.group(1)] = rm.group(1) if rm else None
+    except OSError:
+        pass
+    return idx
+
+
+def project_slugs(home):
+    """The registered project slugs (data/projects.md), the vocabulary a
+    message's own words are matched against when it names no task."""
+    slugs = set()
+    try:
+        with open(os.path.join(home, "data", "projects.md"), encoding="utf-8") as fh:
+            for line in fh:
+                m = PROJECTS_LINE_RE.match(line)
+                if m:
+                    slugs.add(m.group(1))
+    except OSError:
+        pass
+    return slugs
+
+
+def _word_present(haystack, token):
+    """Is `token` in `haystack` as its own word, not as a slice of a longer
+    one? An id or slug is never a substring match away from a false one."""
+    if not token:
+        return False
+    return re.search(r'(?<![A-Za-z0-9_-])' + re.escape(token) + r'(?![A-Za-z0-9_-])',
+                      haystack) is not None
+
+
+def _item_for_task(view, task_id):
+    for it in view.get("items", []):
+        if it.get("id") == task_id:
+            return it
+    return None
+
+
+def _task_context(task_id, view, backlog_idx):
+    """(project, worktree, branch, source) known about one task id, from the
+    live scan first (it already carries the same fields command-center-scan.sh
+    computes for every waiting item) and the backlog's repo otherwise."""
+    item = _item_for_task(view, task_id)
+    if item:
+        return item.get("project"), item.get("worktree"), item.get("branch")
+    if task_id in backlog_idx:
+        return backlog_idx[task_id], None, None
+    return None, None, None
+
+
+def message_context(row, view, backlog_idx, project_slugs_set):
+    """(project, worktree, branch, source) to fill in beyond what the row
+    already carries, or all-None when nothing more can be said honestly.
+    `source` names where a filled value came from, for a quiet note beside
+    it - never set when nothing was actually filled."""
+    have = {f: bool(row.get(f)) for f in ("project", "worktree", "branch")}
+    if all(have.values()):
+        return None, None, None, None
+
+    task = row.get("task")
+    if task:
+        project, worktree, branch = _task_context(task, view, backlog_idx)
+        source = "task %s" % task if (project or worktree or branch) else None
+    else:
+        haystack = (row.get("title") or "") + "\n" + (row.get("text") or "")
+        task_ids = ({t for t in backlog_idx if len(t) > 2 and _word_present(haystack, t)}
+                    | {it["id"] for it in view.get("items", [])
+                       if len(it.get("id") or "") > 2 and _word_present(haystack, it["id"])})
+        if len(task_ids) == 1:
+            matched = next(iter(task_ids))
+            project, worktree, branch = _task_context(matched, view, backlog_idx)
+            source = ("matched task %s in the message" % matched
+                      if (project or worktree or branch) else None)
+        else:
+            projects = {p for p in project_slugs_set if len(p) > 1 and _word_present(haystack, p)}
+            if len(projects) == 1:
+                project, worktree, branch = next(iter(projects)), None, None
+                source = "matched project %s in the message" % project
+            else:
+                project = worktree = branch = source = None
+
+    return (None if have["project"] else project,
+            None if have["worktree"] else worktree,
+            None if have["branch"] else branch,
+            source)
+
+
+def enrich_message(row, view, backlog_idx, project_slugs_set):
+    project, worktree, branch, source = message_context(row, view, backlog_idx, project_slugs_set)
+    if not (project or worktree or branch):
+        return row
+    out = dict(row)
+    if project:
+        out["project"] = project
+    if worktree:
+        out["worktree"] = worktree
+    if branch:
+        out["branch"] = branch
+    if source:
+        out["context_source"] = source
+    return out
+
+
+def enrich_messages(rows, records):
+    view = records.view() if records.etag is not None else {"items": []}
+    backlog_idx = backlog_index(FIRSTMATE_ROOT, records.home)
+    slugs = project_slugs(records.home)
+    return [enrich_message(row, view, backlog_idx, slugs) for row in rows]
+
+
 MESSAGE_WINDOW = 200
 
 
@@ -1143,6 +1302,7 @@ class Handler(BaseHTTPRequestHandler):
                 row, error = find_message(self.records.home, msg_id)
                 if row is not None:
                     row = dict(row, archived=archived_messages(self.records.home).get(msg_id, False))
+                    row = enrich_messages([row], self.records)[0]
                 current, archived_total = message_totals(self.records.home)
                 self._send(200, dump({"messages": [row] if row else [],
                                       "more": False, "error": error,
@@ -1163,6 +1323,8 @@ class Handler(BaseHTTPRequestHandler):
             rows, more, error = read_messages(self.records.home,
                                               before=before, query=query,
                                               archived=archived)
+            if not error:
+                rows = enrich_messages(rows, self.records)
             # A read that FAILED is not the state of the log: serving it under a
             # change check would answer 304 to every later poll and leave the
             # page saying this record could not be read long after it could.
