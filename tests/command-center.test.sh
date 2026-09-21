@@ -1176,6 +1176,65 @@ EOF
   pass "worker/task evidence is never joined by a keyword match once it has named a project"
 }
 
+# A one-off deliverable (research, a scrape) gets a data/<id>/ folder and a
+# launch brief but is never added to the backlog at all - its own brief still
+# names the repo it was launched against.
+test_a_task_with_no_backlog_line_resolves_through_its_own_brief() {
+  local home port body
+  home="$TMP_ROOT/brief-only"
+  mkdir -p "$home/data/bkk-study" "$home/state"
+  printf '# Projects\n\n- mp [direct-PR] - Gem marketplace research (repo talktejas/jewelry-platform) (added 2026-09-21)\n' \
+    > "$home/data/projects.md"
+  printf 'You are in a disposable git worktree of mp, at a detached HEAD on a clean default branch.\n' \
+    > "$home/data/bkk-study/launch-brief.md"
+  jq -cn '{id:"m-brief", title:"Landed", text:"The bkk-study writeup landed.",
+    task:null, project:null, worktree:null, branch:null, source:"transcript",
+    at:"2026-09-21T00:00:00Z"}' > "$home/data/captain-messages.jsonl"
+
+  start_server "$home" || fail "the server did not start"
+  port=$SERVER_PORT
+  curl -s -m 120 -o /dev/null "http://127.0.0.1:$port/api/items"
+  body=$(curl -s -m 30 "http://127.0.0.1:$port/api/messages")
+  stop_server
+
+  assert_equals "mp" "$(jq -r '.messages[0].project' <<<"$body")" \
+    "a task id named only in a brief, never the backlog, was not resolved through it"
+  pass "a task with no backlog line at all still resolves through its own brief"
+}
+
+# The captain's own figure: a short status ping with no task evidence and no
+# words naming anything borrows the project of the nearest EARLIER message in
+# the same session, within 15 minutes, that resolved one.
+test_a_short_ping_borrows_the_nearest_earlier_turns_project() {
+  local home port body
+  home="$TMP_ROOT/nearby-turn"
+  seed_home "$home"
+  jq -cn '{id:"m-early", title:"Working on it", text:"cc-live is moving.",
+    task:"cc-live", project:null, worktree:null, branch:null,
+    source:"transcript", session:"sess-ping", at:"2026-09-21T00:00:00Z"}' \
+    > "$home/data/captain-messages.jsonl"
+  jq -cn '{id:"m-ping", title:"Captain, shipshape.", text:"Captain, shipshape.",
+    task:null, project:null, worktree:null, branch:null, source:"transcript",
+    session:"sess-ping", at:"2026-09-21T00:05:00Z"}' \
+    >> "$home/data/captain-messages.jsonl"
+  jq -cn '{id:"m-late", title:"Captain, shipshape too.", text:"Captain, shipshape too.",
+    task:null, project:null, worktree:null, branch:null, source:"transcript",
+    session:"sess-ping", at:"2026-09-21T00:25:00Z"}' \
+    >> "$home/data/captain-messages.jsonl"
+
+  start_server "$home" || fail "the server did not start"
+  port=$SERVER_PORT
+  curl -s -m 120 -o /dev/null "http://127.0.0.1:$port/api/items"
+  body=$(curl -s -m 30 "http://127.0.0.1:$port/api/messages")
+  stop_server
+
+  assert_equals "demo" "$(jq -r '.messages[] | select(.id=="m-ping") | .project' <<<"$body")" \
+    "a ping 5 minutes after a resolved turn in the same session did not borrow its project"
+  assert_equals "null" "$(jq -r '.messages[] | select(.id=="m-late") | .project' <<<"$body")" \
+    "a ping 25 minutes later, past the 15-minute window, still borrowed a project"
+  pass "a short ping with no evidence of its own borrows its nearest earlier turn's project, within 15 minutes"
+}
+
 test_message_backfill_resolves_only_context_keyed_by_a_task_record() {
   local home wt result row
   home="$TMP_ROOT/backfill"
@@ -2508,6 +2567,8 @@ test_a_message_for_a_task_whose_meta_is_gone_gets_its_backlog_repo
 test_a_message_matched_to_a_registered_project_when_it_names_no_task
 test_a_message_shows_every_project_a_turns_tool_calls_touched
 test_a_worker_evidenced_project_is_not_joined_by_a_keyword_guess
+test_a_task_with_no_backlog_line_resolves_through_its_own_brief
+test_a_short_ping_borrows_the_nearest_earlier_turns_project
 test_message_backfill_resolves_only_context_keyed_by_a_task_record
 test_message_backfill_attributes_by_the_same_turn_evidence
 test_a_captured_message_carries_the_one_task_its_turn_touched

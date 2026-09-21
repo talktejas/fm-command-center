@@ -603,8 +603,10 @@ FIXED_PROJECT_ALIASES = {
                 "sale", "sales order"},
     "interactp": {"interact"},
     "b2becom": {"karatcraft", "b2b"},
-    "fm-command-center": {"command center", "archive", "work tab", "waiting on you"},
+    "fm-command-center": {"command center", "archive", "work tab", "waiting on you",
+                          "capture", "message-capture"},
     "firstmate": {"firstmate"},
+    "mp": {"bangkok", "mp-bkk"},
 }
 
 
@@ -645,6 +647,20 @@ def backlog_index(firstmate_root, home):
     except OSError:
         pass
     return idx
+
+
+def brief_task_ids(home):
+    """Every task id with its own data/<id>/ folder and a launch brief - the
+    universe transcript and message-text matching search beyond the backlog
+    and the live scan, since a one-off deliverable (research, a scrape) gets
+    a folder and a brief but never a tracked backlog line at all."""
+    try:
+        names = os.listdir(os.path.join(home, "data"))
+    except OSError:
+        return set()
+    return {name for name in names if len(name) > 2
+            and (os.path.isfile(os.path.join(home, "data", name, "launch-brief.md"))
+                 or os.path.isfile(os.path.join(home, "data", name, "brief.md")))}
 
 
 def project_aliases(home):
@@ -692,15 +708,47 @@ def _item_for_task(view, task_id):
     return None
 
 
-def _task_context(task_id, view, backlog_idx):
-    """(project, worktree, branch, source) known about one task id, from the
-    live scan first (it already carries the same fields command-center-scan.sh
-    computes for every waiting item) and the backlog's repo otherwise."""
+BRIEF_WORKTREE_RE = re.compile(r'disposable git worktree of (\S+?)[,.\s]')
+
+
+def _task_brief_project(home, task_id, project_aliases_map):
+    """The project named in a task's own launch brief - `You are in a
+    disposable git worktree of <repo>` - for a task whose meta is gone AND
+    whose backlog line, closed or not, was never written (a task the
+    captain gave a folder and a brief but no tracked backlog id, e.g. a
+    one-off research deliverable). Read straight from data/<id>/, never
+    firstmate's own state."""
+    for name in ("launch-brief.md", "brief.md"):
+        try:
+            with open(os.path.join(home, "data", task_id, name), encoding="utf-8") as fh:
+                text = fh.read()
+        except OSError:
+            continue
+        m = BRIEF_WORKTREE_RE.search(text)
+        if not m:
+            continue
+        token = os.path.basename(m.group(1))
+        for slug, aliases in project_aliases_map.items():
+            if token == slug or token in aliases:
+                return slug
+    return None
+
+
+def _task_context(task_id, view, backlog_idx, home=None, project_aliases_map=None):
+    """(project, worktree, branch) known about one task id, from the live
+    scan first (it already carries the same fields command-center-scan.sh
+    computes for every waiting item), the backlog's repo next (a Done row
+    keeps its `(repo: X)` exactly like a Queued one), and its own brief's
+    named worktree last, for a task the backlog never carried at all."""
     item = _item_for_task(view, task_id)
     if item:
         return item.get("project"), item.get("worktree"), item.get("branch")
     if task_id in backlog_idx:
         return backlog_idx[task_id], None, None
+    if home is not None and project_aliases_map is not None:
+        p = _task_brief_project(home, task_id, project_aliases_map)
+        if p:
+            return p, None, None
     return None, None, None
 
 
@@ -790,8 +838,16 @@ def transcript_task_ids(row, a_transcript_dir, known_ids, cache):
     return {tid for tid in known_ids if _word_present(text, tid)}
 
 
+# Before this moment the command center was still code inside firstmate's own
+# tree, not yet the separate fm-command-center repo (added to data/projects.md
+# at this same moment) - a message about "the command center" from before it
+# read as firstmate, and still does here.
+COMMAND_CENTER_SPLIT = "2026-09-21T09:30:00Z"
+
+
 def message_context(row, view, backlog_idx, project_aliases_map,
-                     a_transcript_dir=None, transcript_cache=None):
+                     a_transcript_dir=None, transcript_cache=None, home=None,
+                     brief_ids=frozenset()):
     """(project, worktree, branch, source) to fill in beyond what the row
     already carries, or all-None when nothing more can be said honestly.
     The captain's own order of precedence: which worker/task the turn that
@@ -811,7 +867,11 @@ def message_context(row, view, backlog_idx, project_aliases_map,
 
     haystack = (row.get("title") or "") + "\n" + (row.get("text") or "")
     known_ids = ({t for t in backlog_idx if len(t) > 2}
-                 | {it["id"] for it in view.get("items", []) if len(it.get("id") or "") > 2})
+                 | {it["id"] for it in view.get("items", []) if len(it.get("id") or "") > 2}
+                 | set(brief_ids))
+
+    def task_context(task_id):
+        return _task_context(task_id, view, backlog_idx, home, project_aliases_map)
 
     # Tier 1: the worker/task itself, the most correct source there is.
     task = row.get("task")
@@ -834,12 +894,12 @@ def message_context(row, view, backlog_idx, project_aliases_map,
     if task_ids:
         if len(task_ids) == 1:
             only = next(iter(task_ids))
-            p, worktree, branch = _task_context(only, view, backlog_idx)
+            p, worktree, branch = task_context(only)
             if p:
                 projects.add(p)
         else:
             for tid in task_ids:
-                p, _, _ = _task_context(tid, view, backlog_idx)
+                p, _, _ = task_context(tid)
                 if p:
                     projects.add(p)
     else:
@@ -850,7 +910,7 @@ def message_context(row, view, backlog_idx, project_aliases_map,
         matched_in_text = {t for t in known_ids if _word_present(haystack, t)}
         if len(matched_in_text) == 1:
             only = next(iter(matched_in_text))
-            p, worktree, branch = _task_context(only, view, backlog_idx)
+            p, worktree, branch = task_context(only)
             if p:
                 projects.add(p)
             if p or worktree or branch:
@@ -862,6 +922,11 @@ def message_context(row, view, backlog_idx, project_aliases_map,
             sources.append("matched project %s in the message" % " · ".join(sorted(extra_named)))
         projects |= named
 
+    at = row.get("at") or ""
+    if "fm-command-center" in projects and at and at < COMMAND_CENTER_SPLIT:
+        projects.discard("fm-command-center")
+        projects.add("firstmate")
+
     project = " · ".join(sorted(projects)) if projects else None
     source = "; ".join(sources) or None
 
@@ -872,9 +937,11 @@ def message_context(row, view, backlog_idx, project_aliases_map,
 
 
 def enrich_message(row, view, backlog_idx, project_aliases_map,
-                    a_transcript_dir=None, transcript_cache=None):
+                    a_transcript_dir=None, transcript_cache=None, home=None,
+                    brief_ids=frozenset()):
     project, worktree, branch, source = message_context(
-        row, view, backlog_idx, project_aliases_map, a_transcript_dir, transcript_cache)
+        row, view, backlog_idx, project_aliases_map, a_transcript_dir, transcript_cache,
+        home, brief_ids)
     if not (project or worktree or branch):
         return row
     out = dict(row)
@@ -889,14 +956,60 @@ def enrich_message(row, view, backlog_idx, project_aliases_map,
     return out
 
 
+def _epoch(at):
+    try:
+        return datetime.strptime(at, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc).timestamp()
+    except (TypeError, ValueError):
+        return None
+
+
+NEARBY_TURN_WINDOW = 900  # 15 minutes, the captain's own figure
+
+
+def fill_from_nearby_turn(rows):
+    """A short status ping's own turn touches no task at all, so every tier
+    above comes up empty - but its nearest EARLIER turn in the SAME session,
+    within 15 minutes, so often does. Borrows that turn's project only, never
+    a worktree or branch it did not itself resolve, and never a later turn -
+    a ping reports on what already happened, not what comes after it."""
+    by_session = {}
+    for r in rows:
+        sess, t = r.get("session"), _epoch(r.get("at"))
+        if sess and t is not None:
+            by_session.setdefault(sess, []).append((t, r))
+    out = []
+    for r in rows:
+        if r.get("project"):
+            out.append(r)
+            continue
+        sess, t = r.get("session"), _epoch(r.get("at"))
+        best = None
+        for ot, other in (by_session.get(sess) or [] if sess and t is not None else []):
+            if other is r or not other.get("project") or ot >= t or t - ot > NEARBY_TURN_WINDOW:
+                continue
+            if best is None or ot > best[0]:
+                best = (ot, other)
+        if not best:
+            out.append(r)
+            continue
+        row = dict(r, project=best[1]["project"],
+                   context_source="the nearest earlier turn in the same session (%s)"
+                                  % best[1].get("id", ""))
+        out.append(row)
+    return out
+
+
 def enrich_messages(rows, records):
     view = records.view() if records.etag is not None else {"items": []}
     backlog_idx = backlog_index(FIRSTMATE_ROOT, records.home)
     aliases = project_aliases(records.home)
     a_transcript_dir = transcript_dir(records.home)
+    brief_ids = brief_task_ids(records.home)
     cache = {}
-    return [enrich_message(row, view, backlog_idx, aliases, a_transcript_dir, cache)
-            for row in rows]
+    enriched = [enrich_message(row, view, backlog_idx, aliases, a_transcript_dir, cache,
+                               records.home, brief_ids)
+                for row in rows]
+    return fill_from_nearby_turn(enriched)
 
 
 MESSAGE_WINDOW = 200
