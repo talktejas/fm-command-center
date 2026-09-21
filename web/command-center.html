@@ -1203,6 +1203,7 @@ function renderMessagePane(m){
       ${cell('Worktree', m.worktree, 'Not recorded')}
       ${cell('Branch', m.branch, 'Not recorded')}
     </div>
+    ${m.context_source ? `<div class="quiet">${esc(m.context_source)}</div>` : ''}
     <div class="body">${para(m.text) || '<p class="quiet">No text recorded.</p>'}</div>
     ${state.saidDropped ? `<div class="archive-note" style="background:var(--warn-soft)"><b>Your
        own words are shortened here.</b> ${state.saidDropped} older entr${
