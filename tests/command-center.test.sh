@@ -15,6 +15,7 @@ SCAN="$ROOT/command-center-scan.sh"
 RECORD="$FIRSTMATE_ROOT/bin/fm-captain-message.sh"
 BACKFILL="$FIRSTMATE_ROOT/bin/fm-captain-message-backfill.py"
 SERVER="$ROOT/command-center.py"
+WORK="$ROOT/command-center-work.sh"
 TASKS_AXI="$FIRSTMATE_ROOT/bin/fm-tasks-axi.sh"
 CAPTAIN_HOLD="$FIRSTMATE_ROOT/bin/fm-captain-hold.sh"
 TMP_ROOT=$(fm_test_tmproot command-center)
@@ -335,6 +336,61 @@ test_fingerprint_changes_only_when_a_record_moves() {
   pass "the change check is stable when idle and notices a moved record"
 }
 
+# The Work tab's own reading half: the firstmate root's real
+# bin/fm-bearings-snapshot.sh, projected into the four sections
+# bin/fm-bearings-board.sh words, over this repo's own (empty) home.
+test_work_scan_reports_the_four_bearings_sections() {
+  local home out
+  home="$TMP_ROOT/work"
+  seed_home "$home"
+  out=$(FM_HOME="$home" FM_FIRSTMATE_ROOT="$FIRSTMATE_ROOT" timeout 90 "$WORK") \
+    || fail "the work scan did not run"
+  assert_equals "fm-command-center-work.v1" "$(jq -r '.schema' <<<"$out")" \
+    "the work scan reported the wrong schema"
+  assert_equals "null" "$(jq -c '.error' <<<"$out")" \
+    "a scan that read the fleet reported an error anyway"
+  for key in captains_call underway landed charted omitted; do
+    jq -e ".$key | type == \"array\"" <<<"$out" >/dev/null \
+      || fail "the work scan's .$key was not an array"
+  done
+  pass "the work scan reports the four bearings sections as arrays, unchanged in wording"
+}
+
+# A row for a task this home actually owns carries its project, worktree and
+# branch the same way command-center-scan.sh's own items do - read from the
+# task's own meta, never guessed.
+test_work_scan_names_a_local_tasks_context() {
+  local home out worktree
+  home="$TMP_ROOT/work-context"
+  mkdir -p "$home/state" "$home/data"
+  worktree="$TMP_ROOT/work-context-tree"
+  fm_git_init_commit "$worktree"
+  git -C "$worktree" checkout -q -b my-branch
+  cat > "$home/state/cc-work-demo.meta" <<EOF
+project=demo
+worktree=$worktree
+kind=ship
+EOF
+  cat > "$home/data/backlog.md" <<'EOF'
+# Backlog
+
+## Queued
+- [ ] cc-work-demo - A captain's call the work board must show (repo: demo) (kind: ship) (since 2026-09-10) (hold: Pick one) (hold-kind: captain)
+EOF
+  out=$(FM_HOME="$home" FM_FIRSTMATE_ROOT="$FIRSTMATE_ROOT" timeout 90 "$WORK") \
+    || fail "the work scan did not run"
+  local row
+  row=$(jq -c '.captains_call[] | select(.id == "cc-work-demo")' <<<"$out")
+  [ -n "$row" ] || fail "the work board did not carry this home's own captain's call"
+  assert_equals "demo" "$(jq -r '.project' <<<"$row")" \
+    "the work board did not name the task's project"
+  assert_equals "$worktree" "$(jq -r '.worktree' <<<"$row")" \
+    "the work board did not name the task's worktree"
+  assert_equals "my-branch" "$(jq -r '.branch' <<<"$row")" \
+    "the work board did not read the task's own branch"
+  pass "a work row for a task this home owns carries its project, worktree and branch"
+}
+
 # --- HTTP boundary -----------------------------------------------------------
 # Sets SERVER_PORT and SERVER_PID in the CALLER's shell. It must not be used in
 # a command substitution: that runs in a subshell, the pid never comes back, and
@@ -418,6 +474,21 @@ test_server_serves_the_page_and_the_records() {
     "an unchanged poll re-sent the whole view instead of answering 304"
   stop_server
   pass "the page and the records are served, and an unchanged poll costs nothing"
+}
+
+test_the_work_board_is_served() {
+  local home port body
+  home="$TMP_ROOT/http-work"
+  seed_home "$home"
+  start_server "$home" || fail "the server did not start"
+  port=$SERVER_PORT
+  body=$(curl -s -m 90 "http://127.0.0.1:$port/api/work")
+  assert_equals "fm-command-center-work.v1" "$(jq -r '.schema' <<<"$body")" \
+    "the work board endpoint did not carry the bearings work schema"
+  assert_contains "$body" '"id":"cc-live"' \
+    "the work board did not carry this home's own captain's call"
+  stop_server
+  pass "the work board is served over its own endpoint"
 }
 
 # Send one refused cross-site POST whose body is itself a complete, innocent-
@@ -2238,7 +2309,10 @@ test_status_decision_since_prefers_the_opening_line_timestamp
 test_steering_records_report_delivered_and_picked_up
 test_a_scan_that_cannot_read_everything_fails_instead_of_truncating
 test_fingerprint_changes_only_when_a_record_moves
+test_work_scan_reports_the_four_bearings_sections
+test_work_scan_names_a_local_tasks_context
 test_server_serves_the_page_and_the_records
+test_the_work_board_is_served
 test_server_refuses_bad_input_before_running_anything
 test_a_server_with_no_scan_yet_refuses_both_the_list_and_a_send
 test_answering_a_hold_records_the_captains_words_and_clears_the_item

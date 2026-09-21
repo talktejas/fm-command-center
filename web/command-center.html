@@ -281,6 +281,26 @@
   .dlg textarea{width:100%;min-height:110px;resize:vertical;border:1px solid var(--line);
     border-radius:7px;padding:10px 11px;font:inherit;font-size:14px}
   .dlg-foot{display:flex;gap:9px;justify-content:flex-end;margin-top:13px}
+
+  /* ---- Work tab: the /bearings lavish board's four sections ---- */
+  .worksection{padding:10px 16px 4px}
+  .worksection h3{margin:0 0 6px;font-size:11.5px;text-transform:uppercase;
+    letter-spacing:.06em;color:var(--dim);display:flex;align-items:center;gap:6px}
+  .worksection h3 .n{font-size:10px;border:1px solid var(--line);border-radius:20px;
+    padding:0 6px;color:var(--faint)}
+  .work-row{border:1px solid var(--line);border-radius:8px;padding:9px 11px;margin-bottom:7px}
+  .work-title{font-size:13px;font-weight:600;letter-spacing:-.005em}
+  .work-sub{font-size:12px;color:var(--dim);margin-top:3px}
+  .work-meta{font-size:11px;color:var(--faint);margin-top:5px;display:flex;
+    flex-wrap:wrap;gap:5px 9px}
+  .work-meta a{color:inherit}
+  .work-answer{display:flex;gap:6px;margin-top:8px}
+  .work-answer input{flex:1;border:1px solid var(--line);border-radius:6px;
+    padding:6px 8px;font:inherit;font-size:12.5px}
+  .work-answer button{border:1px solid var(--accent);background:var(--accent);
+    color:#fff;border-radius:6px;padding:6px 12px;font-size:12.5px;cursor:pointer}
+  .work-answer button:disabled{opacity:.6;cursor:default}
+  .work-status{font-size:11.5px;color:var(--dim);margin-top:5px}
 </style></head>
 <body>
 
@@ -301,6 +321,7 @@
       <div class="tabs" role="tablist">
         <button class="tab" role="tab" data-tab="messages" aria-selected="true">Messages <span class="n" id="n-messages"></span></button>
         <button class="tab" role="tab" data-tab="waiting" aria-selected="false">Waiting on you <span class="n" id="n-waiting"></span></button>
+        <button class="tab" role="tab" data-tab="work" aria-selected="false">Work <span class="n" id="n-work"></span></button>
         <button class="tab" role="tab" data-tab="words" aria-selected="false">My words <span class="n" id="n-words"></span></button>
         <button class="tab" role="tab" data-tab="archived" aria-selected="false">Archived <span class="n" id="n-archived"></span></button>
       </div>
@@ -417,6 +438,10 @@ const state = {
   // leave the box only when the outcome row says the send landed.
   pending:load('cc.pending',{}), failed:load('cc.failed',{}),
   msgRead:false, etag:null,
+  // The /bearings lavish board's four sections, read on their own slow poll
+  // (loadWork below) rather than the item scan's change-driven one.
+  work:{captains_call:[],underway:[],landed:[],charted:[],omitted:[],error:null},
+  workRead:false, workSending:{},
   sending:false, flash:null, error:null, seen:load('cc.seen',{}), draft:load('cc.draft',{}),
   note:load('cc.note',''), outcome:load('cc.outcome',{}), scanned:false, saidError:null,
   offline:null, unread:null, confirmed:false, readAt:null,
@@ -824,6 +849,9 @@ function renderList(){
   $('#n-archived').textContent = Math.max(state.archivedTotal, state.archivedMessages.length);
   $('#n-waiting').textContent = items.filter(i => !isDeferred(i)).length;
   $('#n-words').textContent = draftCount();
+  // The count is what needs him, same convention as Waiting on you: Underway,
+  // Recently landed and Charted next are read-only context, not asks.
+  $('#n-work').textContent = (state.work.captains_call || []).length;
   document.querySelectorAll('.tab').forEach(t =>
     t.setAttribute('aria-selected', String(t.dataset.tab === state.tab)));
   $('#clr').hidden = !state.q;
@@ -834,6 +862,7 @@ function renderList(){
   if (state.tab === 'words'){ renderWords(); return; }
   if (state.tab === 'messages'){ renderMessages(); return; }
   if (state.tab === 'archived'){ renderMessages(true); return; }
+  if (state.tab === 'work'){ renderWork(); return; }
 
   const rows = ordered(visible());
   const empty = state.q || state.sfilter ? 'Nothing matches.'
@@ -884,6 +913,121 @@ function renderMessages(archived){
         the rest are in the log</button>` : '');
   $('#list').innerHTML = note
     + rowsHtml(rows, messageRow, empty, true, asked ? answered : '') + older;
+}
+
+// --- Work: the /bearings lavish board's four sections, in the rail itself ---
+// bin/command-center-work.sh already worded these exactly as
+// bin/fm-bearings-board.sh does; this only lays the rows out.
+function workMetaHtml(r){
+  const bits = [];
+  if (r.project) bits.push(esc(r.project));
+  if (r.worktree) bits.push(esc(r.worktree));
+  if (r.branch) bits.push('branch ' + esc(r.branch));
+  else if (r.branch_state === 'detached') bits.push('detached worktree');
+  else if (r.branch_state === 'not-started') bits.push('not started');
+  if (r.pr) bits.push(`<a href="${esc(r.pr)}" target="_blank" rel="noopener">${esc(r.pr)}</a>`);
+  return bits.length ? `<div class="work-meta">${bits.join(' · ')}</div>` : '';
+}
+function workStatusHtml(id){
+  const s = state.workSending[id];
+  if (!s) return '';
+  return `<div class="work-status">${esc(s)}</div>`;
+}
+function workDecisionRow(r){
+  const sending = state.workSending[r.id] === 'Sending…';
+  return `<div class="work-row" data-work-id="${esc(r.id)}">
+    <div class="work-title">${esc(r.title || r.id)}</div>
+    ${workMetaHtml(r)}
+    <div class="work-answer">
+      <input type="text" data-work-answer="${esc(r.id)}" ${sending ? 'disabled' : ''}
+             placeholder="Your answer, or the option you're choosing…">
+      <button data-work-send="${esc(r.id)}" ${sending ? 'disabled' : ''}>${sending ? 'Sending…' : 'Send'}</button>
+    </div>
+    ${workStatusHtml(r.id)}
+  </div>`;
+}
+function workUnderwayRow(r){
+  return `<div class="work-row">
+    <div class="work-title">${esc(r.title || r.id)}</div>
+    ${r.doing ? `<div class="work-sub">${esc(r.doing)}</div>` : ''}
+    ${workMetaHtml(r)}
+  </div>`;
+}
+function workLandedRow(r){
+  return `<div class="work-row">
+    <div class="work-title">${esc(r.title || r.id)}</div>
+    ${workMetaHtml(r)}
+  </div>`;
+}
+function workChartedRow(r){
+  const sub = (r.reason && r.reason !== '-') ? r.reason
+    : (r.blocked_by && r.blocked_by !== '-') ? 'blocked by ' + r.blocked_by : '';
+  return `<div class="work-row">
+    <div class="work-title">${esc(r.title || r.id)}</div>
+    ${sub ? `<div class="work-sub">${esc(sub)}</div>` : ''}
+    ${workMetaHtml(r)}
+  </div>`;
+}
+function workSectionHtml(title, rows, rowFn, emptyText){
+  const body = rows.length ? rows.map(rowFn).join('')
+    : `<div class="empty">${esc(emptyText)}</div>`;
+  return `<div class="worksection"><h3>${esc(title)} <span class="n">${rows.length}</span></h3>${body}</div>`;
+}
+function renderWork(){
+  const w = state.work || {};
+  let html = '';
+  if (w.error) html += `<div class="archive-note" style="background:var(--warn-soft)">
+    <b>The work board could not be fully read.</b> ${esc(w.error)}</div>`;
+  else if (!state.workRead) html += `<div class="archive-note">Reading the fleet…</div>`;
+  html += workSectionHtml("Captain’s Call", w.captains_call || [], workDecisionRow,
+    'Nothing is waiting on your call.');
+  html += workSectionHtml('Underway', w.underway || [], workUnderwayRow, 'Nothing is underway.');
+  html += workSectionHtml('Recently landed', w.landed || [], workLandedRow, 'Nothing landed recently.');
+  html += workSectionHtml('Charted next', w.charted || [], workChartedRow, 'Nothing is charted next.');
+  $('#list').innerHTML = html;
+}
+
+async function loadWork(){
+  try {
+    const res = await fetch('/api/work');
+    const body = await res.json().catch(() => ({}));
+    if (!res.ok){
+      state.work = Object.assign({captains_call:[],underway:[],landed:[],charted:[]},
+        state.work, {error: body.error || ('HTTP ' + res.status)});
+      return true;
+    }
+    state.work = body; state.workRead = true; return true;
+  } catch (e) {
+    state.work = Object.assign({captains_call:[],underway:[],landed:[],charted:[]},
+      state.work, {error: String(e.message || e)});
+    return true;
+  }
+}
+
+async function sendWorkAnswer(id, text){
+  state.workSending[id] = 'Sending…';
+  renderList();
+  let ok = false, data = {};
+  try {
+    // Exactly like every other send here: his words are recorded and queued
+    // through fm-inbox.sh note, naming the task id and his chosen option, so
+    // firstmate reads it as an ordinary note and acts on it - the same route
+    // Waiting-on-you replies with nowhere to be delivered already take.
+    ({ ok, data } = await post('/api/note', { text: id + ': ' + text }));
+  } catch (err) {
+    data = transportFailure('note', String(err.message || err));
+  }
+  if (ok && data.ok){
+    state.pending[data.sid] = {key: 'work/' + id, text, at: Date.now()};
+    save('cc.pending', state.pending);
+    state.workSending[id] = 'Sent — going out now.';
+  } else {
+    state.workSending[id] = data.outcome === 'unknown'
+      ? 'It may already be saved — check before sending it again. ' + (data.detail || '')
+      : 'Not sent: ' + (data.error || data.detail || 'the command failed');
+  }
+  renderList();
+  setTimeout(() => { delete state.workSending[id]; if (state.tab === 'work') renderList(); }, 6000);
 }
 
 // The rest of the log, a window at a time, oldest end of what is loaded first.
@@ -1718,6 +1862,7 @@ document.addEventListener('click', async e => {
       searchMessages();
       if (state.tab === 'archived') await loadArchivedMessages();
     }
+    if (state.tab === 'work' && !state.workRead) await loadWork();
     renderList(); return;
   }
   const chip = e.target.closest('.chip');
@@ -1725,6 +1870,16 @@ document.addEventListener('click', async e => {
     const id = chip.dataset.home;
     state.homes.has(id) ? state.homes.delete(id) : state.homes.add(id);
     renderList(); return;
+  }
+  const wsend = e.target.closest('[data-work-send]');
+  if (wsend){
+    const id = wsend.dataset.workSend;
+    const row = wsend.closest('.work-row');
+    const input = row && row.querySelector('[data-work-answer]');
+    const text = (input && input.value || '').trim();
+    if (!text) return;
+    await sendWorkAnswer(id, text);
+    return;
   }
   const row = e.target.closest('.item, .word');
   if (row){ if (row.dataset.key) open(row.dataset.key); return; }
@@ -1823,11 +1978,17 @@ $('#note-dlg').addEventListener('close', async function(){
   await loadSaid(); render();
 });
 
-Promise.all([loadSaid(), loadMessages()]).then(([said]) => {
+Promise.all([loadSaid(), loadMessages(), loadWork()]).then(([said]) => {
   reconcilePending(said.read);
+  renderList();
   return poll();
 });
 setInterval(poll, POLL_MS);
+// The work board is cached ~15s server-side (bin/command-center.py's Work
+// class) because it shells out to fm-bearings-snapshot.sh, which does bounded
+// remote-ledger reads; polling it on the 3-second item cadence would buy
+// nothing and cost every tab a slow request it does not need.
+setInterval(async () => { await loadWork(); renderList(); }, 15000);
 // The message log is a local file read, so it is polled on the same cadence and
 // re-rendered only when a message actually arrived - his typing survives the
 // re-render either way, because paintMain owns that.

@@ -83,6 +83,7 @@ PAGE = os.path.join(WEB, "command-center.html")
 # The page's decision rules, in their own file so tests can execute them.
 RULES = os.path.join(WEB, "command-center-state.js")
 SCAN = os.path.join(BIN, "command-center-scan.sh")
+WORK = os.path.join(BIN, "command-center-work.sh")
 
 DEFAULT_FIRSTMATE_ROOT = "/home/tds/p/firstmate"
 
@@ -260,6 +261,65 @@ class Records:
 def item_key(item):
     """The identity the page uses too (itemKey in bin/command-center.html)."""
     return "/".join([item["home"], item["source"], item["id"], item.get("key") or ""])
+
+
+class Work:
+    """The /bearings lavish board's four sections, cached on their own clock.
+
+    bin/command-center-work.sh shells out to fm-bearings-snapshot.sh, which does
+    bounded remote-ledger reads and is too slow to run on the 3-second /api/items
+    cadence, so this refreshes on a plain time interval rather than a change
+    check. A stale board a few seconds behind is a fair price for a compact
+    poll; an /api/items request blocked behind a fleet-wide scan is not.
+    """
+
+    MIN_INTERVAL = 15.0
+
+    def __init__(self, home):
+        self.home = home
+        self.lock = threading.Lock()
+        self.body = None
+        self.error = None
+        self.checked = float("-inf")
+        self.scan = threading.Lock()
+
+    def refresh(self):
+        if self.body is not None and time.monotonic() - self.checked < self.MIN_INTERVAL:
+            return
+        if not self.scan.acquire(blocking=False):
+            return  # someone else is already refreshing; this poll shows what stands
+        try:
+            self._refresh_locked()
+        finally:
+            self.scan.release()
+
+    def _refresh_locked(self):
+        if self.body is not None and time.monotonic() - self.checked < self.MIN_INTERVAL:
+            return
+        self.checked = time.monotonic()
+        env = dict(os.environ, FM_HOME=self.home, FM_FIRSTMATE_ROOT=FIRSTMATE_ROOT)
+        try:
+            proc = subprocess.run(
+                [WORK], capture_output=True, text=True, timeout=90,
+                env=env, stdin=subprocess.DEVNULL, check=False)
+        except (OSError, subprocess.SubprocessError) as exc:
+            self.error = f"the work board could not be read: {exc}"
+            return
+        if proc.returncode != 0:
+            self.error = f"the work board could not be read: {proc.stderr.strip()[:400]}"
+            return
+        try:
+            json.loads(proc.stdout)
+        except json.JSONDecodeError as exc:
+            self.error = f"the work board produced unreadable output: {exc}"
+            return
+        self.error = None
+        with self.lock:
+            self.body = proc.stdout.encode()
+
+    def snapshot(self):
+        with self.lock:
+            return self.body
 
 
 class MessageCapture:
@@ -870,6 +930,7 @@ class Handler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
     records = None
     capture = None
+    work = None
 
     def log_message(self, fmt, *args):  # quieter than the stdlib default
         if self.path.startswith("/api/items"):
@@ -1074,6 +1135,16 @@ class Handler(BaseHTTPRequestHandler):
 
         if path == "/api/said":
             self._log_response("said", said_log(self.records.home), read_said)
+            return
+
+        if path == "/api/work":
+            self.work.refresh()
+            body = self.work.snapshot()
+            if body is None:
+                self._json(503, {"error": self.work.error
+                                 or "the work board has not been read yet"})
+                return
+            self._send(200, body)
             return
 
         self._send(404, b"not found", "text/plain; charset=utf-8")
@@ -1335,6 +1406,7 @@ def main(argv=None):
 
     Handler.records = Records(home)
     Handler.capture = MessageCapture(home)
+    Handler.work = Work(home)
     # Start capture straight away so the list is complete - today's messages
     # backfilled on the first ever run - before the page is even opened.
     Handler.capture.ensure()
