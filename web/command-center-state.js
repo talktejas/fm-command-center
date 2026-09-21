@@ -60,21 +60,18 @@ function tense(state, now) {
 }
 
 // --- what a dropped send means, per route ---------------------------------------
-// The request never came back. On the SEND route the steer may already sit on
-// the worker's inbox, so delivery is unknown and a second try is a second steer.
-// A HOLD writes a local record with no delivery plane, and fm-captain-hold.sh
-// documents an exact retry as idempotent: the hold route has NO locking outcome,
-// in this failure or any other, because a lock there blocks the retry that IS
-// the fix.
+// The request never came back. Every Waiting-on-you answer and every note now
+// goes only to firstmate's captain inbox - a local record write with no
+// worker-facing delivery plane - so a resend is never a second steer landing
+// on a worker: it is at worst a second note, and nothing here locks against it.
 function transportFailure(source, detail) {
-  return source === 'hold' ? { error: detail } : { outcome: 'unknown', detail };
+  return { error: detail };
 }
 
 // --- when a do-not-resend verdict is set, and when it ends -----------------------
-// Set only for an outcome that forbids a resend, and never on the hold route.
+// Nothing on the inbox-note route forbids a resend, so no verdict is ever set.
 function verdictFor(source, outcome, detail, sentCount) {
-  if (source === 'hold' || outcome !== 'unknown') return null;
-  return { outcome, detail: detail || '', sent: sentCount };
+  return null;
 }
 
 // Released on EVIDENCE, never on a clock: the item has left the list, or the
