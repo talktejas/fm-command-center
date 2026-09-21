@@ -115,9 +115,11 @@ Replying never removes the item from **Waiting on you**, and never archives the 
 
 A note that answers nothing (typed with no item open) goes through `bin/fm-inbox.sh note` alone, the same as it always has.
 
-## Archive
+## Archive and Hold
 
-Every row you can act on — a Messages row, a Waiting-on-you item (in its list row and its opened pane), a My words conversation — carries its own **Archive** button, and one click moves it to the Archived tab with no confirmation. A Messages row's archive state is durable, recorded beside the message log itself, so it survives a restart and reads the same from Archived or restored back to Messages. A Waiting-on-you item has no durable record of its own to carry an archived flag — it is re-read from the live backlog scan on every poll — so its archive state is kept in the browser, the same way its draft and its do-not-resend state already are.
+Every row you can act on — a Messages row, a Waiting-on-you item (in its list row and its opened pane), a My words conversation — carries its own **Archive** and **Hold** buttons, and one click moves it with no confirmation: Archive to the Archived tab, Hold to the On hold tab (**Back to list** there returns it). Hold is only ever your own parking — nothing it touches is ever sent to firstmate.
+
+Both are durable on the server, in `<home>/data/command-center/parked.jsonl`, the same promise `said.jsonl` already makes for what you typed — browser storage was fragile (gone in a private window, invisible from another browser), so a restart or a different browser reads the same state. A Messages row's Archive stays on the record it already had (`captain-messages.jsonl`, the `archive`/`unarchive` amendment beside the message) since that already worked; everything else — a Waiting-on-you item, a My words conversation, and a message's Hold, which had no durable record before — goes through `POST /api/park` (`{target: "item"|"word"|"message", key, state: "archived"|"held"|"none"}`; `bin/command-center.py`'s `record_parked`/`read_parked`). A My words conversation is keyed the same way the page groups it (`wordConversationKey`): the message it replied to, or the item/note key otherwise, so one click parks every send in that conversation together, not one row at a time. An item's key is its own `home/source/id/key` (`item_key`), so parking it from Waiting-on-you and parking its own My words conversation are two different keys under two different targets - archiving the item does not, on its own, archive its conversation, or the reverse.
 
 ## Where your reply to a message goes
 

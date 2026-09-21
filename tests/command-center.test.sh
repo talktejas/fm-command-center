@@ -1915,6 +1915,96 @@ test_an_archived_message_leaves_messages_and_can_be_restored() {
   pass "archiving is durable beside the message and can be restored"
 }
 
+# Browser localStorage was fragile - gone in a private window, invisible from
+# another browser - so Archive and Hold for a Waiting-on-you item, a My words
+# conversation, and Hold for a message (its Archive already had a durable
+# record) all go through /api/park into the command center's own
+# parked.jsonl. A restart must still read it back exactly, the same
+# durability promise /api/archive already keeps for a message.
+test_park_makes_item_word_and_message_state_durable_across_a_restart() {
+  local home port result
+  home="$TMP_ROOT/park"
+  mkdir -p "$home/data" "$home/state"
+  FM_HOME="$home" FM_ROOT_OVERRIDE="$FIRSTMATE_ROOT" \
+    "$TASKS_AXI" add cc-park "Blue or green?" --kind captain --repo demo \
+    >/dev/null 2>"$TMP_ROOT/axi.err" \
+    || fail "tasks-axi could not add the fixture task, so this test never ran: $(cat "$TMP_ROOT/axi.err")"
+  FM_HOME="$home" FM_ROOT_OVERRIDE="$FIRSTMATE_ROOT" \
+    "$CAPTAIN_HOLD" hold cc-park --reason "The colour call" \
+    >/dev/null 2>"$TMP_ROOT/axi.err" \
+    || fail "the fixture task could not be held for the captain: $(cat "$TMP_ROOT/axi.err")"
+  local id
+  id=$(say "$home" "Ship it" "Nothing needs a reply.") || fail "the recorder refused the message"
+
+  start_server "$home" || fail "the server did not start"
+  port=$SERVER_PORT
+  curl -s -m 120 -o /dev/null "http://127.0.0.1:$port/api/items"
+  local item_key="main/hold/cc-park/cc-park"
+
+  # A word conversation only exists in My words once something was actually
+  # said about it - a reply to this message is what puts it there.
+  result=$(post "$port" /api/reply "$(jq -cn --arg m "$id" '{msg:$m,text:"Noted."}')")
+  wait_outcome "$home" "$(jq -r .sid <<<"$result")" >/dev/null \
+    || fail "the reply this test parks never reached the record"
+
+  result=$(post "$port" /api/park "$(jq -cn --arg k "$item_key" '{target:"item",key:$k,state:"archived"}')")
+  assert_contains "$result" '"ok":true' "an item could not be archived through /api/park"
+  result=$(post "$port" /api/park "$(jq -cn --arg k "msg/$id" '{target:"word",key:$k,state:"held"}')")
+  assert_contains "$result" '"ok":true' "a My words conversation could not be held through /api/park"
+  result=$(post "$port" /api/park "$(jq -cn --arg k "$id" '{target:"message",key:$k,state:"held"}')")
+  assert_contains "$result" '"ok":true' "a message could not be held through /api/park"
+
+  assert_equals true \
+    "$(curl -s -m 30 "http://127.0.0.1:$port/api/items" | jq -r --arg k "$item_key" \
+      '[.items[] | select((.home+"/"+.source+"/"+.id+"/"+(.key // "")) == $k)][0].archived')" \
+    "the item did not read back archived from /api/items"
+  assert_equals true \
+    "$(curl -s -m 30 "http://127.0.0.1:$port/api/messages?id=$id" | jq -r '.messages[0].held')" \
+    "the message did not read back held from /api/messages"
+
+  stop_server
+  start_server "$home" || fail "the server did not restart"
+  port=$SERVER_PORT
+  curl -s -m 120 -o /dev/null "http://127.0.0.1:$port/api/items"
+
+  assert_equals true \
+    "$(curl -s -m 30 "http://127.0.0.1:$port/api/items" | jq -r --arg k "$item_key" \
+      '[.items[] | select((.home+"/"+.source+"/"+.id+"/"+(.key // "")) == $k)][0].archived')" \
+    "the item's archive did not survive a restart"
+  assert_equals true \
+    "$(curl -s -m 30 "http://127.0.0.1:$port/api/messages?id=$id" | jq -r '.messages[0].held')" \
+    "the message's hold did not survive a restart"
+  wait_for "the My words conversation's hold did not survive a restart" \
+    bash -c "curl -s -m 30 'http://127.0.0.1:$port/api/said' \
+      | jq -e --arg m '$id' '[.said[] | select(.msg == \$m)][0].held == true' >/dev/null"
+
+  # "none" clears it back to its ordinary list, on every target.
+  result=$(post "$port" /api/park "$(jq -cn --arg k "$item_key" '{target:"item",key:$k,state:"none"}')")
+  assert_contains "$result" '"ok":true' "an item could not be returned to its list through /api/park"
+  assert_equals false \
+    "$(curl -s -m 30 "http://127.0.0.1:$port/api/items" | jq -r --arg k "$item_key" \
+      '[.items[] | select((.home+"/"+.source+"/"+.id+"/"+(.key // "")) == $k)][0].archived')" \
+    "\"none\" did not clear the item's archived state"
+  stop_server
+  pass "Archive and Hold for an item, a My words conversation, and a message all survive a restart"
+}
+
+test_park_refuses_an_unknown_target_or_state() {
+  local home port body
+  home="$TMP_ROOT/park-bad"
+  seed_home "$home"
+  start_server "$home" || fail "the server did not start"
+  port=$SERVER_PORT
+  body=$(post "$port" /api/park '{"target":"worker","key":"x","state":"archived"}')
+  assert_contains "$body" '"ok":false' "an unknown target was accepted"
+  body=$(post "$port" /api/park '{"target":"item","key":"x","state":"deleted"}')
+  assert_contains "$body" '"ok":false' "an unknown state was accepted"
+  body=$(post "$port" /api/park '{"target":"item","key":"","state":"archived"}')
+  assert_contains "$body" '"ok":false' "an empty key was accepted"
+  stop_server
+  pass "an unknown target, state or empty key is refused"
+}
+
 
 # The captain: sometimes a reply is just a comment he wants to keep checking
 # on, so a reply must never remove anything from its list on its own. Only his
@@ -2615,6 +2705,8 @@ test_a_reply_that_is_not_a_question_is_sent_even_with_no_scan
 test_every_captured_message_is_reachable_without_serving_them_all
 test_a_message_far_behind_the_window_is_served_by_id
 test_an_archived_message_leaves_messages_and_can_be_restored
+test_park_makes_item_word_and_message_state_durable_across_a_restart
+test_park_refuses_an_unknown_target_or_state
 test_a_reply_never_archives_its_message
 test_an_unchanged_message_poll_is_answered_without_the_log
 test_a_search_finds_text_however_the_record_escapes_it

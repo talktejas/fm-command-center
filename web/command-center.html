@@ -443,17 +443,6 @@ const state = {
   capture:null, more:false, archivedMore:false, found:null, archivedFound:null,
   total:0, archivedTotal:0, openMsg:null, openNote:'', archiving:null,
   applied:load('cc.applied',{}),
-  // A Waiting-on-you item and a My words conversation have no durable archive
-  // record of their own (an item is re-read from the live scan every poll; a
-  // said row is append-only), so their archive state is kept here, the same
-  // way their draft and do-not-resend state already are. A Messages row's
-  // archive state stays server-durable (record_archive) - moveArchived below.
-  archivedItems:load('cc.archivedItems',{}), archivedWords:load('cc.archivedWords',{}),
-  // Hold is only ever his own parking, never sent anywhere, so all three kinds
-  // are kept client-side the same way, including messages - there is no
-  // server concept of "held" at all.
-  heldItems:load('cc.heldItems',{}), heldWords:load('cc.heldWords',{}),
-  heldMessages:load('cc.heldMessages',{}),
   // A send in flight, by sid: what he typed and where he typed it. His words
   // leave the box only when the outcome row says the send landed.
   pending:load('cc.pending',{}), failed:load('cc.failed',{}),
@@ -524,44 +513,47 @@ const isDeferred = it => Boolean(it.deferred_until) &&
 // two are answered by different commands, so home+id alone would merge them into
 // one row and one draft. itemKey comes from bin/command-center-state.js.
 const isUnread = it => !state.seen[itemKey(it)];
-// --- explicit archiving --------------------------------------------------------
+// --- explicit archiving and holding --------------------------------------------
 // One click, no confirmation, on any row: Messages, Waiting-on-you, My words.
 // Never automatic - a reply or an answer never moves anything here on its own.
-const isItemArchived = it => !!state.archivedItems[itemKey(it)];
+// Durable on the server (command-center.py's /api/park, parked.jsonl) rather
+// than browser storage, so it survives a refresh and reads the same from any
+// browser - a message's own Archive stays on the log it already had
+// (/api/archive) since that already works; everything else, including a
+// message's Hold, goes through /api/park. The object's own `archived`/`held`
+// fields are what the server just told this poll (annotated in
+// command-center.py); setting one here also mutates that field on the spot,
+// for an instant row without waiting on the round trip, and the next poll
+// carries the same truth back from the server, park action already landed.
+const isItemArchived = it => !!it.archived;
+const isWordArchived = r => !!r.archived;
+const isItemHeld = it => !!it.held;
+const isWordHeld = r => !!r.held;
+const isMsgHeld = m => !!m.held;
+function park(target, key, state_){
+  post('/api/park', {target, key, state: state_}).catch(() => { /* next poll reconciles */ });
+}
 function setItemArchived(it, archived){
-  if (archived) state.archivedItems[itemKey(it)] = true;
-  else delete state.archivedItems[itemKey(it)];
-  save('cc.archivedItems', state.archivedItems);
+  it.archived = archived;
+  park('item', itemKey(it), archived ? 'archived' : 'none');
 }
-const isWordArchived = r => !!(r.sid && state.archivedWords[r.sid]);
-function setWordArchived(r, archived){
-  if (!r.sid) return;
-  if (archived) state.archivedWords[r.sid] = true;
-  else delete state.archivedWords[r.sid];
-  save('cc.archivedWords', state.archivedWords);
-}
-// --- explicit holding -----------------------------------------------------------
-// His own parking, so he can come back and check on it - never sent to
-// firstmate, and never confused with Archive: a held row keeps showing in
-// On hold until he explicitly moves it back.
-const isItemHeld = it => !!state.heldItems[itemKey(it)];
 function setItemHeld(it, held){
-  if (held) state.heldItems[itemKey(it)] = true;
-  else delete state.heldItems[itemKey(it)];
-  save('cc.heldItems', state.heldItems);
+  it.held = held;
+  park('item', itemKey(it), held ? 'held' : 'none');
 }
-const isWordHeld = r => !!(r.sid && state.heldWords[r.sid]);
+function setWordArchived(r, archived){
+  const key = wordConversationKey(r);
+  for (const x of state.said) if (wordConversationKey(x) === key) x.archived = archived;
+  park('word', key, archived ? 'archived' : 'none');
+}
 function setWordHeld(r, held){
-  if (!r.sid) return;
-  if (held) state.heldWords[r.sid] = true;
-  else delete state.heldWords[r.sid];
-  save('cc.heldWords', state.heldWords);
+  const key = wordConversationKey(r);
+  for (const x of state.said) if (wordConversationKey(x) === key) x.held = held;
+  park('word', key, held ? 'held' : 'none');
 }
-const isMsgHeld = m => !!state.heldMessages[m.id];
 function setMsgHeld(m, held){
-  if (held) state.heldMessages[m.id] = true;
-  else delete state.heldMessages[m.id];
-  save('cc.heldMessages', state.heldMessages);
+  m.held = held;
+  park('message', m.id, held ? 'held' : 'none');
 }
 // --- what firstmate SAID -----------------------------------------------------
 // bin/fm-captain-message.sh writes one record per message; this page is the
