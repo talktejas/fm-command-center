@@ -1275,6 +1275,7 @@ test_the_click_returns_before_the_command_finishes() {
   fakeroot="$TMP_ROOT/instant-firstmate"
   mkdir -p "$fakeroot/bin"
   for f in "$FIRSTMATE_ROOT"/bin/*; do ln -s "$f" "$fakeroot/bin/$(basename "$f")"; done
+  ln -s "$FIRSTMATE_ROOT/.tasks.toml" "$fakeroot/.tasks.toml"
   rm -f "$fakeroot/bin/fm-captain-hold.sh"
   printf '#!/usr/bin/env bash\nsleep 6\nexit 0\n' > "$fakeroot/bin/fm-captain-hold.sh"
   chmod +x "$fakeroot/bin/fm-captain-hold.sh"
@@ -1395,6 +1396,7 @@ test_a_send_that_cannot_run_at_all_still_records_an_outcome() {
   fakeroot="$TMP_ROOT/norunner-firstmate"
   mkdir -p "$fakeroot/bin"
   for f in "$FIRSTMATE_ROOT"/bin/*; do ln -s "$f" "$fakeroot/bin/$(basename "$f")"; done
+  ln -s "$FIRSTMATE_ROOT/.tasks.toml" "$fakeroot/.tasks.toml"
   # The script that owns the delivery is gone: subprocess.run raises, and that
   # is not a SubprocessError.
   rm -f "$fakeroot/bin/fm-captain-hold.sh"

@@ -7,7 +7,7 @@ Everything else on it is a view over firstmate's own records, not a second place
 ## Start it
 
 ```sh
-python3 bin/command-center.py --home "$FM_HOME"
+python3 command-center.py --home "$FM_HOME"
 ```
 
 Then open `http://127.0.0.1:8765`.
@@ -19,7 +19,7 @@ Nothing to install: it is Python 3 standard library only, with no build step and
 ## Keep it running
 
 ```sh
-python3 bin/command-center.py --install-unit --home "$FM_HOME"
+python3 command-center.py --install-unit --home "$FM_HOME"
 systemctl --user daemon-reload
 systemctl --user enable --now firstmate-command-center
 loginctl enable-linger "$USER"
@@ -33,7 +33,7 @@ Re-run `--install-unit` after changing it, then `systemctl --user daemon-reload 
 
 ## What it shows
 
-The left list has three tabs.
+The left list has four tabs.
 
 **Messages** is the default and is what firstmate said to you: one row per message, newest first, each with its title and its time. A captured message's words are never read for which work it is about. When the turn it was said in named exactly one task's own record (`state/<id>.meta` or `.status`) in a tool call, it is recorded against that task with the project and worktree that record names; a turn that named none or several reads "Not recorded". That record holds no branch, so the capture reads it live from the task's worktree when the turn has just ended; a message captured later, or backfilled, reads "Not recorded" for its branch rather than today's branch of that worktree. A message written by hand with `bin/fm-captain-message.sh --task` carries all three. `bin/fm-captain-message-backfill.py` applies the same turn rule to older rows and fills project and worktree for any row carrying a task id whose record still names them; it never guesses from message text, and never derives a past branch from a worktree's current one.
 Click one and the whole message opens with a box to reply in.
@@ -41,6 +41,9 @@ The list opens on the newest 200 and `Show older messages` walks back through th
 Where a reply goes depends on how the message was recorded. A message firstmate recorded by hand as a question (`bin/fm-captain-message.sh --question`) is answered as that question: your reply goes to the worker or held task still waiting on that decision, and to firstmate itself once nothing is. A message capture recorded on its own is never a question, so a reply to it always reaches firstmate as a note, never a worker.
 The reply box says which of these it is before you send.
 Your replies appear under the message, so the exchange reads as a conversation.
+An open message has an `Archive` button for a note you have read and need not answer; it moves the message to **Archived**, where the same button reads `Restore to Messages` and moves it back.
+Sending a reply archives the message too, once your reply is accepted, so a conversation you have answered leaves Messages on its own; a later delivery failure does not bring it back.
+Archived keeps its own count and its own search and `Show older messages`, answered from the whole log like Messages.
 
 These are captured automatically: `bin/fm-captain-message-sweep.py` reads the Claude conversation record on disk, which holds every message verbatim, and records every reply firstmate gave - no agent chooses or remembers to record anything. Only what firstmate said to you counts: its working narration between tool calls, a subagent's chatter, and the lines the harness wrote itself are not replies and never become messages.
 It runs from two places, and they know different things. The Claude Stop hook (`bin/fm-captain-message-hook.sh`) fires as each turn ends and hands over the hook payload, which NAMES the transcript that session writes; the sweep reads that one file and nothing else, so the hook is bounded to a few seconds and never holds a turn end. This server sweeps on its own poll cadence, over the directory it derives from the home's path plus every transcript a payload has named - that is what catches turns that ended unusually (interrupted, errored, killed) once their session moves on, and what backfills at startup.
@@ -89,14 +92,14 @@ The lamp beside each row is `bin/fm-busy-lib.sh`'s classification of whether any
 A missing or stale signal classifies as *cannot tell* and is never shown as healthy.
 
 Something you sent a worker that has not been picked up is called stuck after 270 seconds, the page's own threshold, chosen to match firstmate's retry ladder: `FM_TASK_INBOX_GRACE_SECS` (default 90) between rings times `FM_TASK_INBOX_RING_MAX` (default 3) rings.
-Nothing serves that environment to the browser, so setting either variable changes firstmate's ringing and not this page; to keep the two in step, edit `GRACE_SECS` and `RING_MAX` in `bin/command-center.html` as well.
+Nothing serves that environment to the browser, so setting either variable changes firstmate's ringing and not this page; to keep the two in step, edit `GRACE_SECS` and `RING_MAX` in `web/command-center.html` as well.
 
 Above the list, every notice that applies is shown as its own band, because two independent facts never share one slot and none of them pushes another off the screen: whatever has gone wrong between the page and the records, a backlog whose holds are hidden, the homes firstmate is not watching, and the homes it is — each named, each with its own last beat from `state/.last-watcher-beat`.
 If a home has gone quiet, an answer you send there is still recorded but nothing will ring it, and the page says so rather than looking normal.
 Three things can go wrong between the page and the records, and each says what you can do about it. **It cannot reach the server** — nothing can be sent until it is back. **The server answers but no scan has ever succeeded** — there is no list, and the server refuses sends until there is one. **A scan failed over a list an earlier one read** — the list may be incomplete, and everything on it can still be answered.
 In all three the health bands stay on screen but stop speaking in the present: they say what was true at the last successful read, and when that read was. A poll merely being in flight changes nothing — the bands keep saying what the last answer established until a new one arrives.
 
-The page itself arrives as two files from the same address: the page, and `bin/command-center-state.js`, the decision rules every band and every send verdict above is made by.
+The page itself arrives as two files from the same address: the page, and `command-center-state.js`, the decision rules every band and every send verdict above is made by.
 The server refuses to start if either is missing, but a file can still fail to be served under it — during a self-update, say — so if the rules do not arrive the page says it did not load completely and sends nothing, rather than showing an empty list and a live beat it cannot stand behind. Reload; if that does not fix it, restart the command center.
 
 ## Where your answer goes
@@ -139,6 +142,7 @@ When the reply steers a worker still waiting, that protection covers the item to
 It has two writers: the automatic capture above (`bin/fm-captain-message-sweep.py`, which stamps each record with the conversation it came from so it is never recorded twice), and `bin/fm-captain-message.sh` by hand, whose `--task` fills the project, worktree and branch from that task's own record so all three are one flag rather than three chances to leave one out.
 `bin/fm-captain-message-backfill.py` never adds a record; it only fills a row's missing task, project and worktree in place (see Messages above). It and both writers share the log's write lock (`state/.captain-message-sweep.lock`), so the backfill's rewrite never loses a concurrent append.
 On the by-hand writer, `--question` marks a message as the question waiting on you, and `--question-key` names the stopped worker's own decision it asks about.
+The page itself appends one more kind of row: an `archive` or `unarchive` amendment naming the message it changes, and the latest one for a message decides whether it is archived.
 
 `<home>/data/command-center/said.jsonl`, an append-only log of what you typed and where it went.
 Every send - an answer, a reply, or a note that answers nothing - returns the moment your words are on disk, so you move to the next item at once and never wait on delivery.
@@ -186,6 +190,6 @@ A home whose holds are hidden from the page — one on a non-markdown backlog ba
 
 ## Reading it without the page
 
-`bin/command-center-scan.sh` prints the waiting view as JSON, and `--fingerprint` prints only the change check.
-`<home>/data/captain-messages.jsonl` is one JSON object per message and needs nothing to read it: the whole of it is on disk whatever the page has loaded.
+`command-center-scan.sh` prints the waiting view as JSON, and `--fingerprint` prints only the change check.
+`<home>/data/captain-messages.jsonl` is one JSON object per line - a message or an archive amendment - and needs nothing to read it: the whole of it is on disk whatever the page has loaded.
 Both honour `FM_HOME`.
