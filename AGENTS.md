@@ -14,6 +14,8 @@ Standalone extraction of firstmate's command center (originally `bin/command-cen
 - Tests (`tests/command-center.test.sh`, `tests/command-center-state.test.js`) run standalone against a throwaway firstmate home and a real (read-only) firstmate checkout for the scripts above — never against the primary firstmate checkout's live state, and never over a browser. Run with `bash tests/command-center.test.sh` and `node tests/command-center-state.test.js`.
 - `test_the_click_returns_before_the_command_finishes` in `tests/command-center.test.sh` is flaky under load (times out waiting on `/api/answer`); confirm against an unmodified checkout before treating a failure there as a regression.
 - When pulling a behavioural change from firstmate's copy of these files (e.g. a PR against `talktejas/firstmate`), port only the command-center-specific diff — firstmate's own script signatures may have drifted independently and should be left alone here.
+- Every answer sent from **Waiting on you** goes through `deliver_certainly` (`command-center.py`): the guaranteed `fm-inbox.sh note` write always runs first, so the item never reads "not sent" once it lands; the item's own keyed decision route (`fm-captain-hold.sh answer` / `fm-send.sh`) then runs as a bonus behind it, and a bonus failure only degrades the item's detail text, never its outcome. See "Where your answer goes" in `docs/command-center.md`.
+- A test that spins up a throwaway `--firstmate-root` (symlinking real `bin/*` in) must also symlink `.tasks.toml` from the real root, or `command-center-scan.sh` reports every backlog as unreadable.
 
 ## Maintaining this file
 

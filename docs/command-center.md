@@ -106,16 +106,19 @@ The server refuses to start if either is missing, but a file can still fail to b
 
 ## Where your answer goes
 
-| You answered | It runs |
+Every answer in **Waiting on you** goes to firstmate's captain inbox first, through `bin/fm-inbox.sh note` — the exact path a plain note already takes — so firstmate is woken and reads your words no matter what happens next. That is the guarantee: once the inbox write succeeds the item reads sent, and it never reads "not sent" again over anything that happens after.
+
+Only then, as a bonus, does the item's own keyed decision route also run:
+
+| You answered | The bonus route |
 |---|---|
 | a question held for you (`kind: captain`) | `bin/fm-captain-hold.sh answer`, which records your exact words and closes the call in the same act |
 | work held pending your answer (any other kind) | `bin/fm-captain-hold.sh answer --release`, which records your words and lifts the hold so the work resumes — it is never marked done |
 | a stopped worker | `bin/fm-send.sh --resolve-key`, which puts your words in the worker's steering inbox and closes the decision |
-| a note that answers nothing | `bin/fm-inbox.sh note`, queued for firstmate's next turn |
 
-The server reuses those commands rather than writing records itself, so every guard they carry still applies.
-Every answer settles the decision it was sent about; the only difference between the two held rows is whether settling it closes the task or lets the work go on.
-A held row that records no kind at all cannot be told apart, so the command center refuses the send and says so rather than risk marking unstarted work complete — answer that one with `fm-captain-hold.sh`, which can see the task itself.
+When the bonus route lands, that is what the item shows you — which route ran, and whether it closed the decision or lifted a hold. When it does not — a held row that records no kind at all cannot be told apart from work, a script is missing, a call fails — that failure is folded into the detail of a send that already landed: the worst case is that a person has to finish filing the decision by hand, never a lost answer. Answering a no-kind row directly with `fm-captain-hold.sh`, which can see the task itself, still works and still closes it properly.
+
+A note that answers nothing (typed with no item open) goes through `bin/fm-inbox.sh note` alone, the same as it always has.
 
 ## Where your reply to a message goes
 
@@ -154,6 +157,7 @@ The page folds the pair and shows the outcome in place on the row you answered, 
 Until then the box says your words were written down and are going out, never that they arrived, and the button that sent them does not offer to send them again.
 
 The outcome is read from the exit code of the command that ran and nothing else: **sent**, **failed** (a captain hold refused the record and nothing left this machine — answering it again is safe, and `fm-captain-hold.sh` documents an exact retry as idempotent), or **unknown** (the command reported neither, so the page never guesses which: the page reads only a confirmed `fm-send.sh` exit as sent, and every other exit is unknown to it — including the one that says the answer was delivered but its decision close failed, which the page does not yet report as a state of its own; and `fm-inbox.sh` saves a note before it wakes firstmate, so its failure may mean only that the wake did not land).
+An answer in **Waiting on you** never reads **failed** once it has actually been sent: the guaranteed inbox note (see **Where your answer goes**) makes **sent** the floor, and the only way one reads anything else is if that guaranteed note itself could not be confirmed, which reads **unknown** exactly as any other unconfirmed `fm-inbox.sh` send does. A reply that steers an item gets the same guarantee, with one exception that is decided before either route ever runs: a reply to a question whose scan could not be read is refused outright and reads **failed**, because nothing can rule out the answer route without it (see **Where your reply to a message goes**).
 On **unknown** the page keeps your text, says plainly that delivery could not be confirmed, and does not offer Send again until the steering record appears — or until you say so yourself, knowing it may be a second copy.
 On any other non-success it keeps your text too, so nothing you typed is cleared by a send that did not land.
 A record still marked as being delivered by a server that is no longer delivering it - it restarted in between - reads back as **unknown**, because that delivery may or may not have happened.

@@ -698,8 +698,12 @@ test_answering_held_work_releases_it_instead_of_closing_it() {
   pass "answering held work lifts its hold and never marks the work done"
 }
 
-# Closing real work as done is not a guess worth making.
-test_a_held_row_with_no_kind_is_refused_rather_than_guessed() {
+# Closing real work as done is not a guess worth making - but his words must
+# still reach firstmate. deliver_certainly (bin/command-center.py) writes the
+# guaranteed inbox note before it ever tries the row's own keyed decision
+# route, so a row that cannot be classified never comes back as "not sent":
+# the bonus refusal is folded into the detail of a send that landed.
+test_a_held_row_with_no_kind_still_reaches_firstmate_as_a_note() {
   local home port result resolved
   home="$TMP_ROOT/nokind"
   mkdir -p "$home/data" "$home/state"
@@ -711,20 +715,20 @@ test_a_held_row_with_no_kind_is_refused_rather_than_guessed() {
   port=$SERVER_PORT
   result=$(post "$port" /api/answer \
     '{"home":"main","id":"cc-bare","source":"hold","key":"cc-bare","text":"Green."}')
-  # The refusal is an outcome like any other: the send is accepted at once and
-  # the reason lands on the record of what he said.
   assert_contains "$result" '"outcome":"sending"' \
     "the send did not return the moment his words were durable"
   resolved=$(wait_outcome "$home" "$(jq -r .sid <<<"$result")") \
     || fail "the outcome of the send never reached the record"
   stop_server
-  assert_contains "$resolved" '"outcome":"failed"' \
-    "a row that cannot be classified was answered anyway"
+  assert_contains "$resolved" '"outcome":"sent"' \
+    "the guaranteed note did not land, so a row that cannot be classified read as not sent"
   assert_contains "$resolved" 'cannot tell a question from work' \
-    "the refusal did not say why nothing was sent"
+    "the bonus route's refusal was not explained on the record"
   assert_not_contains "$(cat "$home/data/backlog.md")" 'Green.' \
-    "a refused send still reached the task record"
-  pass "a held row with no kind is refused rather than guessed"
+    "a row that cannot be classified was filed as a decision anyway"
+  assert_contains "$(cat "$home"/state/inbox/*.note 2>/dev/null)" 'Green.' \
+    "his words never reached firstmate's own inbox"
+  pass "a held row with no kind still reaches firstmate as a note, never as a lost answer"
 }
 
 # The page clears his box the moment a send is accepted, so "accepted" has to
@@ -1460,16 +1464,20 @@ test_the_ask_user_machine_line_is_stated_plainly_and_real_questions_are_not() {
   pass "the ask-user machine line is stated plainly and real questions are shown as written"
 }
 
-test_a_send_that_cannot_run_at_all_still_records_an_outcome() {
-  local home fakeroot port f result
+# The bonus route can be gone entirely - a bare OSError, not a
+# SubprocessError - and deliver_certainly (bin/command-center.py) still owes
+# him a landed send: the guaranteed note went out through fm-inbox.sh, which
+# is untouched here, so the bonus raising must never read as "not sent".
+test_a_send_whose_bonus_route_cannot_run_at_all_still_reaches_firstmate() {
+  local home fakeroot port f result resolved
   home="$TMP_ROOT/norunner"
   seed_home "$home"
   fakeroot="$TMP_ROOT/norunner-firstmate"
   mkdir -p "$fakeroot/bin"
   for f in "$FIRSTMATE_ROOT"/bin/*; do ln -s "$f" "$fakeroot/bin/$(basename "$f")"; done
   ln -s "$FIRSTMATE_ROOT/.tasks.toml" "$fakeroot/.tasks.toml"
-  # The script that owns the delivery is gone: subprocess.run raises, and that
-  # is not a SubprocessError.
+  # The script that owns the bonus decision route is gone: subprocess.run
+  # raises, and that is not a SubprocessError.
   rm -f "$fakeroot/bin/fm-captain-hold.sh"
 
   port=$(python3 -c 'import socket;s=socket.socket();s.bind(("127.0.0.1",0));print(s.getsockname()[1]);s.close()')
@@ -1486,10 +1494,16 @@ test_a_send_that_cannot_run_at_all_still_records_an_outcome() {
 
   result=$(post "$port" /api/answer \
     '{"home":"main","id":"cc-live","source":"hold","key":"cc-live","text":"Go blue."}')
-  assert_contains "$(wait_outcome "$home" "$(jq -r .sid <<<"$result")")" '"outcome":"unknown"' \
-    "a send that could not run at all left the record saying it was going out"
+  resolved=$(wait_outcome "$home" "$(jq -r .sid <<<"$result")") \
+    || fail "the outcome of the send never reached the record"
   stop_server
-  pass "a send that cannot run at all still records an outcome"
+  assert_contains "$resolved" '"outcome":"sent"' \
+    "a bonus route that cannot run at all left the item reading as not sent"
+  assert_not_contains "$(cat "$home/data/backlog.md")" 'Go blue.' \
+    "a bonus route that never ran was somehow recorded as having closed the decision"
+  assert_contains "$(cat "$home"/state/inbox/*.note 2>/dev/null)" 'Go blue.' \
+    "his words never reached firstmate's own inbox when the bonus route could not run"
+  pass "a send whose bonus route cannot run at all still reaches firstmate through the guaranteed note"
 }
 
 # A message the recorder never marked as a question has no answer route to rule
@@ -2317,7 +2331,7 @@ test_server_refuses_bad_input_before_running_anything
 test_a_server_with_no_scan_yet_refuses_both_the_list_and_a_send
 test_answering_a_hold_records_the_captains_words_and_clears_the_item
 test_answering_held_work_releases_it_instead_of_closing_it
-test_a_held_row_with_no_kind_is_refused_rather_than_guessed
+test_a_held_row_with_no_kind_still_reaches_firstmate_as_a_note
 test_a_note_of_just_a_dash_is_queued_and_never_hangs_the_server
 test_a_send_whose_words_cannot_be_recorded_is_refused
 test_an_unreadable_log_is_reported_not_shown_as_empty
@@ -2344,7 +2358,7 @@ test_the_click_returns_before_the_command_finishes
 test_a_failed_read_is_never_cached_as_the_state_of_the_log
 test_the_recorder_takes_a_body_that_looks_like_a_flag
 test_the_ask_user_machine_line_is_stated_plainly_and_real_questions_are_not
-test_a_send_that_cannot_run_at_all_still_records_an_outcome
+test_a_send_whose_bonus_route_cannot_run_at_all_still_reaches_firstmate
 test_a_reply_that_is_not_a_question_is_sent_even_with_no_scan
 test_every_captured_message_is_reachable_without_serving_them_all
 test_a_message_far_behind_the_window_is_served_by_id

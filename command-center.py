@@ -909,6 +909,47 @@ def send_note(home_path, text):
     return outcome, "fm-inbox.sh note", detail
 
 
+def deliver_certainly(home_path, item, text):
+    """Deliver a Waiting-on-you answer the way this page promises: certain,
+    never "not sent".
+
+    His words go to firstmate's captain inbox FIRST, through the exact path
+    the Messages reply box already uses (send_note) - so firstmate is woken
+    and reads them no matter what happens next. Only after that, as a bonus,
+    this also tries the item's own keyed decision route (send_answer:
+    fm-captain-hold.sh answer for a hold, fm-send.sh for a stopped worker).
+    When the bonus lands, its own route and mode are what he is told, because
+    that is the more useful truth. When it does not, the failure is never
+    reported as "not sent" - the guaranteed note already reached firstmate,
+    so the worst case is a person finishing the filing by hand, not a lost
+    answer - and mode "note" tells the page not to claim a decision closed
+    that only a note carried.
+
+    Either call can raise something other than SubprocessError (a missing
+    script is a bare OSError, not that) - caught broadly here for the same
+    reason accept_said catches broadly around a delivery thread: the note is
+    the guarantee, so nothing the bonus route does, including raising, may
+    take that guarantee away.
+    """
+    try:
+        note_outcome, note_route, note_detail = send_note(home_path, text)
+    except Exception as exc:  # noqa: BLE001 - the guarantee must survive whatever this throws
+        note_outcome, note_route, note_detail = "unknown", "fm-inbox.sh note", str(exc)
+
+    try:
+        bonus_outcome, bonus_route, bonus_detail, bonus_mode = send_answer(home_path, item, text)
+    except Exception as exc:  # noqa: BLE001 - a bonus failure must never look like a lost answer
+        bonus_outcome, bonus_route, bonus_detail, bonus_mode = "failed", "", str(exc), "none"
+
+    if bonus_outcome == "sent":
+        return "sent", bonus_route, bonus_detail, bonus_mode
+
+    detail = note_detail
+    if bonus_detail:
+        detail = f"{detail} — the decision route also ran and said: {bonus_detail}"
+    return note_outcome, note_route, detail[:600], "note"
+
+
 def record_archive(home, msg_id, archived):
     """Append one archive amendment beside the message it changes."""
     data = (json.dumps({"kind": "archive" if archived else "unarchive",
@@ -1255,7 +1296,7 @@ class Handler(BaseHTTPRequestHandler):
                     return {"outcome": "failed", "route": "", "home": "main",
                             "detail": unread}
                 if item:
-                    outcome, route, detail, mode = send_answer(home_path, item, text)
+                    outcome, route, detail, mode = deliver_certainly(home_path, item, text)
                     if outcome != "failed":
                         records.invalidate()
                     return {"resolved": "answer", "outcome": outcome,
@@ -1315,7 +1356,7 @@ class Handler(BaseHTTPRequestHandler):
             records = self.records
 
             def deliver_answer():
-                outcome, route, detail, mode = send_answer(home_path, item, text)
+                outcome, route, detail, mode = deliver_certainly(home_path, item, text)
                 if outcome != "failed":
                     records.invalidate()     # force a rescan on the next poll
                 return {"outcome": outcome, "route": route, "detail": detail,

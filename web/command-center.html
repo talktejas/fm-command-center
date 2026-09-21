@@ -761,9 +761,14 @@ function wordOutcome(r){
     // case that is released instead, and the record says which act ran.
     case 'sent':
       if (r.kind !== 'answer') return 'Delivered through ' + esc(r.route);
+      // mode 'note' means only the guaranteed inbox note landed - the item's
+      // own decision route (deliver_certainly, bin/command-center.py) was a
+      // bonus that did not close anything, so nothing here may claim it did.
       return 'Delivered through ' + esc(r.route) + (r.mode === 'release'
         ? ' — the hold lifted, so the work resumes'
-        : ' — the decision closed');
+        : r.mode === 'close'
+        ? ' — the decision closed'
+        : ' — firstmate was told; this still needs finishing by hand');
     case 'unknown':
       return 'Delivery unknown — it may already have arrived: ' + esc(r.detail || '');
     default: return 'Not delivered: ' + esc(r.detail || '');
