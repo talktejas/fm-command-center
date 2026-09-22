@@ -789,14 +789,16 @@ function renderWatcher(){
        Anything held for you there is missing from this list — this is not the whole
        of it.${asOf}`));
 
-  const stale = homes.filter(h =>
-    !h.watcher_beat_epoch || readAt - h.watcher_beat_epoch > 300);
-  if (stale.length)
+  // Only the MAIN home's watch state is shown: every answer now routes to its
+  // inbox regardless of which home an item belongs to, so a second mate's own
+  // watcher state is no longer a fact that changes what he can do here.
+  const main = homes.find(h => h.id === 'main');
+  const mainStale = main && (!main.watcher_beat_epoch || readAt - main.watcher_beat_epoch > 300);
+  if (main && mainStale)
     notices.push(band('warn-soft', 'unknown',
-      `<b>Firstmate ${past ? 'was' : 'is'} not watching ${
-        stale.map(h => esc(h.name)).join(', ')}.</b> ${offline
+      `<b>Firstmate ${past ? 'was' : 'is'} not watching.</b> ${offline
         ? 'Nothing can be sent anywhere until this page can reach the server again.'
-        : 'An answer you send there is saved, but nothing will ring it until firstmate is back.'
+        : 'An answer you send is saved, but nothing will ring it until firstmate is back.'
       }${asOf}`));
 
   if (!homes.length){
@@ -804,16 +806,11 @@ function renderWatcher(){
     if (!state.unread)
       notices.push(band('warn-soft', 'unknown',
         `<b>No homes read yet.</b> Nothing here is a statement about firstmate's health.`));
-  } else {
-    // Named per home with its own age: the healthiest home's beat is not a
-    // figure for the fleet, and this band can now sit beside a stale one.
-    const fresh = homes.filter(h => !stale.includes(h));
-    if (fresh.length)
-      notices.push(`<div class="watcher"${past ? ' style="background:var(--warn-soft)"' : ''}>
-        <span class="${past ? 'lamp unknown' : 'beat'}"></span><span><b>Firstmate ${
-          past ? 'was' : 'is'} watching ${fresh.map(h =>
-          esc(h.name) + ' (heard ' + agoWords(readAt - h.watcher_beat_epoch) + ' ago)'
-        ).join(', ')}.</b>${asOf}</span></div>`);
+  } else if (main && !mainStale) {
+    notices.push(`<div class="watcher"${past ? ' style="background:var(--warn-soft)"' : ''}>
+      <span class="${past ? 'lamp unknown' : 'beat'}"></span><span><b>Firstmate ${
+        past ? 'was' : 'is'} watching</b> (heard ${
+        agoWords(readAt - main.watcher_beat_epoch)} ago).${asOf}</span></div>`);
   }
   $('#watcher').innerHTML = notices.join('');
 }

@@ -739,6 +739,47 @@ test_answering_held_work_reaches_the_inbox_the_same_way() {
   pass "answering held work reaches firstmate's inbox and never marks the work done itself"
 }
 
+# An idle second mate keeps no watcher running, so a note left in its own
+# inbox waits unread (the actual incident this repairs). Every answer must go
+# to the MAIN home's inbox regardless of which home the item belongs to, and
+# carry that home and id as a prefix so main firstmate can forward it on.
+test_answering_a_second_mates_item_reaches_the_main_inbox_not_its_own() {
+  local home mate port result resolved
+  home="$TMP_ROOT/secondmate-answer"
+  mate="$TMP_ROOT/secondmate-answer-mate"
+  mkdir -p "$home/data" "$home/state" "$mate/data" "$mate/state"
+  FM_HOME="$mate" FM_ROOT_OVERRIDE="$FIRSTMATE_ROOT" \
+    "$TASKS_AXI" add cc-mate "Ship the widget?" --kind captain --repo demo \
+    >/dev/null 2>"$TMP_ROOT/axi.err" \
+    || fail "tasks-axi could not add the fixture task in the second mate's home: $(cat "$TMP_ROOT/axi.err")"
+  FM_HOME="$mate" FM_ROOT_OVERRIDE="$FIRSTMATE_ROOT" \
+    "$CAPTAIN_HOLD" hold cc-mate --reason "Ship it?" \
+    >/dev/null 2>"$TMP_ROOT/axi.err" \
+    || fail "the fixture task could not be held in the second mate's home: $(cat "$TMP_ROOT/axi.err")"
+  printf -- '- b2b - synthetic scope (home: %s; scope: reviews; projects: demo; added 2026-07-14)\n' \
+    "$mate" > "$home/data/secondmates.md"
+
+  start_server "$home" || fail "the server did not start"
+  port=$SERVER_PORT
+  curl -s -m 120 -o /dev/null "http://127.0.0.1:$port/api/items"
+  result=$(post "$port" /api/answer \
+    '{"home":"b2b","id":"cc-mate","source":"hold","key":"cc-mate","text":"Yes, ship it."}')
+  assert_contains "$result" '"ok":true' "answering a second mate's item was refused"
+  resolved=$(wait_outcome "$home" "$(jq -r .sid <<<"$result")") \
+    || fail "the outcome of the send never reached the record"
+  assert_contains "$resolved" '"outcome":"sent"' \
+    "the answer to a second mate's item was not delivered"
+
+  wait_for "the answer never reached the main home's inbox" \
+    bash -c "grep -q 'Yes, ship it.' '$home'/state/inbox/*.note 2>/dev/null"
+  assert_not_contains "$(cat "$mate"/state/inbox/*.note 2>/dev/null)" 'Yes, ship it.' \
+    "the answer was written into the idle second mate's own inbox, where nothing would ring it"
+  assert_grep '[b2b · cc-mate]' "$home"/state/inbox/*.note \
+    "the note delivered to main did not carry the second mate's home and id as a prefix"
+  stop_server
+  pass "an answer to a second mate's item reaches the main home's inbox, prefixed with the item's home and id"
+}
+
 # The note carries the item's own id and title, never just his bare words -
 # without that, nothing reading the note back could tell which decision it
 # resolves. A row with no `kind` at all is delivered exactly the same way as
@@ -889,9 +930,9 @@ spec.loader.exec_module(cc)
 # No item field decides the route any more - captain and status items, held
 # and unkindled ones, all take the exact same fm-inbox.sh note path.
 items = [
-    {"source": "hold", "id": "t-1", "key": "t-1", "kind": "captain", "title": "Blue or green?"},
-    {"source": "status", "id": "t-2", "key": "k", "title": "Ship the palette"},
-    {"source": "hold", "id": "t-3", "key": "t-3", "title": "Which palette?"},  # no kind
+    {"source": "hold", "id": "t-1", "key": "t-1", "kind": "captain", "title": "Blue or green?", "home": "main"},
+    {"source": "status", "id": "t-2", "key": "k", "title": "Ship the palette", "home": "b2b"},
+    {"source": "hold", "id": "t-3", "key": "t-3", "title": "Which palette?", "home": "main"},  # no kind
 ]
 real = subprocess.run
 for item in items:
@@ -2887,6 +2928,7 @@ test_server_refuses_bad_input_before_running_anything
 test_a_server_with_no_scan_yet_refuses_both_the_list_and_a_send
 test_answering_a_hold_records_the_captains_words_and_reaches_the_inbox
 test_answering_held_work_reaches_the_inbox_the_same_way
+test_answering_a_second_mates_item_reaches_the_main_inbox_not_its_own
 test_a_held_row_with_no_kind_still_names_itself_in_the_note
 test_a_note_of_just_a_dash_is_queued_and_never_hangs_the_server
 test_a_send_whose_words_cannot_be_recorded_is_refused

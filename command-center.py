@@ -2,11 +2,15 @@
 # command-center.py - the captain's permanent command center.
 #
 # One page at a fixed address showing everything waiting on the captain across
-# every local firstmate home. His Waiting-on-you answer goes straight to
-# firstmate's captain inbox (fm-inbox.sh note) and nowhere else - no
-# fm-captain-hold.sh, no fm-send.sh, from this send path; firstmate closes the
-# decision itself once it reads the note. bin/command-center-scan.sh is the
-# reading half; docs/command-center.md is the operator guide.
+# every local firstmate home. His Waiting-on-you answer goes straight to the
+# MAIN home's captain inbox (fm-inbox.sh note, FM_HOME always the main home)
+# and nowhere else - no fm-captain-hold.sh, no fm-send.sh, from this send
+# path - whatever home the item itself belongs to: an idle second mate (b2b,
+# interact, ...) keeps no watcher running, so a note left in its own inbox
+# waits unread. The note is prefixed with the item's own home and id (e.g.
+# "[b2b · kk-xyz] ") so main firstmate forwards it on with fm-send, which does
+# ring an idle second mate. bin/command-center-scan.sh is the reading half;
+# docs/command-center.md is the operator guide.
 #
 # Usage:
 #   command-center.py --home <FM_HOME> [--port 8765] [--firstmate-root <dir>]
@@ -1551,9 +1555,15 @@ def send_note(home_path, text):
     return outcome, "fm-inbox.sh note", detail, note_id
 
 
-def deliver_to_inbox(home_path, item, text):
-    """Deliver a Waiting-on-you answer straight to firstmate's captain inbox,
-    and nothing else.
+def deliver_to_inbox(main_home_path, item, text):
+    """Deliver a Waiting-on-you answer straight to the MAIN home's captain
+    inbox, whatever home the item itself belongs to, and nothing else.
+
+    An idle second mate (b2b, interact, ...) keeps no watcher running, so a
+    note written into its own inbox would sit unread. The main firstmate is
+    always watching, so every answer goes there instead, prefixed with the
+    item's own home and id (e.g. "[b2b · kk-xyz] ") so main firstmate can
+    forward it to that second mate with fm-send, which does ring an idle one.
 
     fm-captain-hold.sh and fm-send.sh both own a real decision record, but
     both are bounded by work a click must not wait on (a remote ledger read,
@@ -1563,17 +1573,18 @@ def deliver_to_inbox(home_path, item, text):
     reads the note and closes the decision itself; this page only has to say
     his words got there.
 
-    The note carries the item's id and title, never just his bare answer -
-    without that, nothing reading the note back could tell which decision it
-    resolves.
+    The note carries the item's home, id and title, never just his bare
+    answer - without that, nothing reading the note back could tell which
+    decision it resolves, or which home to forward it to.
 
     Returns (outcome, route, detail, note_id). Only two outcomes ever reach
     him: "sent" (the note is durably queued) or "failed" (it never made it,
     so he keeps his words to try again).
     """
-    body = f"Answer to {item['id']} — {item.get('title') or '(no title)'}:\n{text}"
+    body = (f"[{item['home']} · {item['id']}] "
+            f"Answer to {item['id']} — {item.get('title') or '(no title)'}:\n{text}")
     try:
-        outcome, route, detail, note_id = send_note(home_path, body)
+        outcome, route, detail, note_id = send_note(main_home_path, body)
     except Exception as exc:  # noqa: BLE001 - a failed wake must never look like a lost answer
         outcome, route, detail, note_id = "unknown", "fm-inbox.sh note", str(exc), None
     return ("sent" if outcome == "sent" else "failed"), route, detail, note_id
@@ -1980,8 +1991,11 @@ class Handler(BaseHTTPRequestHandler):
                 else:
                     item = records.waiting_question(message.get("task"),
                                                     message.get("question_key") or "")
-            home_path = records.home_path(item["home"]) if item else None
-            if not home_path:
+            # Delivery always goes to the MAIN home's inbox, whatever home the
+            # item itself belongs to - an idle second mate keeps no watcher
+            # running to notice a note left in its own inbox.
+            main_home_path = records.home_path("main") if item else None
+            if not main_home_path:
                 item = None
 
             def deliver_reply():
@@ -1989,7 +2003,7 @@ class Handler(BaseHTTPRequestHandler):
                     return {"outcome": "failed", "route": "", "home": "main",
                             "detail": unread}
                 if item:
-                    outcome, route, detail, note_id = deliver_to_inbox(home_path, item, text)
+                    outcome, route, detail, note_id = deliver_to_inbox(main_home_path, item, text)
                     if outcome == "sent":
                         records.invalidate()
                     return {"resolved": "answer", "outcome": outcome,
@@ -2040,15 +2054,18 @@ class Handler(BaseHTTPRequestHandler):
                                  "error": "the records have not been read yet"})
                 return
             item = self.records.item(home_id, task_id, source, key)
-            home_path = self.records.home_path(home_id)
-            if item is None or home_path is None:
+            # Delivery always goes to the MAIN home's inbox, whatever home the
+            # item itself belongs to - an idle second mate keeps no watcher
+            # running to notice a note left in its own inbox.
+            main_home_path = self.records.home_path("main")
+            if item is None or main_home_path is None:
                 self._json(404, {"ok": False,
                                  "error": "that item is no longer waiting for you"})
                 return
             records = self.records
 
             def deliver_answer():
-                outcome, route, detail, note_id = deliver_to_inbox(home_path, item, text)
+                outcome, route, detail, note_id = deliver_to_inbox(main_home_path, item, text)
                 if outcome == "sent":
                     records.invalidate()     # force a rescan on the next poll
                 return {"outcome": outcome, "route": route, "detail": detail,
