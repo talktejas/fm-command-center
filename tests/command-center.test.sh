@@ -963,10 +963,11 @@ test_the_received_dot_flips_when_firstmate_acks_the_note() {
   pass "the received dot flips from unacked to received the moment fm-inbox.sh drain --ack moves the note"
 }
 
-# The note is on disk (and worth tracking for the dot) whenever fm-inbox.sh
+# The note is on disk (and durably sent, not NOT SENT) whenever fm-inbox.sh
 # printed "queued <id>", even on a nonzero exit - only the WAKE after the
 # write can fail that way. A genuine failure (nothing printed at all) must
-# carry no note id, so it never reads as an eternally-unacked send.
+# carry no note id and stay unknown, so it never reads as an eternally-unacked
+# send nor a false sent.
 test_send_note_tracks_the_note_id_even_when_only_the_wake_failed() {
   local home out
   home="$TMP_ROOT/note-id"
@@ -991,10 +992,51 @@ subprocess.run = real
 PYEOF
 )
   assert_equals "sent 111-abc
-unknown 222-def
+sent 222-def
 unknown None" "$out" \
     "a note's own id was not read back from fm-inbox.sh's stdout on every exit code that still wrote one"
-  pass "send_note tracks the note id whenever fm-inbox.sh wrote one, whatever its exit code"
+  pass "send_note tracks the note id whenever fm-inbox.sh wrote one, whatever its exit code, and never reports NOT SENT for a note that was queued"
+}
+
+# A reply with an ellipsis, an em dash or an emoji used to crash send_note's
+# own decode of fm-inbox.sh's output ('utf-8' codec can't decode byte ...:
+# invalid continuation byte) whenever the underlying bytes were split across
+# a multi-byte character - the exception was swallowed by the caller's own
+# try/except, so the outcome came back "unknown" (NOT SENT) even though
+# fm-inbox.sh had already queued the note. subprocess.run must decode with
+# errors="replace" so a mangled byte never turns an already-queued note into
+# a false NOT SENT.
+test_send_note_survives_multibyte_reply_text() {
+  local home out
+  home="$TMP_ROOT/multibyte"
+  seed_home "$home"
+  local fake_inbox="$TMP_ROOT/multibyte/fake-fm-inbox.py"
+  cat > "$fake_inbox" <<'FAKEEOF'
+#!/usr/bin/env python3
+# Stands in for fm-inbox.sh: writes RAW bytes, truncated mid multi-byte
+# character - exactly the shape of the byte 0xe2 decode failure firstmate
+# found in production (an ellipsis, an em dash and an emoji in the reply).
+import sys
+raw = "queued 333-ghi\n  He said … and — and \U0001F389\n".encode("utf-8")
+sys.stdout.buffer.write(raw[:-1])  # cut the emoji's last byte
+sys.stdout.buffer.flush()
+FAKEEOF
+  chmod +x "$fake_inbox"
+  out=$(FM_CC_HOME="$home" python3 - "$SERVER" "$fake_inbox" <<'PYEOF'
+import importlib.util, sys, os
+spec = importlib.util.spec_from_file_location("cc", sys.argv[1])
+cc = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(cc)
+# Real subprocess, real (malformed) bytes on the wire - this exercises the
+# actual decode path in send_note, not a stubbed CompletedProcess.
+cc.firstmate_bin = lambda name: sys.argv[2]
+outcome, route, detail, note_id = cc.send_note(os.environ["FM_CC_HOME"], "He said … and — and \U0001F389")
+print(outcome, note_id)
+PYEOF
+)
+  assert_equals "sent 333-ghi" "$out" \
+    "a reply with an ellipsis, an em dash or an emoji must still be reported sent, not NOT SENT"
+  pass "a reply containing multi-byte characters (an ellipsis, an em dash, an emoji) is decoded and sent without crashing"
 }
 
 # The module header promises the expensive scan runs once per actual change
@@ -1232,6 +1274,51 @@ EOF
   assert_equals "null" "$(jq -r '.messages[0].worktree' <<<"$body")" \
     "two touched tasks must not invent a single worktree"
   pass "a message from a turn whose tool calls touched two tasks shows both their projects"
+}
+
+# Real scale (a live service, ~200 messages in the window) turned the
+# transcript read behind this resolution into a click-queuing 108s
+# /api/messages - see AGENTS.md. Once a message resolves fully it must be
+# durably cached (data/command-center/message-context.json) and never need
+# its transcript read again: deleting the transcript after the first poll
+# and still getting the right answer on the second is the proof.
+test_a_resolved_message_context_is_cached_and_never_rereads_its_transcript() {
+  local home cfg enc port body cache
+  home="$TMP_ROOT/context-cache"
+  cfg="$TMP_ROOT/context-cache-config"
+  seed_turn_home "$home"
+  cat > "$home/data/backlog.md" <<'EOF'
+# Backlog
+
+## Queued
+- [ ] cc-one - First (repo: alpha) (kind: ship) (since 2026-09-01)
+EOF
+  enc=$(python3 -c 'import re,sys; print(re.sub(r"[^A-Za-z0-9]","-",sys.argv[1]))' "$home")
+  seed_turn_transcript "$cfg/projects/$enc/sess-t.jsonl"
+  jq -cn '{id:"m-cached", req:"r-one", session:"sess-t", title:"About one task",
+    text:"About cc-one.", task:null, project:null, worktree:null, branch:null,
+    source:"transcript", at:"2026-09-21T00:00:00Z"}' \
+    > "$home/data/captain-messages.jsonl"
+
+  CLAUDE_CONFIG_DIR="$cfg" start_server "$home" || fail "the server did not start"
+  port=$SERVER_PORT
+  curl -s -m 120 -o /dev/null "http://127.0.0.1:$port/api/items"
+  body=$(curl -s -m 30 "http://127.0.0.1:$port/api/messages")
+  assert_equals "alpha" "$(jq -r '.messages[0].project' <<<"$body")" \
+    "the first poll did not resolve the message's project from its transcript"
+
+  cache="$home/data/command-center/message-context.json"
+  [ -f "$cache" ] || fail "no durable message-context cache was written after resolving a message"
+  assert_contains "$(cat "$cache")" '"m-cached"' \
+    "the resolved message's id is missing from the durable context cache"
+
+  rm -f "$cfg/projects/$enc/sess-t.jsonl"
+  body=$(curl -s -m 30 "http://127.0.0.1:$port/api/messages")
+  stop_server
+
+  assert_equals "alpha" "$(jq -r '.messages[0].project' <<<"$body")" \
+    "a second poll re-read a transcript this cache should already have settled"
+  pass "a fully resolved message's project/worktree/branch is cached and never needs its transcript again"
 }
 
 # The message's own text names a project too, but the worker/task evidence
@@ -2131,6 +2218,66 @@ test_an_unchanged_message_poll_is_answered_without_the_log() {
   pass "an unchanged message poll costs nothing and a new message still arrives"
 }
 
+# The captain's own report: "when i click on archive button, its
+# unresponsive." Reproduced under the page's normal load - an /api/messages
+# poll running at the same time as his click - not a JS mystery: enrich_messages
+# used to redo its full backlog+transcript resolution for every message on
+# every single poll (see AGENTS.md), so a fat window of unresolved messages
+# made /api/messages slow enough to starve a concurrent click of CPU. A click
+# must come back fast (this repo's target: well under a second) whatever a
+# same-moment /api/messages poll over a many-message, many-session window is
+# doing.
+test_archive_click_stays_fast_under_a_concurrent_messages_poll() {
+  local home port park_ms
+  home="$TMP_ROOT/archive-under-load"
+  seed_home "$home"
+  mkdir -p "$home/state" "$home/data/command-center"
+  python3 - "$home" <<'PY'
+import json, os, sys
+home = sys.argv[1]
+enc = __import__("re").sub(r"[^A-Za-z0-9]", "-", os.path.abspath(home))
+tdir = os.path.join(home, "claude-config", "projects", enc)
+os.makedirs(tdir, exist_ok=True)
+for s in range(15):
+    with open(os.path.join(tdir, f"sess-{s:02d}.jsonl"), "w") as fh:
+        for req in range(10):
+            reqid = f"req-{s:02d}-{req:03d}"
+            fh.write(json.dumps({"type": "user", "requestId": reqid,
+                "message": {"content": "status update, nothing to name " * 8}}) + "\n")
+            for t in range(10):
+                fh.write(json.dumps({"type": "assistant", "requestId": reqid,
+                    "message": {"content": [{"type": "tool_use",
+                        "input": {"note": "x" * 300}}]}}) + "\n")
+with open(os.path.join(home, "data", "captain-messages.jsonl"), "w") as fh:
+    for i in range(80):
+        s = i % 15
+        row = {"id": f"m-{i:04d}", "at": "2026-09-21T10:00:00Z",
+               "title": "status ping", "text": "all quiet",
+               "session": f"sess-{s:02d}", "req": f"req-{s:02d}-{i % 10:03d}"}
+        fh.write(json.dumps(row) + "\n")
+PY
+  CLAUDE_CONFIG_DIR="$home/claude-config" start_server "$home" || fail "the server did not start"
+  port=$SERVER_PORT
+  curl -s -m 120 -o /dev/null "http://127.0.0.1:$port/api/items"
+  # Fire the (still uncached, first-ever) /api/messages poll in the background,
+  # and click Archive on an item right behind it - the same overlap his own
+  # 3-second poll and a real click land in.
+  curl -s -m 60 -o /dev/null "http://127.0.0.1:$port/api/messages" &
+  local messages_pid=$!
+  park_ms=$(curl -s -o /dev/null -w '%{time_total}' \
+    -X POST -H 'Content-Type: application/json' \
+    -d '{"target":"item","key":"main/hold/cc-live/","state":"archived"}' \
+    "http://127.0.0.1:$port/api/park")
+  wait "$messages_pid"
+  stop_server
+
+  python3 -c "
+secs = float('$park_ms')
+assert secs < 2.0, f'Archive click took {secs:.2f}s with a concurrent /api/messages poll running'
+" || fail "the archive click (POST /api/park) took ${park_ms}s while /api/messages was resolving a many-message window - a click must never queue behind that read"
+  pass "an Archive click answers fast even while a concurrent /api/messages poll is resolving a many-message window"
+}
+
 # The server is the only matcher, so a query it cannot answer is the whole
 # answer. What the message CONTAINS is what he searches by - not how the record
 # happens to be escaped on disk.
@@ -2747,6 +2894,7 @@ test_an_unreadable_log_is_reported_not_shown_as_empty
 test_deliver_to_inbox_only_ever_reports_sent_or_failed
 test_the_received_dot_flips_when_firstmate_acks_the_note
 test_send_note_tracks_the_note_id_even_when_only_the_wake_failed
+test_send_note_survives_multibyte_reply_text
 test_concurrent_polls_produce_one_scan
 test_the_pages_decision_rules_hold
 test_the_server_serves_the_pages_decision_rules
@@ -2756,6 +2904,7 @@ test_a_message_naming_two_tasks_is_left_blank_rather_than_guessed
 test_a_message_for_a_task_whose_meta_is_gone_gets_its_backlog_repo
 test_a_message_matched_to_a_registered_project_when_it_names_no_task
 test_a_message_shows_every_project_a_turns_tool_calls_touched
+test_a_resolved_message_context_is_cached_and_never_rereads_its_transcript
 test_a_worker_evidenced_project_is_not_joined_by_a_keyword_guess
 test_a_task_with_no_backlog_line_resolves_through_its_own_brief
 test_a_short_ping_borrows_the_nearest_earlier_turns_project
@@ -2786,6 +2935,7 @@ test_park_makes_item_word_and_message_state_durable_across_a_restart
 test_park_refuses_an_unknown_target_or_state
 test_a_reply_never_archives_its_message
 test_an_unchanged_message_poll_is_answered_without_the_log
+test_archive_click_stays_fast_under_a_concurrent_messages_poll
 test_a_search_finds_text_however_the_record_escapes_it
 test_an_unreadable_message_log_is_reported_not_shown_as_empty
 test_every_chat_message_is_captured_without_anyone_recording_it

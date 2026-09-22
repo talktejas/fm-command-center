@@ -289,6 +289,19 @@ class Work:
             return
         if not self.scan.acquire(blocking=False):
             return  # someone else is already refreshing; this poll shows what stands
+        # The shell-out beneath this (fm-bearings-snapshot.sh) can run for tens
+        # of seconds; a caller's own click must never wait behind it, only its
+        # own last-known board. The FIRST refresh (self.body is still None) is
+        # the one exception - there is no stale board yet to serve.
+        if self.body is not None:
+            threading.Thread(target=self._refresh_release, daemon=True).start()
+            return
+        try:
+            self._refresh_locked()
+        finally:
+            self.scan.release()
+
+    def _refresh_release(self):
         try:
             self._refresh_locked()
         finally:
@@ -406,6 +419,13 @@ def said_log(home):
     carries that - because this is the only log /api/said reads back.
     """
     return os.path.join(home, "data", "command-center", "said.jsonl")
+
+
+def message_context_cache_path(home):
+    """Where each message's resolved project/worktree/branch is cached, keyed
+    by message id, so /api/messages does not re-read the backlog and every
+    matching transcript on every poll (see enrich_messages)."""
+    return os.path.join(home, "data", "command-center", "message-context.json")
 
 
 def parked_log(home):
@@ -621,6 +641,73 @@ def note_received(home_path, note_id):
         os.path.join(home_path, "state", "inbox", "handled", f"{note_id}.note"))
 
 
+def parse_note_file(path):
+    """(id, at, body) from a state/inbox .note file, or None if unreadable.
+    Format written by fm-inbox.sh's queue_note: header lines, a bare "--"
+    line, then the body - see bin/fm-inbox.sh.
+    """
+    try:
+        with open(path, "r", encoding="utf-8", errors="replace") as fh:
+            raw = fh.read()
+    except OSError:
+        return None
+    head, sep, body = raw.partition("\n--\n")
+    if not sep:
+        return None
+    at = None
+    for line in head.splitlines():
+        if line.startswith("at="):
+            at = line[len("at="):]
+            break
+    note_id = os.path.splitext(os.path.basename(path))[0]
+    return note_id, at, body
+
+
+def find_queued_note(home_path, text, at, window_seconds=900):
+    """Recover a note id for a send that was queued but whose outcome came
+    back "unknown" - e.g. the decode failure this file used to hit on a
+    multi-byte reply (see send_note). Looks in both state/inbox (not yet
+    acked) and state/inbox/handled (already acked) for a note whose body
+    carries his exact words and whose own timestamp is close to when this
+    send was accepted. Never invented: no match, no id.
+    """
+    if not home_path or not text or not text.strip():
+        return None
+    try:
+        sent_at = datetime.fromisoformat((at or "").replace("Z", "+00:00"))
+    except ValueError:
+        sent_at = None
+    needle = text.strip()
+    best_id, best_delta = None, None
+    for sub in ("state/inbox", "state/inbox/handled"):
+        try:
+            names = os.listdir(os.path.join(home_path, sub))
+        except OSError:
+            continue
+        for name in names:
+            if not name.endswith(".note"):
+                continue
+            parsed = parse_note_file(os.path.join(home_path, sub, name))
+            if not parsed:
+                continue
+            note_id, note_at, body = parsed
+            if needle not in body:
+                continue
+            if sent_at is None or not note_at:
+                delta = 0
+            else:
+                try:
+                    delta = abs((datetime.fromisoformat(
+                        note_at.replace("Z", "+00:00")) - sent_at).total_seconds())
+                except ValueError:
+                    delta = 0
+                if delta > window_seconds:
+                    continue
+            if best_delta is None or delta < best_delta:
+                best_id, best_delta = note_id, delta
+    return best_id
+
+
 def read_said(records, limit=LOG_LIMIT):
     """His words, newest first, with each delivery's outcome folded back in.
 
@@ -664,10 +751,26 @@ def read_said(records, limit=LOG_LIMIT):
     merged = [dict(r, archived=parked.get(("word", word_conversation_key(r))) == "archived",
                    held=parked.get(("word", word_conversation_key(r))) == "held")
               for r in merged]
+    merged = [_repair_unknown_outcome(records, r) for r in merged]
     merged = [dict(r, received=bool(r.get("note_id")) and note_received(
                   resolve_send_home(records, r.get("home")), r.get("note_id")))
               for r in merged]
     return merged, None, dropped
+
+
+def _repair_unknown_outcome(records, row):
+    """An "unknown" outcome from before send_note decoded subprocess output
+    with errors="replace" can hide a note that was actually queued (see
+    find_queued_note) - show it as sent, not NOT SENT, once its id can be
+    found. Never invented: a row this can't place stays unknown.
+    """
+    if row.get("outcome") != "unknown" or row.get("note_id"):
+        return row
+    home_path = resolve_send_home(records, row.get("home"))
+    note_id = find_queued_note(home_path, row.get("text"), row.get("at"))
+    if not note_id:
+        return row
+    return dict(row, outcome="sent", note_id=note_id)
 
 
 def word_conversation_key(row):
@@ -1102,16 +1205,84 @@ def fill_from_nearby_turn(rows):
     return out
 
 
+
+# How long a message with no full resolution yet is still worth retrying on
+# every request - the live scan or the backlog can still catch up while the
+# task it names is recent. Past this, an unresolved message reads as settled:
+# whatever was going to fill it in already would have.
+CONTEXT_SETTLE_SECS = 3600
+
+
+def load_message_context_cache(home):
+    try:
+        with open(message_context_cache_path(home), encoding="utf-8") as fh:
+            data = json.load(fh)
+    except (OSError, json.JSONDecodeError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def save_message_context_cache(home, cache):
+    path = message_context_cache_path(home)
+    try:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        tmp = path + f".tmp{os.getpid()}"
+        with open(tmp, "w", encoding="utf-8") as fh:
+            json.dump(cache, fh)
+        os.replace(tmp, path)
+    except OSError as exc:
+        sys.stderr.write(f"command-center: could not write {path}: {exc}\n")
+
+
 def enrich_messages(rows, records):
-    view = records.view() if records.etag is not None else {"items": []}
-    backlog_idx = backlog_index(FIRSTMATE_ROOT, records.home)
-    aliases = project_aliases(records.home)
-    a_transcript_dir = transcript_dir(records.home)
-    brief_ids = brief_task_ids(records.home)
-    cache = {}
-    enriched = [enrich_message(row, view, backlog_idx, aliases, a_transcript_dir, cache,
-                               records.home, brief_ids)
-                for row in rows]
+    """Fill in each message's project/worktree/branch (message_context), but
+    only for a message this cache has never resolved, or one still recent
+    enough that the live scan or the backlog could still fill it in further -
+    see CONTEXT_SETTLE_SECS. Everything else is durably cached, keyed by
+    message id, so a 200-row poll does not re-read the backlog and every
+    matching transcript turn on every single request (that was slow enough
+    to queue every click behind it - see AGENTS.md).
+    """
+    cache = load_message_context_cache(records.home)
+    now = time.time()
+
+    def settled(row):
+        entry = cache.get(row.get("id"))
+        if entry is None:
+            return False
+        if entry.get("project") and entry.get("worktree") and entry.get("branch"):
+            return True
+        age = now - (_epoch(row.get("at")) or 0)
+        return age > CONTEXT_SETTLE_SECS
+
+    to_resolve = [r for r in rows if r.get("id") and not settled(r)]
+    if to_resolve:
+        view = records.view() if records.etag is not None else {"items": []}
+        backlog_idx = backlog_index(FIRSTMATE_ROOT, records.home)
+        aliases = project_aliases(records.home)
+        a_transcript_dir = transcript_dir(records.home)
+        brief_ids = brief_task_ids(records.home)
+        transcript_cache = {}
+        for row in to_resolve:
+            enriched = enrich_message(row, view, backlog_idx, aliases, a_transcript_dir,
+                                      transcript_cache, records.home, brief_ids)
+            cache[row["id"]] = {"project": enriched.get("project"),
+                                "worktree": enriched.get("worktree"),
+                                "branch": enriched.get("branch"),
+                                "context_source": enriched.get("context_source")}
+        save_message_context_cache(records.home, cache)
+
+    def apply_cached(row):
+        entry = cache.get(row.get("id"))
+        if not entry:
+            return row
+        out = dict(row)
+        for field in ("project", "worktree", "branch", "context_source"):
+            if entry.get(field) and not out.get(field):
+                out[field] = entry[field]
+        return out
+
+    enriched = [apply_cached(row) for row in rows]
     return fill_from_nearby_turn(enriched)
 
 
@@ -1363,7 +1534,7 @@ def send_note(home_path, text):
         # write, so a child that reads stdin still cannot hang the server.
         [firstmate_bin("fm-inbox.sh"), "note", "-"],
         input=text, capture_output=True, text=True, timeout=SEND_TIMEOUT,
-        env=dict(os.environ, FM_HOME=home_path), check=False,
+        errors="replace", env=dict(os.environ, FM_HOME=home_path), check=False,
     )
     detail = (proc.stdout + proc.stderr).strip()[:600]
     # fm-inbox.sh publishes the note record BEFORE it wakes firstmate and exits
@@ -1371,12 +1542,12 @@ def send_note(home_path, text):
     # from saved-but-unannounced. Saying "not queued" about words already on disk
     # is the false claim this page exists to end, and a second note is not the
     # same note - queue_note mints a fresh id, so this route is not idempotent.
-    outcome = "sent" if proc.returncode == 0 else "unknown"
-    # The id is on disk (state/inbox/<id>.note) whenever "queued <id>" was
-    # printed, even when the exit code says "unknown" because only the wake
-    # after it failed - the received dot tracks the note, not the wake.
+    # A "queued <id>" line means the note is on disk regardless of what else is
+    # in the output (or the exit code) - decode noise from a multi-byte reply
+    # must never turn an already-queued note into a false "unknown".
     m = NOTE_QUEUED_RE.search(proc.stdout)
     note_id = m.group(1) if m else None
+    outcome = "sent" if (proc.returncode == 0 or note_id) else "unknown"
     return outcome, "fm-inbox.sh note", detail, note_id
 
 
