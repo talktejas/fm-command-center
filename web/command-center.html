@@ -141,6 +141,11 @@
   .age.old{color:var(--hot);font-weight:600}
   .item-sub{font-size:11.5px;color:var(--dim);display:flex;align-items:center;gap:6px;
     padding-left:15px;overflow:hidden;white-space:nowrap;text-overflow:ellipsis}
+  /* Flex items shrink their box by default, but the text inside does not
+     reflow with them - without their own ellipsis, project/worktree/branch
+     text just overlaps once the three no longer fit their row. Each piece
+     truncates on its own instead. */
+  .item-sub span:not(.sep){overflow:hidden;text-overflow:ellipsis;white-space:nowrap;min-width:0}
   .src{display:inline-flex;align-items:center;gap:5px;flex:none}
   .src .dot{width:6px;height:6px;border-radius:50%}
   .sep{color:#d6dbe2;flex:none}
@@ -155,6 +160,16 @@
     border-radius:4px;padding:1px 5px;flex:none}
   .f-stuck{background:var(--hot-soft);color:var(--hot)}
   .f-sent{background:var(--ok-soft);color:var(--ok)}
+  /* Received dot, beside every reply he sends: white with a black border
+     until firstmate acks the note (yellow), red if the send or the inbox
+     write itself errored. See docs/command-center.md, "Received dot". */
+  .recv-dot{width:9px;height:9px;border-radius:50%;flex:none;display:inline-block;
+    background:#fff;border:1.5px solid #1a1a1a}
+  .recv-dot.recv-received{background:#e8c547;border-color:#e8c547}
+  .recv-dot.recv-failed{background:var(--hot);border-color:var(--hot)}
+  /* The opened pane's own Archive button, once the send he archived right
+     after sending turns out to have been received. */
+  button.defer.recv-received{background:#e8c547;border-color:#e8c547;color:#1a1a1a}
   .empty{padding:34px 20px;text-align:center;color:var(--faint);font-size:13px}
   .older{display:block;width:100%;margin:6px 0 2px;padding:9px 12px;border:1px dashed var(--line);
     border-radius:8px;background:transparent;color:var(--faint);font:inherit;font-size:12px;cursor:pointer}
@@ -454,6 +469,11 @@ const state = {
   sending:false, flash:null, error:null, seen:load('cc.seen',{}), draft:load('cc.draft',{}),
   note:load('cc.note',''), outcome:load('cc.outcome',{}), scanned:false, saidError:null,
   offline:null, unread:null, confirmed:false, readAt:null,
+  // A message's own explicit Archive/Restore, kept until the opposite click:
+  // a /api/messages poll already in flight when he clicks can still land
+  // afterward reading the log from just before the write, so its answer must
+  // never be allowed to undo what he just did. See applyArchiveOverride.
+  archiveOverride:{},
 };
 
 // Browser storage, wrapped: a private window or cleared site data must degrade
@@ -692,6 +712,29 @@ function groupOf(it, isMessage){
 const ordered = (rows, newestDefault) =>
   orderRows(rows, state.group, newestDefault);
 
+// The order rows actually APPEAR in on screen when Group by groups them
+// (rowsHtml below): each bucket in the order its first row was reached, and
+// within a bucket every row in that same order. "Next after an archive" must
+// walk this order, not the flat chronological one ordered() gives alone -
+// otherwise the row after the one he just archived can belong to a whole
+// different project, and the group he was reading jumps out from under him
+// (his report 2026-09-22: "the whole project went away and the next project
+// came up"). With no grouping active (Latest/Oldest/Nothing) the two orders
+// are the same thing.
+function displayOrder(rows, newestDefault, isMessage, keyFn){
+  const sorted = ordered(rows, newestDefault);
+  if (FLAT.has(state.group)) return sorted.map(keyFn);
+  const buckets = new Map();
+  for (const it of sorted){
+    const g = groupOf(it, isMessage);
+    if (!buckets.has(g.key)) buckets.set(g.key, []);
+    buckets.get(g.key).push(it);
+  }
+  const out = [];
+  for (const bucket of buckets.values()) for (const it of bucket) out.push(keyFn(it));
+  return out;
+}
+
 // --- render ------------------------------------------------------------------
 function renderHomes(){
   $('#homes').innerHTML = (state.view.homes || []).map(h => {
@@ -775,20 +818,6 @@ function renderWatcher(){
   $('#watcher').innerHTML = notices.join('');
 }
 
-// One button set for every row that can be archived or held: Archive + Hold
-// side by side in its own list, a single Restore in Archived, a single Back
-// to list in On hold. `kind` is 'item', 'msg' or 'word' (the data-*-<kind>
-// attribute the click handler reads); `key` is that row's own id/key.
-function parkButtons(mode, kind, key, restoreLabel){
-  const k = esc(key);
-  if (mode === 'archived')
-    return `<button class="rowarchive" data-archive-${kind}="${k}">${restoreLabel || 'Restore'}</button>`;
-  if (mode === 'held')
-    return `<button class="rowarchive" data-unhold-${kind}="${k}">Back to list</button>`;
-  return `<button class="rowarchive" data-archive-${kind}="${k}">Archive</button>`
-       + `<button class="rowarchive" data-hold-${kind}="${k}">Hold</button>`;
-}
-
 function itemRow(it, mode){
   const bits = [];
   if (state.group !== 'project' || FLAT.has(state.group))
@@ -807,18 +836,47 @@ function itemRow(it, mode){
       <span class="lamp ${esc(it.listen)}" title="${esc((LISTEN[it.listen]||LISTEN.unknown).label)}"></span>
       <span class="item-title">${esc(it.title)}</span>${flag}
       <span class="age ${old ? 'old' : ''}" title="${esc(ageTitle(it))}">${ageLabel(it)}</span>
+      ${recvDotHtml(latestAnswerFor(it))}
     </span>
     <span class="item-sub">
       <span class="src"><span class="dot" style="background:${homeColour(it.home)}"></span>${esc(homeOf(it.home).name)}</span>
       ${bits.map(b => `<span class="sep">·</span>${b}`).join('')}
       <span class="sep">·</span><span class="kind k-${it.source === 'hold' ? 'decision' : 'blocker'}">${it.source === 'hold' ? 'decision' : esc(it.status_verb || 'blocked')}</span>
     </span>
-  </button>${parkButtons(mode, 'item', itemKey(it))}</div>`;
+  </button></div>`;
 }
 
 // Approved proposal sections 3 and 4: the archive and My words are where a
 // closure can honestly be shown - the server wrote this line as part of the very
 // act that closed the decision, so nothing here is inferred.
+// The received dot's three states, his own ruling 2026-09-22: white with a
+// black border by default (sent, not yet received), yellow once firstmate
+// has acked the note (r.received, folded in from state/inbox/handled/ by
+// bin/command-center.py's read_said), red only for a delivery that is
+// KNOWN to have failed - "unknown" and "given up" are still just unconfirmed,
+// not an error, and stay white rather than falsely claiming a failure.
+function sendDotState(r){
+  if (!r || !r.sid) return null;               // a draft was never sent
+  const s = sendState(r, state.pending);
+  if (s === 'sent') return r.received ? 'received' : 'pending';
+  if (s === 'failed') return 'failed';
+  return 'pending';
+}
+function recvDotHtml(r){
+  const st = sendDotState(r);
+  if (!st) return '';
+  const title = st === 'received' ? 'Received by firstmate'
+    : st === 'failed' ? 'Delivery failed' : 'Sent — not yet received';
+  return `<span class="recv-dot ${st === 'pending' ? '' : 'recv-' + st}" title="${esc(title)}"></span>`;
+}
+// The latest send FOR this row (a message or an item), for the list row's own
+// dot - repliesTo/answered are newest-first already, so this is just [0].
+const latestReplyTo = m => repliesTo(m)[0] || null;
+const latestAnswerFor = it => state.said.find(r => r.item_key === itemKey(it)) || null;
+// The opened pane's own Archive button turns the same yellow as the dot,
+// once the send he archived right after sending turns out to have arrived.
+const archiveRecvClass = r => sendDotState(r) === 'received' ? 'recv-received' : '';
+
 function wordOutcome(r){
   if (r.kind === 'draft') return 'Not sent. Kept here so it is not lost.';
   // sendState comes from bin/command-center-state.js: a row still reading
@@ -858,21 +916,43 @@ function wordRow(r, mode){
     : r.kind === 'note' ? 'Note to firstmate — not about one item'
     : esc(r.title || r.item || '—');
   const out = wordOutcome(r);
-  // A draft is never in the durable said.jsonl log (r.sid), so it has nothing
-  // to archive or hold - it is removed from this list by being sent or
-  // deleted, not by parking something that was never recorded.
-  const btns = r.sid ? parkButtons(mode, 'word', r.sid) : '';
   return `<div class="row"><button class="word" data-key="${esc(wordConversationKey(r))}">
     <span class="word-top">
       <span class="word-when">${esc(draft ? 'unsent' : localTime(r.at))}</span>
       <span class="word-where">${where}</span>
       ${draft ? '<span class="flag f-stuck">unsent draft</span>'
               : r.kind === 'note' ? '<span class="kind k-decision">note</span>' : ''}
+      ${recvDotHtml(r)}
     </span>
     <span class="word-text ${draft ? 'draftbox'
       : r.kind === 'note' ? 'notebox' : ''}">${esc(r.text)}</span>
     <span class="word-out">${out}</span>
-  </button>${btns}</div>`;
+  </button></div>`;
+}
+
+// A plain note's own detail pane - see the call in renderMain. `rows` is
+// every send under this conversation key, newest first (same source as the
+// My words list), so Archive/Hold here parks all of them together exactly as
+// the list row used to.
+function renderWordPane(key, rows){
+  const r0 = rows[0];
+  const thread = rows.slice().reverse().map(r => `<div class="msg you">
+      <div class="msg-who">You<span class="t">${esc(localTime(r.at))}</span>${recvDotHtml(r)}</div>
+      <div class="msg-text">${esc(r.text)}</div>
+      <div class="proof">${wordOutcome(r)}</div>
+    </div>`).join('');
+  paintMain(key, `<div class="main-inner">
+    <div class="crumbs"><span class="kind k-decision">note to firstmate</span></div>
+    <h2 class="subject">Note to firstmate — not about one item</h2>
+    <div class="thread">${thread}</div>
+    <div class="reply-foot">
+      <button class="defer ${archiveRecvClass(r0)}" data-archive-word="${esc(r0.sid)}">${
+        isWordArchived(r0) ? 'Restore' : 'Archive'}</button>
+      ${isWordHeld(r0)
+        ? `<button class="defer" data-unhold-word="${esc(r0.sid)}">Back to list</button>`
+        : `<button class="defer" data-hold-word="${esc(r0.sid)}">Hold</button>`}
+    </div>
+  </div>`);
 }
 
 function renderWords(){
@@ -927,15 +1007,23 @@ function draftTyped(){
 
 function renderList(){
   const items = state.view.items || [];
-  $('#n-messages').textContent = Math.max(state.total, state.messages.length);
-  $('#n-archived').textContent = Math.max(state.archivedTotal, state.archivedMessages.length)
+  // The server's own count of the current log, not the client's accumulated
+  // cache: a message archived through any other route (another tab,
+  // firstmate itself) never gets pruned from state.messages by a poll - it
+  // just falls out of the fresh window and is kept as "not yet seen this
+  // poll" - so that cache can grow past the true total and must never be
+  // trusted as a floor for what the badge says.
+  $('#n-messages').textContent = state.total;
+  $('#n-archived').textContent = state.archivedTotal
     + archivedItemsList().length + archivedWordsList().length;
   $('#n-hold').textContent = heldItemsList().length + heldWordsList().length + heldMessagesList().length;
   $('#n-waiting').textContent = items.filter(i => !isDeferred(i) && !isItemArchived(i) && !isItemHeld(i)).length;
   $('#n-words').textContent = draftCount();
-  // The count is what needs him, same convention as Waiting on you: Underway,
-  // Recently landed and Charted next are read-only context, not asks.
-  $('#n-work').textContent = (state.work.captains_call || []).length;
+  // The count is what needs his attention right now: a decision waiting on
+  // his call, or work already underway that a "0" badge would hide entirely -
+  // Recently landed and Charted next stay read-only context, not counted.
+  $('#n-work').textContent = (state.work.captains_call || []).length
+    + (state.work.underway || []).length;
   document.querySelectorAll('.tab').forEach(t =>
     t.setAttribute('aria-selected', String(t.dataset.tab === state.tab)));
   $('#clr').hidden = !state.q;
@@ -1022,12 +1110,17 @@ function renderMessages(archived){
   // reaches all of it however far back it is - saying so where it found more
   // than it is showing.
   const searching = asked && found && answered === asked && !failed;
+  // The window is a cap on the newest N, not a claim that only N exist:
+  // archiving one lets the next-oldest slide in on the very next poll, which
+  // without this line reads as the message he just archived coming back
+  // (his report 2026-09-22 - the real cause was this truncation, not a
+  // same-id reappear). Shown whenever the log holds more than the window,
+  // independent of any archive action, so the line is never news to him.
   const older = searching
     ? (found.more ? `<div class="hits">These are the newest matches —
         narrow the search to reach older ones.</div>` : '')
-    : (more ? `<button class="older" id="older">Show older messages —
-        ${held.length} of ${Math.max(total, held.length)} loaded,
-        the rest are in the log</button>` : '');
+    : (more ? `<button class="older" id="older">Showing
+        ${held.length} of ${Math.max(total, held.length)} — load older messages</button>` : '');
   $('#list').innerHTML = note
     + rowsHtml(rows, m => messageRow(m, archived ? 'archived' : 'list'), empty, true, asked ? answered : '') + older;
 }
@@ -1225,13 +1318,14 @@ function messageRow(m, mode){
       ${state.failed[msgKey(m)] ? '<span class="flag f-stuck">not sent</span>'
         : replied ? '<span class="flag f-sent">replied</span>' : ''}
       <span class="age" title="from the time firstmate sent it">${ageLabel(m)}</span>
+      ${recvDotHtml(latestReplyTo(m))}
     </span>
     <span class="item-sub" title="${esc([m.project || 'Not recorded',
         m.worktree || 'no worktree', m.branch || 'no branch'].join(' · '))}">
       ${where.map((w, i) => (i ? '<span class="sep">·</span>' : '') +
         `<span class="${i ? 'mono' : ''}">${esc(w)}</span>`).join('')}
     </span>
-  </button>${parkButtons(mode, 'msg', m.id, 'Restore to Messages')}</div>`;
+  </button></div>`;
 }
 
 function trackHtml(m){
@@ -1300,7 +1394,7 @@ function renderMessagePane(m){
   const para = t => esc(t || '').split(/\n{2,}/)
     .map(x => `<p>${x.replace(/\n/g, '<br>')}</p>`).join('');
   const thread = replies.map(r => `<div class="msg you">
-      <div class="msg-who">You<span class="t">${esc(localTime(r.at))}</span></div>
+      <div class="msg-who">You<span class="t">${esc(localTime(r.at))}</span>${recvDotHtml(r)}</div>
       <div class="msg-text">${esc(r.text)}</div>
       <div class="proof">${wordOutcome(r)}</div>
     </div>`).join('');
@@ -1343,7 +1437,7 @@ function renderMessagePane(m){
       </div>
     </div>
     <div class="reply-foot">
-      <button class="defer" id="archive" ${state.archiving === m.id ? 'disabled' : ''}>${
+      <button class="defer ${archiveRecvClass(latestReplyTo(m))}" id="archive" ${state.archiving === m.id ? 'disabled' : ''}>${
         m.archived ? 'Restore to Messages' : state.archiving === m.id ? 'Archiving…' : 'Archive'}</button>
       ${isMsgHeld(m)
         ? `<button class="defer" data-unhold-msg="${esc(m.id)}">Back to list</button>`
@@ -1372,6 +1466,13 @@ function renderMain(){
   }
   const it = (state.view.items || []).find(i => itemKey(i) === state.open);
   if (!it){
+    // A plain note (Tell firstmate something) names no message and no item,
+    // so it has no pane of its own above - its only detail view, and the
+    // only place left to Archive/Hold it now those buttons are off the list
+    // row (his ruling 2026-09-22).
+    const wordRows = state.open
+      ? state.said.filter(r => wordConversationKey(r) === state.open) : [];
+    if (wordRows.length){ renderWordPane(state.open, wordRows); return; }
     paintMain('', `<div class="blank"><strong>Pick something on the left.</strong>
       <span>Everything firstmate has said to you, newest first, with a box to reply in.<br>
       <b>Waiting on you</b> is the queue it is still holding — questions and stopped workers.<br>
@@ -1397,7 +1498,7 @@ function renderMain(){
   const answered = state.said.filter(r => r.item_key === itemKey(it)).slice().reverse();
   const answeredHtml = answered.length ? `<div class="thread"><h3>What you answered</h3>${
     answered.map(r => `<div class="msg you">
-        <div class="msg-who">You<span class="t">${esc(localTime(r.at))}</span></div>
+        <div class="msg-who">You<span class="t">${esc(localTime(r.at))}</span>${recvDotHtml(r)}</div>
         <div class="msg-text">${esc(r.text)}</div>
         <div class="proof">${wordOutcome(r)}</div>
       </div>`).join('')
@@ -1449,7 +1550,7 @@ function renderMain(){
       </div>
     </div>
     <div class="reply-foot">
-      <button class="defer" data-archive-item="${esc(itemKey(it))}">${
+      <button class="defer ${archiveRecvClass(latestAnswerFor(it))}" data-archive-item="${esc(itemKey(it))}">${
         isItemArchived(it) ? 'Restore' : 'Archive'}</button>
       ${isItemHeld(it)
         ? `<button class="defer" data-unhold-item="${esc(itemKey(it))}">Back to list</button>`
@@ -1559,6 +1660,7 @@ async function fetchMessage(id){
 
 function moveArchived(m, archived){
   m.archived = archived;
+  state.archiveOverride[m.id] = archived;
   state.messages = state.messages.filter(x => x.id !== m.id);
   state.archivedMessages = state.archivedMessages.filter(x => x.id !== m.id);
   if (archived) {
@@ -1569,6 +1671,31 @@ function moveArchived(m, archived){
     state.messages.unshift(m);
     state.total++;
     state.archivedTotal = Math.max(0, state.archivedTotal - 1);
+  }
+}
+
+// A poll already in flight when he clicked Archive/Restore can still resolve
+// afterward with an answer read from just before that write landed - the one
+// case bin/command-center.py's own etag cannot rule out, since it only bumps
+// once the write is actually on disk. Once his own click is the last word on
+// an id, no poll's answer may contradict it until the opposite click does.
+function applyArchiveOverride(){
+  for (const [id, archived] of Object.entries(state.archiveOverride)){
+    if (archived){
+      const i = state.messages.findIndex(x => x.id === id);
+      if (i >= 0){
+        const [m] = state.messages.splice(i, 1);
+        m.archived = true;
+        if (!state.archivedMessages.some(x => x.id === id)) state.archivedMessages.unshift(m);
+      }
+    } else {
+      const i = state.archivedMessages.findIndex(x => x.id === id);
+      if (i >= 0){
+        const [m] = state.archivedMessages.splice(i, 1);
+        m.archived = false;
+        if (!state.messages.some(x => x.id === id)) state.messages.unshift(m);
+      }
+    }
   }
 }
 
@@ -1586,7 +1713,8 @@ async function archiveMessageById(id, advance){
   const m = id && findMessageById(id);
   if (!m || state.archiving) return;
   const archived = !m.archived;
-  const keys = advance && archived ? ordered(visibleMessages(), true).map(msgKey) : null;
+  const keys = advance && archived
+    ? displayOrder(visibleMessages(), true, true, msgKey) : null;
   state.archiving = m.id;
   render();
   try {
@@ -1675,6 +1803,7 @@ async function loadMessages(){
     // window since it was read is still one of the things firstmate said.
     const fresh = (body.messages || []).map(shapeMessage);
     state.messages = mergeMessages(fresh, state.messages);
+    applyArchiveOverride();
     state.more = state.messages.length > fresh.length ? state.more : !!body.more;
     state.total = typeof body.total === 'number' ? body.total : state.messages.length;
     state.archivedTotal = typeof body.archived_total === 'number'
@@ -1698,6 +1827,7 @@ async function loadArchivedMessages(){
     const body = await res.json();
     const fresh = (body.messages || []).map(shapeMessage);
     state.archivedMessages = mergeMessages(fresh, state.archivedMessages);
+    applyArchiveOverride();
     state.archivedMore = state.archivedMessages.length > fresh.length
       ? state.archivedMore : !!body.more;
     state.archivedTotal = typeof body.total === 'number' ? body.total : state.archivedMessages.length;
@@ -2050,7 +2180,7 @@ document.addEventListener('click', async e => {
     const it = (state.view.items || []).find(i => itemKey(i) === key);
     if (it){
       const wasArchiving = !isItemArchived(it);
-      const keys = ordered(visible()).map(itemKey);
+      const keys = displayOrder(visible(), false, false, itemKey);
       setItemArchived(it, wasArchiving);
       if (wasArchiving && state.open === key) advanceTo(keys, key);
     }
@@ -2086,7 +2216,7 @@ document.addEventListener('click', async e => {
     const it = (state.view.items || []).find(i => itemKey(i) === key);
     if (it){
       const toHold = !isItemHeld(it);
-      const keys = ordered(visible()).map(itemKey);
+      const keys = displayOrder(visible(), false, false, itemKey);
       setItemHeld(it, toHold);
       if (toHold && state.open === key) advanceTo(keys, key);
     }
@@ -2114,7 +2244,7 @@ document.addEventListener('click', async e => {
     const m = findMessageById(id);
     if (m){
       const toHold = !isMsgHeld(m);
-      const keys = ordered(visibleMessages(), true).map(msgKey);
+      const keys = displayOrder(visibleMessages(), true, true, msgKey);
       setMsgHeld(m, toHold);
       if (toHold && state.open === msgKey(m)) advanceTo(keys, msgKey(m));
     }

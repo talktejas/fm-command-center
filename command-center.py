@@ -587,7 +587,41 @@ def log_etag(path):
 LOG_LIMIT = 40000
 
 
-def read_said(home, limit=LOG_LIMIT):
+def resolve_send_home(records, home_ref):
+    """The filesystem path a send's "home" field names - "main" is this
+    server's own home (records.home is already a path), anything else is a
+    fleet home id looked up the way every other route does."""
+    if not home_ref or home_ref == "main":
+        return records.home
+    return records.home_path(home_ref)
+
+
+def inbox_fingerprint(home_path):
+    """(mtime, size) of state/inbox and state/inbox/handled - an ack moves a
+    note between them, so this changes the moment firstmate drains, without
+    parsing said.jsonl first to find out which note ids are even outstanding.
+    """
+    parts = []
+    for sub in ("state/inbox", "state/inbox/handled"):
+        try:
+            st = os.stat(os.path.join(home_path, sub))
+            parts.append(f"{st.st_mtime_ns}:{st.st_size}")
+        except OSError:
+            parts.append("-")
+    return "/".join(parts)
+
+
+def note_received(home_path, note_id):
+    """True once firstmate has acked the note (fm-inbox.sh drain --ack moves
+    it from state/inbox/ to state/inbox/handled/) - the yellow-dot fact.
+    """
+    if not home_path or not note_id:
+        return False
+    return os.path.exists(
+        os.path.join(home_path, "state", "inbox", "handled", f"{note_id}.note"))
+
+
+def read_said(records, limit=LOG_LIMIT):
     """His words, newest first, with each delivery's outcome folded back in.
 
     A send is two lines: the entry written as it was accepted (outcome
@@ -596,6 +630,7 @@ def read_said(home, limit=LOG_LIMIT):
     "sending" that this process is not delivering was orphaned by a restart:
     delivery is genuinely unknown, and unknown is what it says.
     """
+    home = records.home
     # Sampled on BOTH sides of the read and unioned: a delivery that finished
     # during the read is still in the first sample, one that started during it
     # is in the second, so neither a live nor a finished send can be read back
@@ -628,6 +663,9 @@ def read_said(home, limit=LOG_LIMIT):
     parked = read_parked(home)
     merged = [dict(r, archived=parked.get(("word", word_conversation_key(r))) == "archived",
                    held=parked.get(("word", word_conversation_key(r))) == "held")
+              for r in merged]
+    merged = [dict(r, received=bool(r.get("note_id")) and note_received(
+                  resolve_send_home(records, r.get("home")), r.get("note_id")))
               for r in merged]
     return merged, None, dropped
 
@@ -1312,6 +1350,9 @@ def find_message(home, msg_id):
     return None, None
 
 
+NOTE_QUEUED_RE = re.compile(r'^queued (\S+)', re.MULTILINE)
+
+
 def send_note(home_path, text):
     # Approved proposal section 3: the captain's words are logged even when they
     # answer no item, so a note with no addressee is a channel this surface owes.
@@ -1331,7 +1372,12 @@ def send_note(home_path, text):
     # is the false claim this page exists to end, and a second note is not the
     # same note - queue_note mints a fresh id, so this route is not idempotent.
     outcome = "sent" if proc.returncode == 0 else "unknown"
-    return outcome, "fm-inbox.sh note", detail
+    # The id is on disk (state/inbox/<id>.note) whenever "queued <id>" was
+    # printed, even when the exit code says "unknown" because only the wake
+    # after it failed - the received dot tracks the note, not the wake.
+    m = NOTE_QUEUED_RE.search(proc.stdout)
+    note_id = m.group(1) if m else None
+    return outcome, "fm-inbox.sh note", detail, note_id
 
 
 def deliver_to_inbox(home_path, item, text):
@@ -1350,16 +1396,16 @@ def deliver_to_inbox(home_path, item, text):
     without that, nothing reading the note back could tell which decision it
     resolves.
 
-    Returns (outcome, route, detail). Only two outcomes ever reach him: "sent"
-    (the note is durably queued) or "failed" (it never made it, so he keeps
-    his words to try again).
+    Returns (outcome, route, detail, note_id). Only two outcomes ever reach
+    him: "sent" (the note is durably queued) or "failed" (it never made it,
+    so he keeps his words to try again).
     """
     body = f"Answer to {item['id']} — {item.get('title') or '(no title)'}:\n{text}"
     try:
-        outcome, route, detail = send_note(home_path, body)
+        outcome, route, detail, note_id = send_note(home_path, body)
     except Exception as exc:  # noqa: BLE001 - a failed wake must never look like a lost answer
-        outcome, route, detail = "unknown", "fm-inbox.sh note", str(exc)
-    return ("sent" if outcome == "sent" else "failed"), route, detail
+        outcome, route, detail, note_id = "unknown", "fm-inbox.sh note", str(exc), None
+    return ("sent" if outcome == "sent" else "failed"), route, detail, note_id
 
 
 def record_archive(home, msg_id, archived):
@@ -1411,7 +1457,7 @@ class Handler(BaseHTTPRequestHandler):
     def _json(self, code, obj):
         self._send(code, dump(obj))
 
-    def _log_response(self, name, path, read, extra_path=None):
+    def _log_response(self, name, path, read, extra_path=None, extra_fingerprint=None):
         """Serve one log under a change check, but never cache a FAILED read.
 
         A read error carries no rows, and its (mtime, size) is the same one a
@@ -1428,11 +1474,17 @@ class Handler(BaseHTTPRequestHandler):
         rows carry Archive/Hold folded in from parked.jsonl) - its own stat
         is folded into the tag too, so a park action busts a poll that would
         otherwise answer 304 over the now-stale flag.
+
+        `extra_fingerprint`: a callable for a fact this response depends on
+        that lives outside any log this process writes (said rows also carry
+        `received`, folded in from firstmate's own state/inbox/handled/ - see
+        Handler._said_fingerprint) - its string is folded into the tag too.
         """
         etag = log_etag(path)
         if etag:
             etag = hashlib.sha256(
                 (RUN + etag + (log_etag(extra_path) or "none" if extra_path else "")
+                 + (extra_fingerprint() if extra_fingerprint else "")
                  ).encode()).hexdigest()[:32]
         if etag and self.headers.get("If-None-Match") == etag:
             self.send_response(304)
@@ -1440,9 +1492,21 @@ class Handler(BaseHTTPRequestHandler):
             self.send_header("Content-Length", "0")
             self.end_headers()
             return
-        rows, error, dropped = read(self.records.home)
+        rows, error, dropped = read(self.records)
         self._send(200, dump({name: rows, "error": error, "dropped": dropped}),
                    etag=None if error else etag)
+
+    def _said_fingerprint(self):
+        """Every home a send could have gone to, not just this one: a reply or
+        an answer can route to any home the fleet knows about (item["home"]),
+        and the received dot for THAT note only moves when THAT home's own
+        inbox is drained.
+        """
+        records = self.records
+        homes = {records.home}
+        if records.etag is not None:
+            homes.update(h["path"] for h in records.view().get("homes", []))
+        return "|".join(inbox_fingerprint(h) for h in sorted(homes))
 
     def _body(self):
         """Read the declared body first, on every path including a refusal.
@@ -1610,7 +1674,8 @@ class Handler(BaseHTTPRequestHandler):
 
         if path == "/api/said":
             self._log_response("said", said_log(self.records.home), read_said,
-                               extra_path=parked_log(self.records.home))
+                               extra_path=parked_log(self.records.home),
+                               extra_fingerprint=self._said_fingerprint)
             return
 
         if path == "/api/work":
@@ -1694,10 +1759,10 @@ class Handler(BaseHTTPRequestHandler):
 
             def deliver_note():
                 try:
-                    outcome, route, detail = send_note(records.home, text)
+                    outcome, route, detail, note_id = send_note(records.home, text)
                 except subprocess.SubprocessError as exc:
-                    outcome, route, detail = "unknown", "fm-inbox.sh note", str(exc)
-                return {"outcome": outcome, "route": route, "detail": detail}
+                    outcome, route, detail, note_id = "unknown", "fm-inbox.sh note", str(exc), None
+                return {"outcome": outcome, "route": route, "detail": detail, "note_id": note_id}
 
             sid, error = accept_said(self.records.home,
                                      {"kind": "note", "home": "main", "text": text},
@@ -1753,21 +1818,21 @@ class Handler(BaseHTTPRequestHandler):
                     return {"outcome": "failed", "route": "", "home": "main",
                             "detail": unread}
                 if item:
-                    outcome, route, detail = deliver_to_inbox(home_path, item, text)
+                    outcome, route, detail, note_id = deliver_to_inbox(home_path, item, text)
                     if outcome == "sent":
                         records.invalidate()
                     return {"resolved": "answer", "outcome": outcome,
                             "route": route, "detail": detail, "mode": "note",
                             "home": item["home"], "item": item["id"],
                             "source": item["source"], "key": item.get("key"),
-                            "item_key": item_key(item),
+                            "item_key": item_key(item), "note_id": note_id,
                             "sent_count": len(item.get("sent") or [])}
                 try:
-                    outcome, route, detail = send_note(records.home, text)
+                    outcome, route, detail, note_id = send_note(records.home, text)
                 except subprocess.SubprocessError as exc:
-                    outcome, route, detail = "unknown", "fm-inbox.sh note", str(exc)
+                    outcome, route, detail, note_id = "unknown", "fm-inbox.sh note", str(exc), None
                 return {"resolved": "note", "outcome": outcome, "route": route,
-                        "detail": detail, "home": "main"}
+                        "detail": detail, "home": "main", "note_id": note_id}
 
             entry = {"kind": "reply", "msg": msg_id,
                      "title": message.get("title"), "text": text}
@@ -1812,11 +1877,11 @@ class Handler(BaseHTTPRequestHandler):
             records = self.records
 
             def deliver_answer():
-                outcome, route, detail = deliver_to_inbox(home_path, item, text)
+                outcome, route, detail, note_id = deliver_to_inbox(home_path, item, text)
                 if outcome == "sent":
                     records.invalidate()     # force a rescan on the next poll
                 return {"outcome": outcome, "route": route, "detail": detail,
-                        "mode": "note"}
+                        "mode": "note", "note_id": note_id}
 
             sid, error = accept_said(self.records.home, {
                 "kind": "answer", "home": home_id, "item": task_id,

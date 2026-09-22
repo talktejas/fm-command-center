@@ -117,7 +117,9 @@ A note that answers nothing (typed with no item open) goes through `bin/fm-inbox
 
 ## Archive and Hold
 
-Every row you can act on — a Messages row, a Waiting-on-you item (in its list row and its opened pane), a My words conversation — carries its own **Archive** and **Hold** buttons, and one click moves it with no confirmation: Archive to the Archived tab, Hold to the On hold tab (**Back to list** there returns it). Hold is only ever your own parking — nothing it touches is ever sent to firstmate.
+Every row you can act on — a Messages row, a Waiting-on-you item, a My words conversation — carries its own **Archive** and **Hold** buttons, one click moves it with no confirmation: Archive to the Archived tab, Hold to the On hold tab (**Back to list** there returns it). Hold is only ever your own parking — nothing it touches is ever sent to firstmate.
+
+These buttons live only in the row's own opened pane, never on the list row itself (his ruling 2026-09-22: they squeezed the space for reading the list). A My words conversation with no message or item of its own — a plain note typed with no item open — opens its own small pane for exactly this: the thread it carries, and Archive/Hold beside it, since it has nowhere else to be.
 
 Both are durable on the server, in `<home>/data/command-center/parked.jsonl`, the same promise `said.jsonl` already makes for what you typed — browser storage was fragile (gone in a private window, invisible from another browser), so a restart or a different browser reads the same state. A Messages row's Archive stays on the record it already had (`captain-messages.jsonl`, the `archive`/`unarchive` amendment beside the message) since that already worked; everything else — a Waiting-on-you item, a My words conversation, and a message's Hold, which had no durable record before — goes through `POST /api/park` (`{target: "item"|"word"|"message", key, state: "archived"|"held"|"none"}`; `bin/command-center.py`'s `record_parked`/`read_parked`). A My words conversation is keyed the same way the page groups it (`wordConversationKey`): the message it replied to, or the item/note key otherwise, so one click parks every send in that conversation together, not one row at a time. An item's key is its own `home/source/id/key` (`item_key`), so parking it from Waiting-on-you and parking its own My words conversation are two different keys under two different targets - archiving the item does not, on its own, archive its conversation, or the reverse.
 
@@ -140,6 +142,16 @@ A reply naming a message this home never recorded is refused, and a task id is o
 A reply to a recorded question whose scan could not be read is not sent at all and reads as failed, so your words come back and sending again is safe; it is never quietly delivered as a note, because a reply that cannot rule out the answer route must not become one.
 A reply to a message that is not a question is routed by the record alone: no scan can change where it goes, so a backlog that will not parse has nothing to say about it.
 A dropped request (the fetch itself failed) keeps your words in the box and reads as a plain failure — never a locked, do-not-resend state — because the only route a reply or an answer ever takes now is a local inbox-note write: a resend there is at worst a duplicate note, never a duplicate steer landing on a worker.
+
+## Received dot
+
+Every reply you send, in any tab, carries a small round dot beside it - next to the reply in its opened pane, and on the list row that leads to it - so a "got it" never has to be typed back at firstmate. Three states, his own ruling 2026-09-22: white with a black border by default (sent, not yet received), yellow once firstmate has actually read the note, red only for a send that is known to have failed.
+
+The send itself already carries an id: `bin/fm-inbox.sh note` prints `queued <id>` and writes `<home>/state/inbox/<id>.note`, whatever its exit code (a nonzero exit there can mean only the *wake* after the write failed - the note is still on disk). `bin/command-center.py`'s `send_note` reads that id back off stdout and it travels with the send's outcome row in `said.jsonl` as `note_id`. Firstmate acknowledging the note is `fm-inbox.sh drain --ack`, which moves the file to `<home>/state/inbox/handled/<id>.note` - `read_said`'s `received` field is exactly that file's existence, checked fresh on every read, for whichever home the send actually went to (a reply or an answer can route to any home the fleet knows, not just this one). The dot is amber only once that file has moved; a send with no `note_id` at all (a genuine failure) reads red; anything else - still queued, or an ambiguous exit code - reads white, because only a known failure is red.
+
+`/api/said` polls on the normal 3-second cadence like everything else here, so the dot needs no dedicated refresh: its change check folds in a stat of `state/inbox` and `state/inbox/handled` for every home a send could have gone to, which changes the instant firstmate drains, without first parsing `said.jsonl` to learn which note ids are even outstanding.
+
+The same dot shows on a row in Archived and On hold, so you can open Archived after a quick Archive-then-forget and see which of your replies actually got through. When the item you archived right after sending becomes received, its Archive button in that row's own opened pane turns the same yellow.
 
 ## What it stores
 

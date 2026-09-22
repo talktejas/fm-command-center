@@ -898,12 +898,12 @@ for item in items:
     for rc in (0, 1, 2):
         subprocess.run = lambda *a, rc=rc, **k: subprocess.CompletedProcess(
             a[0] if a else [], rc, "", "")
-        outcome, route, detail = cc.deliver_to_inbox(os.environ["FM_CC_HOME"], item, "Green.")
+        outcome, route, detail, note_id = cc.deliver_to_inbox(os.environ["FM_CC_HOME"], item, "Green.")
         print(outcome, route)
 def killed(*a, **k):
     raise subprocess.TimeoutExpired(a[0] if a else [], 120)
 subprocess.run = killed
-outcome, route, detail = cc.deliver_to_inbox(os.environ["FM_CC_HOME"], items[0], "Green.")
+outcome, route, detail, note_id = cc.deliver_to_inbox(os.environ["FM_CC_HOME"], items[0], "Green.")
 print(outcome, route)
 subprocess.run = real
 PYEOF
@@ -920,6 +920,81 @@ failed fm-inbox.sh note
 failed fm-inbox.sh note" "$out" \
     "an item answer must read as sent or failed only, on every source, kind and exit code"
   pass "deliver_to_inbox only ever reports sent or failed, whatever the item or the exit code"
+}
+
+# His ruling 2026-09-22: a small dot beside every reply, white with a black
+# border until firstmate has actually acked the note (fm-inbox.sh drain
+# --ack, which moves it from state/inbox/ to state/inbox/handled/), yellow
+# once it has. bin/command-center.py tracks this by the note id fm-inbox.sh
+# itself hands back on "queued <id>".
+test_the_received_dot_flips_when_firstmate_acks_the_note() {
+  local home port body sid note_id etag status
+  home="$TMP_ROOT/recvdot"
+  seed_home "$home"
+  start_server "$home" || fail "the server did not start"
+  port=$SERVER_PORT
+  body=$(post "$port" /api/note '{"text":"Ping for the received dot."}')
+  sid=$(jq -r .sid <<<"$body")
+  wait_outcome "$home" "$sid" >/dev/null \
+    || fail "the outcome of the note never reached the record"
+  note_id=$(jq -r --arg s "$sid" 'select(.of == $s) | .note_id' \
+    "$home/data/command-center/said.jsonl" | tail -1)
+  [ -n "$note_id" ] && [ "$note_id" != "null" ] \
+    || fail "the outcome never carried the note's own id"
+  [ -f "$home/state/inbox/$note_id.note" ] \
+    || fail "fm-inbox.sh did not actually write the note it named"
+  assert_equals "false" \
+    "$(curl -s -m 30 "http://127.0.0.1:$port/api/said" \
+        | jq -r --arg s "$sid" '[.said[] | select(.sid == $s)][0].received')" \
+    "a note not yet acked already read as received"
+  etag=$(curl -sD - -o /dev/null -m 30 "http://127.0.0.1:$port/api/said" \
+    | tr -d '\r' | sed -n 's/^ETag: //p')
+  mkdir -p "$home/state/inbox/handled"
+  mv "$home/state/inbox/$note_id.note" "$home/state/inbox/handled/$note_id.note"
+  status=$(curl -s -o /dev/null -w '%{http_code}' -m 30 \
+    -H "If-None-Match: $etag" "http://127.0.0.1:$port/api/said")
+  assert_not_equals 304 "$status" \
+    "an ack that moved the note file was answered 304 over the now-stale dot"
+  assert_equals "true" \
+    "$(curl -s -m 30 "http://127.0.0.1:$port/api/said" \
+        | jq -r --arg s "$sid" '[.said[] | select(.sid == $s)][0].received')" \
+    "the dot never flipped after firstmate's own ack moved the note to handled/"
+  stop_server
+  pass "the received dot flips from unacked to received the moment fm-inbox.sh drain --ack moves the note"
+}
+
+# The note is on disk (and worth tracking for the dot) whenever fm-inbox.sh
+# printed "queued <id>", even on a nonzero exit - only the WAKE after the
+# write can fail that way. A genuine failure (nothing printed at all) must
+# carry no note id, so it never reads as an eternally-unacked send.
+test_send_note_tracks_the_note_id_even_when_only_the_wake_failed() {
+  local home out
+  home="$TMP_ROOT/note-id"
+  seed_home "$home"
+  out=$(FM_CC_HOME="$home" python3 - "$SERVER" <<'PYEOF'
+import importlib.util, subprocess, sys, os
+spec = importlib.util.spec_from_file_location("cc", sys.argv[1])
+cc = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(cc)
+real = subprocess.run
+# rc=0: the ordinary success case. rc=1 with the same stdout: only the wake
+# after the write failed - fm-inbox.sh's own case for a saved-but-unannounced
+# note. Both leave a note id; a genuine failure (no "queued" line) leaves none.
+for rc, out in ((0, "queued 111-abc\n  a summary\n"),
+                (1, "queued 222-def\n  a summary\nfm-inbox: note saved but NOT announced\n"),
+                (1, "fm-inbox: no region is configured\n")):
+    subprocess.run = lambda *a, rc=rc, out=out, **k: subprocess.CompletedProcess(
+        a[0] if a else [], rc, out, "")
+    outcome, route, detail, note_id = cc.send_note(os.environ["FM_CC_HOME"], "hello")
+    print(outcome, note_id)
+subprocess.run = real
+PYEOF
+)
+  assert_equals "sent 111-abc
+unknown 222-def
+unknown None" "$out" \
+    "a note's own id was not read back from fm-inbox.sh's stdout on every exit code that still wrote one"
+  pass "send_note tracks the note id whenever fm-inbox.sh wrote one, whatever its exit code"
 }
 
 # The module header promises the expensive scan runs once per actual change
@@ -2670,6 +2745,8 @@ test_a_note_of_just_a_dash_is_queued_and_never_hangs_the_server
 test_a_send_whose_words_cannot_be_recorded_is_refused
 test_an_unreadable_log_is_reported_not_shown_as_empty
 test_deliver_to_inbox_only_ever_reports_sent_or_failed
+test_the_received_dot_flips_when_firstmate_acks_the_note
+test_send_note_tracks_the_note_id_even_when_only_the_wake_failed
 test_concurrent_polls_produce_one_scan
 test_the_pages_decision_rules_hold
 test_the_server_serves_the_pages_decision_rules
