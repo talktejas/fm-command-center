@@ -350,8 +350,12 @@ function captureBand(capture) {
 // first one down the list. So the digest covers every row's outcome, not the
 // list's head.
 function saidDigest(rows) {
+  // received flips with no click of his own behind it - only a poll ever
+  // learns it - so it must be part of what "changed" means here, or the
+  // received dot would sit stale until something else in the row changed too.
   return (rows || []).map(r => [r.sid || '', r.kind || '', r.outcome || '',
-                                r.detail || ''].join('\u0001')).join('\u0002');
+                                r.detail || '', r.received ? '1' : '0']
+                                .join('\u0001')).join('\u0002');
 }
 
 // --- what the page is holding of the log ----------------------------------------
