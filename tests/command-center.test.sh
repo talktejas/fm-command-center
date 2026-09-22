@@ -2218,6 +2218,66 @@ test_an_unchanged_message_poll_is_answered_without_the_log() {
   pass "an unchanged message poll costs nothing and a new message still arrives"
 }
 
+# The captain's own report: "when i click on archive button, its
+# unresponsive." Reproduced under the page's normal load - an /api/messages
+# poll running at the same time as his click - not a JS mystery: enrich_messages
+# used to redo its full backlog+transcript resolution for every message on
+# every single poll (see AGENTS.md), so a fat window of unresolved messages
+# made /api/messages slow enough to starve a concurrent click of CPU. A click
+# must come back fast (this repo's target: well under a second) whatever a
+# same-moment /api/messages poll over a many-message, many-session window is
+# doing.
+test_archive_click_stays_fast_under_a_concurrent_messages_poll() {
+  local home port park_ms
+  home="$TMP_ROOT/archive-under-load"
+  seed_home "$home"
+  mkdir -p "$home/state" "$home/data/command-center"
+  python3 - "$home" <<'PY'
+import json, os, sys
+home = sys.argv[1]
+enc = __import__("re").sub(r"[^A-Za-z0-9]", "-", os.path.abspath(home))
+tdir = os.path.join(home, "claude-config", "projects", enc)
+os.makedirs(tdir, exist_ok=True)
+for s in range(15):
+    with open(os.path.join(tdir, f"sess-{s:02d}.jsonl"), "w") as fh:
+        for req in range(10):
+            reqid = f"req-{s:02d}-{req:03d}"
+            fh.write(json.dumps({"type": "user", "requestId": reqid,
+                "message": {"content": "status update, nothing to name " * 8}}) + "\n")
+            for t in range(10):
+                fh.write(json.dumps({"type": "assistant", "requestId": reqid,
+                    "message": {"content": [{"type": "tool_use",
+                        "input": {"note": "x" * 300}}]}}) + "\n")
+with open(os.path.join(home, "data", "captain-messages.jsonl"), "w") as fh:
+    for i in range(80):
+        s = i % 15
+        row = {"id": f"m-{i:04d}", "at": "2026-09-21T10:00:00Z",
+               "title": "status ping", "text": "all quiet",
+               "session": f"sess-{s:02d}", "req": f"req-{s:02d}-{i % 10:03d}"}
+        fh.write(json.dumps(row) + "\n")
+PY
+  CLAUDE_CONFIG_DIR="$home/claude-config" start_server "$home" || fail "the server did not start"
+  port=$SERVER_PORT
+  curl -s -m 120 -o /dev/null "http://127.0.0.1:$port/api/items"
+  # Fire the (still uncached, first-ever) /api/messages poll in the background,
+  # and click Archive on an item right behind it - the same overlap his own
+  # 3-second poll and a real click land in.
+  curl -s -m 60 -o /dev/null "http://127.0.0.1:$port/api/messages" &
+  local messages_pid=$!
+  park_ms=$(curl -s -o /dev/null -w '%{time_total}' \
+    -X POST -H 'Content-Type: application/json' \
+    -d '{"target":"item","key":"main/hold/cc-live/","state":"archived"}' \
+    "http://127.0.0.1:$port/api/park")
+  wait "$messages_pid"
+  stop_server
+
+  python3 -c "
+secs = float('$park_ms')
+assert secs < 2.0, f'Archive click took {secs:.2f}s with a concurrent /api/messages poll running'
+" || fail "the archive click (POST /api/park) took ${park_ms}s while /api/messages was resolving a many-message window - a click must never queue behind that read"
+  pass "an Archive click answers fast even while a concurrent /api/messages poll is resolving a many-message window"
+}
+
 # The server is the only matcher, so a query it cannot answer is the whole
 # answer. What the message CONTAINS is what he searches by - not how the record
 # happens to be escaped on disk.
@@ -2875,6 +2935,7 @@ test_park_makes_item_word_and_message_state_durable_across_a_restart
 test_park_refuses_an_unknown_target_or_state
 test_a_reply_never_archives_its_message
 test_an_unchanged_message_poll_is_answered_without_the_log
+test_archive_click_stays_fast_under_a_concurrent_messages_poll
 test_a_search_finds_text_however_the_record_escapes_it
 test_an_unreadable_message_log_is_reported_not_shown_as_empty
 test_every_chat_message_is_captured_without_anyone_recording_it
