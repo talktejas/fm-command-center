@@ -1223,7 +1223,11 @@ test_a_url_becomes_a_real_link_on_every_surface_that_shows_free_text() {
     "a Waiting-on-you item's own question text does not link URLs"
   assert_contains "$body" 'linked(m.text)}</div>${trackHtml(m)}' \
     "what you sent to a worker does not link URLs"
-  assert_equals "4" "$(grep -o 'linked(r.text)' <<<"$body" | wc -l)" \
+  # A threaded conversation's own "you" bubble (a message's and an item's own
+  # pane) reads its row as `e.row`, not `r`, once it interleaves firstmate's
+  # matched answer alongside it - same call, same linked(), different local
+  # name for the loop variable.
+  assert_equals "4" "$(grep -oE 'linked\((r|e\.row)\.text\)' <<<"$body" | wc -l)" \
     "his own reply/note box, his reply thread, a plain note's thread, and a Waiting-on-you item's answered thread must each link URLs"
   pass "a URL becomes a real link on every surface that shows free text"
 }
@@ -1771,6 +1775,86 @@ test_a_reply_never_resolves_its_task_against_another_home() {
   assert_not_contains "$(cat "$mate/data/backlog.md")" 'Go blue.' \
     "his words were delivered into an unrelated installation"
   pass "a reply never resolves its task against another home"
+}
+
+# His report 2026-09-24: "i rec'd no answer for this yet" - he replied to a
+# message and firstmate's real answer landed as a brand-new row in Messages
+# instead of showing up under his reply. The matching rule itself
+# (threadRows/matchAnswer, bin/command-center-state.js) is unit-tested
+# directly in tests/command-center-state.test.js; these two exercise the
+# HTTP boundary end to end (a spare port, curl only, no browser) - the reply
+# and the later message the server actually hands back - and feed that real
+# response through the same rule to prove it threads (and does not) on live
+# server data, not a hand-built fixture.
+test_firstmates_later_message_on_the_same_task_threads_as_the_answer() {
+  local home port id body sid resolved rules messages said out
+  home="$TMP_ROOT/thread-answer"
+  seed_home "$home"
+  id=$(say "$home" "Blue or green?" "The colour call is yours." --task cc-live --project demo --question) \
+    || fail "the recorder refused the question"
+  start_server "$home" || fail "the server did not start"
+  port=$SERVER_PORT
+  curl -s -m 30 -o /dev/null "http://127.0.0.1:$port/api/items"
+  body=$(post "$port" /api/reply "$(jq -cn --arg m "$id" '{msg:$m,text:"Ship blue."}')")
+  sid=$(jq -r .sid <<<"$body")
+  resolved=$(wait_outcome "$home" "$sid") || fail "the outcome of the reply never reached the record"
+  sleep 1.1   # the log's own clock is per-second; the answer must land strictly after
+  say "$home" "Blue shipped" "Blue is live now." --task cc-live --project demo >/dev/null \
+    || fail "the recorder refused the answer"
+  messages=$(curl -s -m 30 "http://127.0.0.1:$port/api/messages" | jq -c .messages)
+  said=$(curl -s -m 30 "http://127.0.0.1:$port/api/said" | jq -c .said)
+  stop_server
+
+  rules="$ROOT/web/command-center-state.js"
+  out=$(node -e '
+    const { threadRows } = require(process.argv[1]);
+    const messages = JSON.parse(process.argv[2]);
+    const said = JSON.parse(process.argv[3]);
+    const reply = said.filter(r => r.msg && r.text === "Ship blue.");
+    const entries = threadRows(reply, messages);
+    process.stdout.write(entries.map(e => e.kind).join(","));
+    const answer = entries.find(e => e.kind === "firstmate");
+    if (!answer || answer.row.title !== "Blue shipped") process.exit(1);
+  ' "$rules" "$messages" "$said") || fail "firstmate's later message on the same task did not thread as the answer (entries: $out)"
+  assert_equals "you,firstmate" "$out" \
+    "the thread was not his reply followed immediately by firstmate's answer"
+  pass "firstmate's later message on the same task threads as the answer"
+}
+
+# MUST NOT THREAD: an unrelated message, on a different task, that neither
+# names nor quotes his reply's own subject - a wrong thread is worse than
+# none, so this must come back completely unanswered.
+test_an_unrelated_later_message_never_threads_under_his_reply() {
+  local home port id body sid resolved rules messages said out
+  home="$TMP_ROOT/thread-no-answer"
+  seed_home "$home"
+  id=$(say "$home" "Blue or green?" "The colour call is yours." --task cc-live --project demo --question) \
+    || fail "the recorder refused the question"
+  start_server "$home" || fail "the server did not start"
+  port=$SERVER_PORT
+  curl -s -m 30 -o /dev/null "http://127.0.0.1:$port/api/items"
+  body=$(post "$port" /api/reply "$(jq -cn --arg m "$id" '{msg:$m,text:"Ship blue."}')")
+  sid=$(jq -r .sid <<<"$body")
+  resolved=$(wait_outcome "$home" "$sid") || fail "the outcome of the reply never reached the record"
+  sleep 1.1
+  say "$home" "Metrics refresh" "Nightly job finished on schedule." >/dev/null \
+    || fail "the recorder refused the unrelated message"
+  messages=$(curl -s -m 30 "http://127.0.0.1:$port/api/messages" | jq -c .messages)
+  said=$(curl -s -m 30 "http://127.0.0.1:$port/api/said" | jq -c .said)
+  stop_server
+
+  rules="$ROOT/web/command-center-state.js"
+  out=$(node -e '
+    const { threadRows } = require(process.argv[1]);
+    const messages = JSON.parse(process.argv[2]);
+    const said = JSON.parse(process.argv[3]);
+    const reply = said.filter(r => r.msg && r.text === "Ship blue.");
+    const entries = threadRows(reply, messages);
+    process.stdout.write(entries.map(e => e.kind).join(","));
+  ' "$rules" "$messages" "$said") || fail "the matching rule threw over real server data"
+  assert_equals "you" "$out" \
+    "an unrelated message on a different task, naming no shared subject, was threaded as his answer"
+  pass "an unrelated later message never threads under his reply"
 }
 
 # "Every one" is the whole requirement: the list he opens is not allowed to stop
@@ -3239,6 +3323,8 @@ test_a_reply_takes_the_answer_route_when_the_task_is_still_waiting
 test_a_reply_with_nothing_waiting_is_queued_for_firstmate
 test_a_reply_to_a_message_this_home_never_recorded_is_refused
 test_a_reply_never_resolves_its_task_against_another_home
+test_firstmates_later_message_on_the_same_task_threads_as_the_answer
+test_an_unrelated_later_message_never_threads_under_his_reply
 test_a_reply_to_a_message_that_is_not_a_question_never_answers_a_decision
 test_a_reply_is_never_delivered_as_a_note_while_no_scan_has_been_read
 test_his_own_words_are_served_whole_and_never_shortened_quietly

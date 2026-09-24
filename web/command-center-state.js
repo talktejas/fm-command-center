@@ -394,6 +394,91 @@ function messageNeedsReply(message, saidRows) {
   return !latest || looksLikeClarifyingReply(latest.text);
 }
 
+// --- threading firstmate's later answer under his reply --------------------
+// His report 2026-09-24: "i rec'd no answer for this yet" - he replied to a
+// message and firstmate's actual answer landed as a brand-new row in Messages
+// instead of appearing under his reply in the same conversation. The rule, in
+// order, is his own: (1) firstmate's message was recorded against the SAME
+// task and sent after this reply and before any later reply of his in the
+// same conversation; (2) failing that, the message plainly quotes or names
+// the same subject (what the reply itself was about); (3) otherwise it is
+// never attached - a wrong thread is worse than none.
+
+// The task a said row's own conversation is about, if any. A reply to a
+// message (kind 'reply') carries no task of its own - only the message it
+// replied to does - so it is looked up there; an answer to a scanned item
+// (kind 'answer') already carries it directly as `item`.
+function saidTaskId(row, messages) {
+  if (!row) return null;
+  if (row.kind === 'answer' && row.item) return row.item;
+  if (row.msg) {
+    const m = (messages || []).find(x => x.id === row.msg);
+    if (m && m.task) return m.task;
+  }
+  return null;
+}
+
+// Rule 2: a plain, deliberately narrow substring test - the candidate's own
+// title or text must actually contain the subject (what the reply was
+// about), never a fuzzy word-overlap score that could pull in an unrelated
+// message about the same handful of common words.
+function quotesOrNamesSubject(candidate, subjectTitle) {
+  const subject = String(subjectTitle || '').trim().toLowerCase();
+  if (subject.length < 4) return false;
+  const hay = (String(candidate.title || '') + '\n' + String(candidate.text || '')).toLowerCase();
+  return hay.includes(subject);
+}
+
+// The one message, if any, that answers this one reply: recorded messages
+// strictly after the reply and strictly before `untilAt` (the next reply in
+// the same conversation, so an answer to reply 1 can never bleed into reply
+// 2's own window), earliest such message first.
+function matchAnswer(row, taskId, messages, untilAt) {
+  const replyAt = Date.parse((row || {}).at || '');
+  if (isNaN(replyAt)) return null;
+  const untilEpoch = untilAt ? Date.parse(untilAt) : Infinity;
+  const inWindow = (messages || []).filter(m => {
+    const at = Date.parse(m.at || '');
+    return m && m.id && !isNaN(at) && at > replyAt && at < untilEpoch;
+  }).sort((a, b) => Date.parse(a.at) - Date.parse(b.at));
+  if (taskId) {
+    const sameTask = inWindow.find(m => m.task === taskId);
+    if (sameTask) return sameTask;
+  }
+  return inWindow.find(m => quotesOrNamesSubject(m, row.title)) || null;
+}
+
+// The full conversation, oldest first: his reply, then (when the rule above
+// finds one) firstmate's answer, then his next reply, and so on. The same
+// candidate message is never claimed twice - once threaded under a reply it
+// is out of the pool for every later one.
+function threadRows(repliesOldestFirst, messages) {
+  const used = new Set();
+  const out = [];
+  for (let i = 0; i < (repliesOldestFirst || []).length; i++) {
+    const row = repliesOldestFirst[i];
+    out.push({ kind: 'you', row });
+    const taskId = saidTaskId(row, messages);
+    const next = repliesOldestFirst[i + 1];
+    const pool = (messages || []).filter(m => !used.has(m.id));
+    const answer = matchAnswer(row, taskId, pool, next ? next.at : null);
+    if (answer) { used.add(answer.id); out.push({ kind: 'firstmate', row: answer }); }
+  }
+  return out;
+}
+
+// The marker the item/pane shows while a reply is outstanding: "answered"
+// once firstmate's threaded answer landed after his latest reply, "awaiting
+// firstmate" with the wait time otherwise. null when he has not replied at
+// all yet, since there is nothing here to mark.
+function threadStatus(entries) {
+  if (!entries || !entries.length) return null;
+  const last = entries[entries.length - 1];
+  return last.kind === 'firstmate'
+    ? { state: 'answered', at: last.row.at }
+    : { state: 'awaiting', at: last.row.at };
+}
+
 // --- Messages vs Info -------------------------------------------------------------
 // His ask 2026-09-24: "add one more info tab so from messages split into two all
 // the messages like nothing new, we are progressing etc. etc. just put in info
@@ -540,4 +625,5 @@ if (typeof module === 'object' && module.exports)
                      wordConversationKey, orderWordsByLastReply, wordOriginal,
                      isItemDeferred, looksLikeClarifyingReply,
                      waitingItems, waitingMessageRows, waitingCount,
-                     looksLikeInfoOnly, isInfoOnlyMessage };
+                     looksLikeInfoOnly, isInfoOnlyMessage,
+                     saidTaskId, matchAnswer, threadRows, threadStatus };

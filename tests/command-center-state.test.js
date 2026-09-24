@@ -12,7 +12,7 @@ const {
   listSignature, mayRelease, logRead, sendState, sendKeys, spokenFor, sameWords,
   heldWith, captureBand, saidDigest, mergeMessages,
   wordConversationKey, orderWordsByLastReply, waitingCount, wordOriginal,
-  isInfoOnlyMessage,
+  isInfoOnlyMessage, saidTaskId, matchAnswer, threadRows, threadStatus,
 } = require(path.join(__dirname, '..', 'web', 'command-center-state.js'));
 
 // Quiet on success: tests/command-center.test.sh runs this and reports the
@@ -728,6 +728,86 @@ test('two runs that do not overlap are never stitched across the gap', () => {
     'the list kept rows with a hole between them and no way to fill it');
   assert.deepStrictEqual(mergeMessages([], [m('m9')]).map(r => r.id), ['m9'],
     'a poll that answered nothing must not empty the list');
+});
+
+// --- threading firstmate's later answer under his reply -------------------
+// His report 2026-09-24: "i rec'd no answer for this yet" - firstmate's real
+// answer arrived as a brand-new message instead of showing up under his
+// reply. These pin the matching rule directly, since a wrong thread is worse
+// than none.
+
+test('a later message against the same task, after the reply, threads as the answer', () => {
+  const reply = { at: '2026-09-24T10:00:00Z', title: 'Blue or green?', msg: 'm1' };
+  const messages = [
+    { id: 'm1', task: 'cc-live', at: '2026-09-24T09:00:00Z', title: 'Blue or green?' },
+    { id: 'm2', task: 'cc-live', at: '2026-09-24T10:05:00Z', title: 'Shipped blue', text: 'Going with blue.' },
+  ];
+  assert.strictEqual(saidTaskId(reply, messages), 'cc-live');
+  const answer = matchAnswer(reply, 'cc-live', messages, null);
+  assert.strictEqual(answer && answer.id, 'm2');
+});
+
+// Same task, but sent BEFORE the reply - never his answer, whatever it says.
+test('a same-task message sent before the reply never threads', () => {
+  const reply = { at: '2026-09-24T10:00:00Z', title: 'Blue or green?' };
+  const early = [{ id: 'm0', task: 'cc-live', at: '2026-09-24T08:00:00Z', title: 'unrelated' }];
+  assert.strictEqual(matchAnswer(reply, 'cc-live', early, null), null);
+});
+
+// Same task, sent after the reply, but past the next reply's own window - it
+// belongs to whatever conversation came after, not this one.
+test('a same-task message past the next reply is never pulled into this window', () => {
+  const reply = { at: '2026-09-24T10:00:00Z' };
+  const messages = [{ id: 'm2', task: 'cc-live', at: '2026-09-24T11:00:00Z' }];
+  assert.strictEqual(matchAnswer(reply, 'cc-live', messages, '2026-09-24T10:30:00Z'), null);
+});
+
+// Rule 2: no task match, but the candidate plainly names the subject he was
+// replying about.
+test('a message with no task match but that names the subject threads by rule 2', () => {
+  const reply = { at: '2026-09-24T10:00:00Z', title: 'Blue or green?' };
+  const messages = [{ id: 'm2', task: null, at: '2026-09-24T10:05:00Z',
+    title: 'Re: blue or green?', text: 'Went with blue.' }];
+  const answer = matchAnswer(reply, null, messages, null);
+  assert.strictEqual(answer && answer.id, 'm2');
+});
+
+// MUST NOT THREAD: a different task, sent in the same window, that neither
+// quotes nor names the subject - an unrelated status ping must never be
+// shown as though it answered this reply.
+test('an unrelated message on a different task never threads', () => {
+  const reply = { at: '2026-09-24T10:00:00Z', title: 'Blue or green?', msg: 'm1' };
+  const messages = [
+    { id: 'm1', task: 'cc-live', at: '2026-09-24T09:00:00Z', title: 'Blue or green?' },
+    { id: 'm2', task: 'other-task', at: '2026-09-24T10:05:00Z',
+      title: 'Metrics refresh', text: 'Nightly job finished on schedule.' },
+  ];
+  assert.strictEqual(matchAnswer(reply, saidTaskId(reply, messages), messages, null), null);
+});
+
+// threadRows interleaves reply/answer pairs in order, and never lets the same
+// candidate message answer two different replies.
+test('threadRows interleaves replies and answers, oldest first, each answer used once', () => {
+  const replies = [
+    { at: '2026-09-24T10:00:00Z', title: 'Blue or green?', msg: 'm1', text: 'Which is it?' },
+    { at: '2026-09-24T10:20:00Z', title: 'Blue or green?', msg: 'm1', text: 'Any update?' },
+  ];
+  const messages = [
+    { id: 'm1', task: 'cc-live', at: '2026-09-24T09:00:00Z', title: 'Blue or green?' },
+    { id: 'm2', task: 'cc-live', at: '2026-09-24T10:10:00Z', title: 'Going blue', text: 'Blue it is.' },
+    { id: 'm3', task: 'cc-live', at: '2026-09-24T10:30:00Z', title: 'Shipped', text: 'Blue shipped.' },
+  ];
+  const entries = threadRows(replies, messages);
+  assert.deepStrictEqual(entries.map(e => e.kind + ':' + (e.row.id || e.row.text)),
+    ['you:Which is it?', 'firstmate:m2', 'you:Any update?', 'firstmate:m3']);
+});
+
+test('threadStatus reads answered once firstmate\'s answer is the last entry, awaiting otherwise', () => {
+  const answered = [{ kind: 'you', row: { at: '10:00' } }, { kind: 'firstmate', row: { at: '10:05', id: 'm2' } }];
+  assert.deepStrictEqual(threadStatus(answered), { state: 'answered', at: '10:05' });
+  const awaiting = [{ kind: 'you', row: { at: '10:00' } }];
+  assert.deepStrictEqual(threadStatus(awaiting), { state: 'awaiting', at: '10:00' });
+  assert.strictEqual(threadStatus([]), null);
 });
 
 process.exit(failures ? 1 : 0);

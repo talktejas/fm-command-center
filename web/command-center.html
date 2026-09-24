@@ -497,13 +497,13 @@ const $ = s => document.querySelector(s);
 const esc = s => String(s == null ? '' : s)
   .replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
 
-// His report: "none of the link is fucking clickable" - every URL in his or
-// firstmate's own words must be a real, clickable link, everywhere he reads
-// one. This runs on ALREADY-ESCAPED text (esc()'s own output), so it only
-// ever turns a literal http(s):// run esc() left untouched into an anchor -
-// it never reinterprets anything typed as markup. A sentence character stuck
-// right against the end of a URL (a period, a closing bracket, ...) almost
-// never belongs to it, so it is peeled back off the link.
+// His report 2026-09-24: "none of the link is fucking clickable" - every URL
+// in his or firstmate's own words must be a real, clickable link, everywhere
+// he reads one. This runs on ALREADY-ESCAPED text (esc()'s own output), so it
+// only ever turns a literal http(s):// run esc() left untouched into an
+// anchor - it never reinterprets anything he typed as markup. A sentence
+// character stuck right against the end of a URL (a period, a closing
+// bracket, ...) almost never belongs to it, so it is peeled back off the link.
 const LINK_RE = /(https?:\/\/[^\s<>"]+)/g;
 function linkify(escapedText){
   return String(escapedText || '').replace(LINK_RE, url => {
@@ -675,6 +675,27 @@ const msgKey = m => 'msg/' + m.id;
 // message next to the archived row gets a bogus itemKey() that opens nothing.
 const rowKey = it => it.__msg ? msgKey(it) : itemKey(it);
 const repliesTo = m => state.said.filter(r => r.msg === m.id);
+// A conversation's own thread: his replies, oldest first, interleaved with
+// whatever firstmate answer the matching rule attaches to each one
+// (threadRows, bin/command-center-state.js). state.messages is the same
+// loaded window every other lookup on this page reads from - an answer that
+// has aged out of it simply does not thread, same as it would not be found
+// anywhere else on the page either.
+const threadEntries = repliesOldestFirst => threadRows(repliesOldestFirst, state.messages);
+// How long a reply has been waiting, in the same units ageLabel already
+// speaks - built on the one clock the page trusts (nowSecs), not a second one.
+const waitLabel = at => ageLabel({ since_epoch: Math.floor(Date.parse(at || '') / 1000) || null });
+// The same "answered"/"awaiting firstmate" marker on every surface a
+// conversation appears on - the list row, its opened pane, and My words -
+// since it is one fact about one conversation. f-sent (green) matches the
+// existing "replied"/"awaiting firstmate's explanation" convention below:
+// waiting on firstmate is not an error state, so it never borrows f-stuck.
+function threadBadgeHtml(status){
+  if (!status) return '';
+  return status.state === 'answered'
+    ? '<span class="flag f-sent">answered</span>'
+    : `<span class="flag f-sent">awaiting firstmate · ${esc(waitLabel(status.at))}</span>`;
+}
 const projectOf = it => it.project || 'Not recorded';
 const homeOf = id => state.view.homes.find(h => h.id === id) || {id, name:id};
 const homeColour = id => HOME_COLOURS[
@@ -963,6 +984,10 @@ function itemRow(it, mode){
   else if (isStuck(it))   flag = '<span class="flag f-stuck">stuck</span>';
   else if (isPending(it)) flag = '<span class="flag f-sent">sent</span>';
   else if (isDeferred(it)) flag = `<span class="flag f-sent">until ${esc(it.deferred_until)}</span>`;
+  else {
+    const answered = state.said.filter(r => r.item_key === itemKey(it)).slice().reverse();
+    if (answered.length) flag = threadBadgeHtml(threadStatus(threadEntries(answered)));
+  }
   const old = it.since_epoch && (nowSecs() - it.since_epoch) > 86400;
   return `<div class="row"><button class="item ${isUnread(it) ? '' : 'answered'} ${state.flash === itemKey(it) ? 'fresh' : ''}"
       data-key="${esc(itemKey(it))}" aria-current="${state.open === itemKey(it)}">
@@ -1567,6 +1592,11 @@ function messageRow(m, mode){
   // what it is actually waiting on now, rather than the plain "replied" flag.
   const latest = latestReplyTo(m);
   const clarifying = m.__msg && latest && looksLikeClarifyingReply(latest.text);
+  // The thread marker: only worth computing once he has actually replied, and
+  // only shown when neither of the two more specific badges above already
+  // says something about the same reply.
+  const status = replied && !clarifying
+    ? threadStatus(threadEntries(repliesTo(m).slice().reverse())) : null;
   const where = [
     m.project || 'Not recorded',
     m.worktree ? m.worktree.replace(/^.*\//, '') : 'no worktree',
@@ -1579,6 +1609,7 @@ function messageRow(m, mode){
       <span class="item-title">${esc(m.title)}</span>
       ${state.failed[msgKey(m)] ? '<span class="flag f-stuck">not sent</span>'
         : clarifying ? '<span class="flag f-sent">awaiting firstmate’s explanation</span>'
+        : status ? threadBadgeHtml(status)
         : replied ? '<span class="flag f-sent">replied</span>' : ''}
       <span class="age" title="from the time firstmate sent it">${ageLabel(m)}</span>
       ${recvDotHtml(latestReplyTo(m))}
@@ -1652,18 +1683,28 @@ function renderMessagePane(m){
     ? 'Firstmate did not record this message as a question, so this goes to firstmate as a note — never to a worker.'
     : 'This message was not a question, so this goes to firstmate as a note — never as the answer to another decision.';
   const replies = repliesTo(m).slice().reverse();   // the log is newest first
+  const entries = threadEntries(replies);
+  const status = threadStatus(entries);
   const cell = (label, value, na) =>
     `<div><dt>${label}</dt><dd class="${value ? '' : 'na'}">${esc(value || na)}</dd></div>`;
-  const thread = replies.map(r => `<div class="msg you">
-      <div class="msg-who">You<span class="t">${esc(localTime(r.at))}</span>${recvDotHtml(r)}</div>
-      <div class="msg-text">${linked(r.text)}</div>
-      ${messageImagesHtml(r.images)}
-      <div class="proof">${wordOutcome(r)}</div>
+  // In order: his reply, then - only when the matching rule attached one -
+  // firstmate's own answer to it, before his next reply. A wrong thread is
+  // worse than none, so an entry only ever appears here when threadRows
+  // (bin/command-center-state.js) actually found it.
+  const thread = entries.map(e => e.kind === 'you' ? `<div class="msg you">
+      <div class="msg-who">You<span class="t">${esc(localTime(e.row.at))}</span>${recvDotHtml(e.row)}</div>
+      <div class="msg-text">${linked(e.row.text)}</div>
+      ${messageImagesHtml(e.row.images)}
+      <div class="proof">${wordOutcome(e.row)}</div>
+    </div>` : `<div class="msg them">
+      <div class="msg-who">Firstmate<span class="t">${esc(localTime(e.row.at))}</span></div>
+      <div class="msg-text">${para(e.row.text) || '<p class="quiet">No text recorded.</p>'}</div>
     </div>`).join('');
   paintMain(key, `<div class="main-inner">
     <div class="crumbs">
       <span class="kind k-decision">firstmate said</span>
       <span class="sep">·</span><span>${esc(localTime(m.at))}</span>
+      ${status ? `<span class="sep">·</span>${threadBadgeHtml(status)}` : ''}
     </div>
     <h2 class="subject">${esc(m.title)}</h2>
     <div class="where">
@@ -1680,7 +1721,8 @@ function renderMessagePane(m){
        own words are shortened here.</b> ${state.saidDropped} older entr${
        state.saidDropped === 1 ? 'y is' : 'ies are'} not shown, so a reply you
        sent long ago may be missing from the thread below.</div>` : ''}
-    ${thread ? `<div class="thread"><h3>What you said back</h3>${thread}</div>` : ''}
+    ${thread ? `<div class="thread"><h3>${entries.some(e => e.kind === 'firstmate')
+      ? 'What you said back — and firstmate’s answer' : 'What you said back'}</h3>${thread}</div>` : ''}
     <div class="reply">
       <label for="reply">Your reply — in your own words</label>
       <textarea id="reply" placeholder="Type here…">${esc(draft)}</textarea>
@@ -1762,12 +1804,22 @@ function renderMain(){
   // first like any other conversation, so a superseding answer reads as what
   // it is rather than replacing what came before it.
   const answered = state.said.filter(r => r.item_key === itemKey(it)).slice().reverse();
-  const answeredHtml = answered.length ? `<div class="thread"><h3>What you answered</h3>${
-    answered.map(r => `<div class="msg you">
-        <div class="msg-who">You<span class="t">${esc(localTime(r.at))}</span>${recvDotHtml(r)}</div>
-        <div class="msg-text">${linked(r.text)}</div>
-        ${messageImagesHtml(r.images)}
-        <div class="proof">${wordOutcome(r)}</div>
+  const answerEntries = threadEntries(answered);
+  const answerStatus = threadStatus(answerEntries);
+  // Same rule and same order as a message's own pane (threadEntries): his
+  // answer, then - only when threadRows actually found one - firstmate's own
+  // reply to it, before his next answer.
+  const answeredHtml = answerEntries.length ? `<div class="thread"><h3>${
+    answerEntries.some(e => e.kind === 'firstmate')
+      ? 'What you answered — and firstmate’s reply' : 'What you answered'}</h3>${
+    answerEntries.map(e => e.kind === 'you' ? `<div class="msg you">
+        <div class="msg-who">You<span class="t">${esc(localTime(e.row.at))}</span>${recvDotHtml(e.row)}</div>
+        <div class="msg-text">${linked(e.row.text)}</div>
+        ${messageImagesHtml(e.row.images)}
+        <div class="proof">${wordOutcome(e.row)}</div>
+      </div>` : `<div class="msg them">
+        <div class="msg-who">Firstmate<span class="t">${esc(localTime(e.row.at))}</span></div>
+        <div class="msg-text">${para(e.row.text) || '<p class="quiet">No text recorded.</p>'}</div>
       </div>`).join('')
   }</div>` : '';
   const cell = (label, value, na) =>
@@ -1782,6 +1834,7 @@ function renderMain(){
       <span class="sep">·</span><span class="kind k-${it.source === 'hold' ? 'decision' : 'blocker'}">${it.source === 'hold' ? 'decision' : esc(it.status_verb || 'blocked')}</span>
       <span class="sep">·</span><span title="${esc(ageTitle(it))}">waiting ${ageLabel(it)}</span>
       ${it.deferred_until ? `<span class="sep">·</span><span>deferred to ${esc(it.deferred_until)}</span>` : ''}
+      ${answerStatus ? `<span class="sep">·</span>${threadBadgeHtml(answerStatus)}` : ''}
     </div>
     <h2 class="subject">${esc(it.title)}</h2>
     <div class="listen ${esc(it.listen)}"><span class="lamp ${esc(it.listen)}"></span>
