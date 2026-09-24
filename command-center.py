@@ -1363,6 +1363,12 @@ def message_totals(home):
     stay true as the log grows past what is loaded. Counted from the file
     every time it is asked for: only a poll that found the log changed gets
     this far, and the file is the one thing that cannot disagree with itself.
+
+    A held message is excluded from both counts, the same as visibleMessages()
+    (web/command-center-state.js) excludes it from both the Messages and
+    Archived lists - a message the captain parked belongs to On hold alone, so
+    its badge must never also swell whichever of the other two it happens to
+    sit in.
     """
     ids = []
     states = {}
@@ -1379,6 +1385,8 @@ def message_totals(home):
                     ids.append(row["id"])
     except OSError:
         pass
+    held = read_parked(home)
+    ids = [i for i in ids if held.get(("message", i)) != "held"]
     archived = sum(1 for i in ids if states.get(i))
     return len(ids) - archived, archived
 

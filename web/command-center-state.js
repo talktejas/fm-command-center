@@ -152,6 +152,22 @@ function wordConversationKey(r) {
   return r.msg ? 'msg/' + r.msg : (r.item_key || r.key || '');
 }
 
+// What a My words row was actually replying to, so it never has to be opened
+// just to learn that (his report 2026-09-24: "why i am just getting my
+// replies without the original message and context ... i would know what i
+// replied to what"). null only for a genuine standalone note - nothing else
+// named it, so there is truly nothing to show.
+function wordOriginal(r, items, messages) {
+  const item = (items || []).find(it => itemKey(it) === (r.item_key || r.key));
+  if (item) return { key: itemKey(item), title: item.title, text: item.detail,
+    project: item.project, worktree: item.worktree, branch: item.branch };
+  const msgId = r.msg || (String(r.key || '').startsWith('msg/') ? r.key.slice(4) : null);
+  const msg = (messages || []).find(m => m.id === msgId || 'msg/' + m.id === r.key);
+  if (msg) return { key: 'msg/' + msg.id, title: msg.title, text: msg.text,
+    project: msg.project, worktree: msg.worktree, branch: msg.branch };
+  return null;
+}
+
 // `rows` arrives newest first (read_said), so the first row seen for a
 // conversation key is already its most recent reply: collecting keys in that
 // order and grouping every row under its key's first appearance needs no
@@ -338,25 +354,105 @@ function replyTarget(message, items) {
 // decide/approve/choose without ever being recorded as one. Rather than
 // guessing at intent, this looks for a literal question or the same handful
 // of phrases firstmate itself uses to hand him a decision.
-const DECISION_PHRASES = ['reply 1 or 2', 'say the word', 'your call', 'waiting on your'];
+const DECISION_PHRASES = ['reply 1 or 2', 'reply "', "reply '", 'say the word',
+  'your call', 'waiting on your', 'tell me', 'let me know'];
 function looksLikeQuestion(text) {
   const t = String(text || '').trim();
   if (!t) return false;
   if (t.endsWith('?')) return true;
   const low = t.toLowerCase();
-  return DECISION_PHRASES.some(p => low.includes(p)) || /\bmerge\b[^.!]*\?/i.test(t);
+  return DECISION_PHRASES.some(p => low.includes(p))
+    || /\bmerge\b[^.!]*\?/.test(low) || /\bshould i\b[^.!]*\?/.test(low);
+}
+
+// A reply that only asks firstmate something back is not a decision: his
+// report 2026-09-24 - "an item must never leave Waiting on you because his
+// reply was a QUESTION. Only a reply that decides ... removes it."
+const CLARIFY_PHRASES = ['what do you mean', 'explain', 'more info', 'which one', 'why'];
+function looksLikeClarifyingReply(text) {
+  const t = String(text || '').trim();
+  if (!t) return false;
+  if (t.endsWith('?')) return true;
+  const low = t.toLowerCase();
+  return CLARIFY_PHRASES.some(p => low.includes(p));
 }
 
 // Waiting on you only while unanswered: once something in the said log
 // answers this message (repliesTo in bin/command-center.html: r.msg ===
 // message.id) it leaves Waiting on you but stays in Messages, same as an
 // answered captain hold leaves the waiting queue but stays in the backlog.
+// saidRows is newest first (bin/command-center.py's read_said), so the first
+// match naming this message is his LATEST reply to it - and a latest reply
+// that only asks firstmate something back never counts as the answer this
+// message is waiting on, so it stays exactly as if unanswered.
 function messageNeedsReply(message, saidRows) {
   if (!message) return false;
   const flagged = Boolean(message.question) || looksLikeQuestion(message.text)
     || looksLikeQuestion(message.title);
   if (!flagged) return false;
-  return !(saidRows || []).some(r => r.msg === message.id);
+  const latest = (saidRows || []).find(r => r.msg === message.id);
+  return !latest || looksLikeClarifyingReply(latest.text);
+}
+
+// --- Messages vs Info -------------------------------------------------------------
+// His ask 2026-09-24: "add one more info tab so from messages split into two all
+// the messages like nothing new, we are progressing etc. etc. just put in info
+// tab" - pure progress/no-change chatter moves to Info; anything reporting a real
+// outcome, a landed change, a decision or a problem stays in Messages. Kept
+// deliberately conservative (checked AFTER looksLikeQuestion, never before): a
+// message that plainly asks him something is never info-only, whatever else it
+// says, and nothing not matched here defaults to Info - it defaults to Messages.
+const INFO_TERMINAL_PHRASES = [
+  'nothing new for the captain', 'nothing new', 'nothing needs you',
+  'nothing else needs you', 'nothing to report', 'still running', 'still going',
+  'routine progress',
+];
+function looksLikeInfoOnly(text) {
+  const t = String(text || '').trim();
+  if (!t) return false;
+  const low = t.toLowerCase().replace(/[.!]+$/, '');
+  if (/^(ack|acked|noted|ok|okay|got it)$/.test(low)) return true;
+  return INFO_TERMINAL_PHRASES.some(p => low === p || low.endsWith(' ' + p) || low.endsWith(': ' + p));
+}
+function isInfoOnlyMessage(message) {
+  if (!message) return false;
+  if (message.question) return false;
+  if (looksLikeQuestion(message.text) || looksLikeQuestion(message.title)) return false;
+  return looksLikeInfoOnly(message.text) || looksLikeInfoOnly(message.title);
+}
+
+// --- exactly what Waiting on you counts and lists --------------------------------
+// Pure over the three inputs a render already has - the scanned items, the
+// captured messages, and what he has said back - so the badge and the rows can
+// never drift apart, and neither can move from opening a row or typing into it:
+// that touches none of these three arguments, so nothing here can change until a
+// poll actually changes an item, a message, or a said record. His report
+// 2026-09-24: "i had two items in waiting on you. i clicked one and was
+// answering it and saw that now there was only 1" - opening and typing are UI
+// state kept entirely outside this function on purpose, so that report can never
+// happen again by construction, not by having remembered to guard against it.
+function isItemDeferred(it, nowSecs) {
+  return Boolean(it && it.deferred_until) &&
+    /^\d{4}-\d{2}-\d{2}$/.test(it.deferred_until) &&
+    Date.parse(it.deferred_until + 'T00:00:00Z') / 1000 > nowSecs;
+}
+// A scanned captain-hold item leaves Waiting on you only by an explicit
+// Archive or Hold (AGENTS.md: "Replying or answering never archives or
+// removes anything on its own") - unlike a message, it has no other tab to
+// fall back into, so answering it, even decisively, must never make it
+// disappear outright.
+function waitingItems(items, nowSecs) {
+  return (items || []).filter(it =>
+    !isItemDeferred(it, nowSecs) && !it.archived && !it.held);
+}
+function waitingMessageRows(messages, saidRows) {
+  return (messages || [])
+    .filter(m => !m.held && messageNeedsReply(m, saidRows))
+    .map(m => Object.assign({__msg: true}, m));
+}
+function waitingCount(items, messages, saidRows, nowSecs) {
+  return waitingItems(items, nowSecs).length
+    + waitingMessageRows(messages, saidRows).length;
 }
 
 // --- may the message list claim to be complete? ---------------------------------
@@ -441,4 +537,7 @@ if (typeof module === 'object' && module.exports)
                      listSignature, mayRelease, logRead,
                      sendState, sendKeys, spokenFor, sameWords,
                      heldWith, captureBand, saidDigest, mergeMessages,
-                     wordConversationKey, orderWordsByLastReply };
+                     wordConversationKey, orderWordsByLastReply, wordOriginal,
+                     isItemDeferred, looksLikeClarifyingReply,
+                     waitingItems, waitingMessageRows, waitingCount,
+                     looksLikeInfoOnly, isInfoOnlyMessage };

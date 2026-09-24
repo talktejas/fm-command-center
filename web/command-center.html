@@ -365,6 +365,7 @@
       </div>
       <div class="tabs" role="tablist">
         <button class="tab" role="tab" data-tab="messages" aria-selected="true">Messages <span class="n" id="n-messages"></span></button>
+        <button class="tab" role="tab" data-tab="info" aria-selected="false">Info <span class="n" id="n-info"></span></button>
         <button class="tab" role="tab" data-tab="waiting" aria-selected="false">Waiting on you <span class="n" id="n-waiting"></span></button>
         <button class="tab" role="tab" data-tab="work" aria-selected="false">Work <span class="n" id="n-work"></span></button>
         <button class="tab" role="tab" data-tab="words" aria-selected="false">My words <span class="n" id="n-words"></span></button>
@@ -646,10 +647,18 @@ function visibleMessages(){
   // rule that cannot be true of them. Until the server has answered what he is
   // typing now, its last answer stays on screen under its own query.
   const archived = state.tab === 'archived';
-  if (!state.q.trim())
-    return (archived ? state.archivedMessages : state.messages).filter(m => !isMsgHeld(m));
-  const found = archived ? state.archivedFound : state.found;
-  return ((found && found.rows) || []).filter(m => !isMsgHeld(m));
+  const rows = !state.q.trim()
+    ? (archived ? state.archivedMessages : state.messages).filter(m => !isMsgHeld(m))
+    : ((archived ? state.archivedFound : state.found) || {}).rows
+      ? (archived ? state.archivedFound : state.found).rows.filter(m => !isMsgHeld(m))
+      : [];
+  // Messages splits into two (his ask 2026-09-24): Info takes the pure
+  // progress/no-change chatter, Messages keeps everything else. Archived is
+  // not split - once archived, which of the two it came from no longer
+  // matters. isInfoOnlyMessage (bin/command-center-state.js) is deliberately
+  // conservative, so a message it cannot classify stays in Messages.
+  if (archived) return rows;
+  return rows.filter(m => isInfoOnlyMessage(m) === (state.tab === 'info'));
 }
 
 let SEARCH_SEQ = 0, SEARCH_TIMER = null;
@@ -720,10 +729,12 @@ function passesState(it){
 function waitingMessages(){
   if (state.sfilter) return [];
   const q = state.q.trim().toLowerCase();
-  return (state.messages || [])
-    .filter(m => !isMsgHeld(m) && messageNeedsReply(m, state.said)
-      && (!q || haystack(m).includes(q)))
-    .map(m => Object.assign({__msg:true}, m));
+  // waitingMessageRows (bin/command-center-state.js) is pure over state.messages
+  // and state.said alone - opening a row or typing into it touches neither, so
+  // that can never shrink this list on its own (his report 2026-09-24: "i had
+  // two items in waiting on you... clicked one... now there was only 1").
+  return waitingMessageRows(state.messages, state.said)
+    .filter(m => !q || haystack(m).includes(q));
 }
 
 function visible(){
@@ -974,26 +985,37 @@ function wordOutcome(r){
 
 // One row builder for My words, shared with its Archived-tab section, so the
 // two cannot drift into two different renderings of the same conversation.
+// wordOriginal (bin/command-center-state.js) resolves what he was replying to
+// (his report 2026-09-24: "why i am just getting my replies without the
+// original message and context ... i would know what i replied to what");
+// null only for a genuine standalone note. A message far enough behind the
+// window that the pure lookup misses it is still found via findMessageById,
+// which also checks the currently opened message and any search results.
 function wordRow(r, mode){
   const draft = r.kind === 'draft';
-  const item = (state.view.items || []).find(i => itemKey(i) === (r.item_key || r.key));
-  // An unsent reply's key names a MESSAGE, which is not a scanned item, so it
-  // is resolved where messages live or the row would have no name at all.
-  const msg = state.messages.find(m => msgKey(m) === r.key);
-  const where = r.msg ? 'Reply to “' + esc(r.title || 'a message') + '”'
-    : msg ? 'Reply to “' + esc(msg.title) + '”'
-    : item ? esc(item.title)
+  const original = wordOriginal(r, state.view.items, state.messages)
+    || (r.msg && findMessageById(r.msg) ? wordOriginal(r, [], [findMessageById(r.msg)]) : null);
+  const where = original ? esc(original.title)
     : r.kind === 'note' ? 'Note to firstmate — not about one item'
     : esc(r.title || r.item || '—');
   const out = wordOutcome(r);
+  const excerpt = original && original.text
+    ? esc(original.text).slice(0, 160) + (original.text.length > 160 ? '…' : '') : '';
+  const originalHtml = original
+    ? `<div class="msg-text quiet">${excerpt || '<i>No detail recorded.</i>'}</div>
+       <span class="item-sub">${[original.project || 'Not recorded',
+           (original.worktree || '').replace(/^.*\//, '') || 'no worktree',
+           original.branch || 'no branch'].map(esc).join(' · ')}</span>`
+    : r.kind !== 'note' ? '' : '';
   return `<div class="row"><button class="word" data-key="${esc(wordConversationKey(r))}">
     <span class="word-top">
       <span class="word-when">${esc(draft ? 'unsent' : localTime(r.at))}</span>
-      <span class="word-where">${where}</span>
+      <span class="word-where">${original ? 'Reply to “' + where + '”' : where}</span>
       ${draft ? '<span class="flag f-stuck">unsent draft</span>'
               : r.kind === 'note' ? '<span class="kind k-decision">note</span>' : ''}
       ${recvDotHtml(r)}
     </span>
+    ${originalHtml}
     <span class="word-text ${draft ? 'draftbox'
       : r.kind === 'note' ? 'notebox' : ''}">${esc(r.text)}</span>
     <span class="word-out">${out}</span>
@@ -1126,12 +1148,23 @@ function renderList(){
   // just falls out of the fresh window and is kept as "not yet seen this
   // poll" - so that cache can grow past the true total and must never be
   // trusted as a floor for what the badge says.
-  $('#n-messages').textContent = state.total;
+  // Messages splits into Messages and Info (his ask 2026-09-24), so the server's
+  // whole-log total can no longer be the badge for either half - text
+  // classification only exists client-side, over whatever window is loaded.
+  // Both badges are exactly what visibleMessages() would show for that tab,
+  // the same window-based rule n-hold already uses.
+  const unheldMsgs = (state.messages || []).filter(m => !isMsgHeld(m));
+  const infoCount = unheldMsgs.filter(isInfoOnlyMessage).length;
+  $('#n-messages').textContent = unheldMsgs.length - infoCount;
+  $('#n-info').textContent = infoCount;
   $('#n-archived').textContent = state.archivedTotal
     + archivedItemsList().length + archivedWordsList().length;
   $('#n-hold').textContent = heldItemsList().length + heldWordsList().length + heldMessagesList().length;
-  $('#n-waiting').textContent = items.filter(i => !isDeferred(i) && !isItemArchived(i) && !isItemHeld(i)).length
-    + waitingMessages().length;
+  // waitingCount (bin/command-center-state.js) is pure over the scanned items,
+  // the messages and what he has said back - opening a row or typing into it
+  // touches none of those, so this cannot move on its own (see waitingMessages
+  // above).
+  $('#n-waiting').textContent = waitingCount(items, state.messages, state.said, nowSecs());
   $('#n-words').textContent = draftCount();
   // The count is what needs his attention right now: a decision waiting on
   // his call, or work already underway that a "0" badge would hide entirely -
@@ -1146,7 +1179,7 @@ function renderList(){
   $('#homes').hidden = state.tab !== 'waiting';
   renderHomes(); renderWatcher();
   if (state.tab === 'words'){ renderWords(); return; }
-  if (state.tab === 'messages'){ renderMessages(); return; }
+  if (state.tab === 'messages' || state.tab === 'info'){ renderMessages(); return; }
   if (state.tab === 'archived'){ renderArchived(); return; }
   if (state.tab === 'hold'){ renderHold(); return; }
   if (state.tab === 'work'){ renderWork(); return; }
@@ -1474,6 +1507,12 @@ function rowsHtml(rows, rowFn, emptyText, isMessage, label){
 // A field the record does not carry says so; none of the three is ever guessed.
 function messageRow(m, mode){
   const replied = repliesTo(m).length;
+  // A latest reply that only asked firstmate something back is not the
+  // decision this message is waiting on (his report 2026-09-24), so a message
+  // still tagged __msg (still listed in Waiting on you) despite a reply says
+  // what it is actually waiting on now, rather than the plain "replied" flag.
+  const latest = latestReplyTo(m);
+  const clarifying = m.__msg && latest && looksLikeClarifyingReply(latest.text);
   const where = [
     m.project || 'Not recorded',
     m.worktree ? m.worktree.replace(/^.*\//, '') : 'no worktree',
@@ -1485,6 +1524,7 @@ function messageRow(m, mode){
     <span class="item-top">
       <span class="item-title">${esc(m.title)}</span>
       ${state.failed[msgKey(m)] ? '<span class="flag f-stuck">not sent</span>'
+        : clarifying ? '<span class="flag f-sent">awaiting firstmate’s explanation</span>'
         : replied ? '<span class="flag f-sent">replied</span>' : ''}
       <span class="age" title="from the time firstmate sent it">${ageLabel(m)}</span>
       ${recvDotHtml(latestReplyTo(m))}
@@ -1579,7 +1619,10 @@ function renderMessagePane(m){
       ${cell('Branch', m.branch, 'Not recorded')}
     </div>
     ${m.context_source ? `<div class="quiet">${esc(m.context_source)}</div>` : ''}
-    <div class="body">${para(m.text) || '<p class="quiet">No text recorded.</p>'}</div>
+    <div class="msg them">
+      <div class="msg-who">Firstmate<span class="t">${esc(localTime(m.at))}</span></div>
+      <div class="msg-text">${para(m.text) || '<p class="quiet">No text recorded.</p>'}</div>
+    </div>
     ${state.saidDropped ? `<div class="archive-note" style="background:var(--warn-soft)"><b>Your
        own words are shortened here.</b> ${state.saidDropped} older entr${
        state.saidDropped === 1 ? 'y is' : 'ies are'} not shown, so a reply you
@@ -1693,7 +1736,10 @@ function renderMain(){
       ${cell('Worktree', it.worktree, 'Not started')}
       ${cell('Branch', it.branch, it.branch_state === 'detached' ? 'Detached — no branch' : 'Not started')}
     </div>
-    <div class="body">${detail || '<p class="quiet">No detail recorded.</p>'}</div>
+    <div class="msg them">
+      <div class="msg-who">Firstmate<span class="t">${esc(ageTitle(it))}</span></div>
+      <div class="msg-text">${detail || '<p class="quiet">No detail recorded.</p>'}</div>
+    </div>
     ${answeredHtml}
     ${threadHtml(it)}
     <div class="reply">
@@ -2315,7 +2361,7 @@ document.addEventListener('click', async e => {
   const tab = e.target.closest('.tab');
   if (tab){
     state.tab = tab.dataset.tab;
-    if (state.tab === 'messages' || state.tab === 'archived') {
+    if (state.tab === 'messages' || state.tab === 'info' || state.tab === 'archived') {
       searchMessages();
       if (state.tab === 'archived') await loadArchivedMessages();
     }
@@ -2479,7 +2525,7 @@ $('#statefilter').addEventListener('change', e => { state.sfilter = e.target.val
 // what the page already holds, so typing there asks the log for nothing.
 $('#q').addEventListener('input', e => {
   state.q = e.target.value;
-  if (state.tab === 'messages' || state.tab === 'archived') searchMessages();
+  if (state.tab === 'messages' || state.tab === 'info' || state.tab === 'archived') searchMessages();
   renderList();
 });
 
@@ -2559,7 +2605,7 @@ setInterval(async () => { await loadWork(); renderList(); }, 15000);
 setInterval(async () => {
   const changed = await loadMessages();
   const failed = state.found && state.found.error && state.q.trim() === state.found.q;
-  if ((changed || failed) && state.q.trim() && state.tab === 'messages')
+  if ((changed || failed) && state.q.trim() && (state.tab === 'messages' || state.tab === 'info'))
     searchMessages();
   if (changed) renderList();
 }, POLL_MS);
