@@ -26,11 +26,27 @@
   }
   button,select{font:inherit;color:inherit}
 
-  .shell{display:grid;grid-template-columns:minmax(0,392px) minmax(0,1fr);height:100vh}
+  .shell{display:grid;grid-template-columns:minmax(0,392px) 38px minmax(0,1fr);height:100vh}
   @media (max-width:900px){
     .shell{grid-template-columns:minmax(0,1fr);grid-template-rows:auto minmax(0,1fr)}
     .rail{max-height:46vh}
+    .gutter{display:none}
   }
+
+  /* ---------- fixed archive/hold gutter ---------- */
+  /* His ask 2026-09-24: Archive and Hold in a fixed spot between the list and
+     the pane, because the pane's own length varies and chasing its buttons up
+     and down cost him a scroll on every click. These act on whichever pane is
+     open (item, message or word conversation - see renderGutter/gutterAct in
+     the script) and on the whole selection when several are selected; they
+     never move, unlike the buttons inside the pane itself, which stay too. */
+  .gutter{border-right:1px solid var(--line);background:var(--panel);
+    display:flex;flex-direction:column;align-items:center;gap:8px;padding-top:14px}
+  .gutter button{width:28px;height:28px;border-radius:7px;border:1px solid var(--line);
+    background:#fff;cursor:pointer;font-size:14px;line-height:1;display:flex;
+    align-items:center;justify-content:center;color:var(--ink)}
+  .gutter button:hover:not(:disabled){background:var(--accent-soft);border-color:var(--accent)}
+  .gutter button:disabled{opacity:.35;cursor:default}
 
   /* ---------- left rail ---------- */
   .rail{border-right:1px solid var(--line);background:var(--panel);display:flex;flex-direction:column;overflow:hidden}
@@ -127,6 +143,12 @@
   .item.answered:hover{opacity:.85}
   .item.fresh{animation:arrive 1.6s ease-out}
   @keyframes arrive{0%{background:#fff6d8}70%{background:#fffcf0}100%{background:transparent}}
+  .item.selected{background:var(--accent-soft);border-left-color:var(--accent)}
+  .selbar{display:flex;align-items:center;gap:8px;padding:7px 16px;font-size:12px;
+    background:var(--warn-soft)}
+  .selbar button{font-size:12px;padding:3px 10px;border-radius:6px;border:1px solid var(--line);
+    background:#fff;cursor:pointer}
+  .selbar button:disabled{opacity:.5;cursor:default}
   .item-top{display:flex;align-items:center;gap:7px;margin-bottom:3px}
   .lamp{width:8px;height:8px;border-radius:50%;flex:none}
   .lamp.busy{background:var(--ok)}
@@ -376,6 +398,10 @@
       <button class="notebtn" id="open-note">✎&nbsp; Tell firstmate something — not an answer</button>
     </div>
   </aside>
+  <div class="gutter" id="gutter">
+    <button id="gutter-archive" title="Archive" aria-label="Archive">🗄</button>
+    <button id="gutter-hold" title="Hold" aria-label="Hold">⏸</button>
+  </div>
   <main class="main" id="main"></main>
 </div>
 
@@ -466,6 +492,13 @@ const state = {
   // (loadWork below) rather than the item scan's change-driven one.
   work:{captains_call:[],underway:[],landed:[],charted:[],omitted:[],error:null},
   workRead:false, workSending:{},
+  // The bucket order a Group by view is showing, kept across polls so a new
+  // row's time never moves the bucket he is reading - see groupBuckets below.
+  groupOrder:{mode:null, order:[]},
+  // Multi-select on the Messages list: shift-click a range, ctrl/cmd-click
+  // to add or drop one row, then one Hold or Archive for the whole selection.
+  // Not persisted - a fresh load or tab switch starts with nothing selected.
+  selected:new Set(), bulkBusy:false,
   sending:false, flash:null, error:null, seen:load('cc.seen',{}), draft:load('cc.draft',{}),
   note:load('cc.note',''), outcome:load('cc.outcome',{}), scanned:false, saidError:null,
   offline:null, unread:null, confirmed:false, readAt:null,
@@ -582,6 +615,11 @@ function setMsgHeld(m, held){
 // below work over both lists unchanged.
 // shapeMessage and the ordering rule come from bin/command-center-state.js.
 const msgKey = m => 'msg/' + m.id;
+// visible() (below) mixes scanned items with __msg-tagged messages that need
+// a reply; wherever their keys are walked together (advance-to-next after an
+// archive/hold) each row must be keyed the way it actually opens by, or a
+// message next to the archived row gets a bogus itemKey() that opens nothing.
+const rowKey = it => it.__msg ? msgKey(it) : itemKey(it);
 const repliesTo = m => state.said.filter(r => r.msg === m.id);
 const projectOf = it => it.project || 'Not recorded';
 const homeOf = id => state.view.homes.find(h => h.id === id) || {id, name:id};
@@ -672,12 +710,29 @@ function passesState(it){
   }
 }
 
+// A captain hold from firstmate's backlog is not the only thing waiting on
+// him: a captured message that was recorded as a question, or that plainly
+// asks him to decide something, is too, until he replies to it (his report
+// 2026-09-24: "I see many messages in the Messages group that need my input
+// but are not in the Waiting on You group"). The state filter (stuck/sent/
+// dead/deferred) names facts only a scanned item has, same as visibleMessages
+// above, so a message only joins the default view, never a narrowed one.
+function waitingMessages(){
+  if (state.sfilter) return [];
+  const q = state.q.trim().toLowerCase();
+  return (state.messages || [])
+    .filter(m => !isMsgHeld(m) && messageNeedsReply(m, state.said)
+      && (!q || haystack(m).includes(q)))
+    .map(m => Object.assign({__msg:true}, m));
+}
+
 function visible(){
   const q = state.q.trim().toLowerCase();
-  return (state.view.items || []).filter(it =>
+  const items = (state.view.items || []).filter(it =>
     !isItemArchived(it) && !isItemHeld(it) &&
     (!state.homes.size || state.homes.has(it.home)) &&
     passesState(it) && (!q || haystack(it).includes(q)));
+  return items.concat(waitingMessages());
 }
 const archivedItemsList = () => (state.view.items || []).filter(isItemArchived);
 const archivedWordsList = () => state.said.filter(isWordArchived);
@@ -696,14 +751,19 @@ const FLAT = new Set(['none','latest','oldest']);
 // A message is not work: a field its record does not carry was never recorded,
 // which is what the message pane says too. Only an ITEM can be unstarted.
 function groupOf(it, isMessage){
+  // A mixed list (Waiting on you now carries both scanned items and captured
+  // messages needing a reply - see visible() below) tags each message row
+  // with __msg itself, since one list-wide isMessage flag cannot say which
+  // row is which.
+  const msgish = isMessage || Boolean(it.__msg);
   const p = projectOf(it);
   if (state.group === 'project') return { key:p, g1:p, g2:undefined };
   if (state.group === 'worktree')
     return { key:p+'\u0000'+(it.worktree||''), g1:p, g2:it.worktree, none:!it.worktree,
-             noneLabel: isMessage ? 'Not recorded' : 'Not started — no working copy yet' };
+             noneLabel: msgish ? 'Not recorded' : 'Not started — no working copy yet' };
   return { key:p+'\u0000'+(it.branch||it.branch_state), g1:p, g2:it.branch,
            none:!it.branch,
-           noneLabel: isMessage ? 'Not recorded'
+           noneLabel: msgish ? 'Not recorded'
              : it.branch_state === 'detached'
                ? 'Detached scratch copy — no branch'
                : 'Not started — no branch yet' };
@@ -721,17 +781,30 @@ const ordered = (rows, newestDefault) =>
 // (his report 2026-09-22: "the whole project went away and the next project
 // came up"). With no grouping active (Latest/Oldest/Nothing) the two orders
 // are the same thing.
+// The bucket order for a Group by view, stable across polls (stableGroupOrder
+// in bin/command-center-state.js): built once from the chosen key and then
+// only ever added to at the end, never re-sorted by whatever a poll's time
+// order says today. Rows within a bucket keep the time order `rows` already
+// arrived in.
+function groupBuckets(rows, isMessage){
+  const map = new Map();
+  for (const it of rows){
+    const g = groupOf(it, isMessage);
+    if (!map.has(g.key)) map.set(g.key, {g, items:[]});
+    map.get(g.key).items.push(it);
+  }
+  if (state.groupOrder.mode !== state.group) state.groupOrder = {mode:state.group, order:[]};
+  state.groupOrder.order = stableGroupOrder(state.groupOrder.order, [...map.keys()],
+    k => map.get(k).g);
+  return state.groupOrder.order.map(k => map.get(k));
+}
+
 function displayOrder(rows, newestDefault, isMessage, keyFn){
   const sorted = ordered(rows, newestDefault);
   if (FLAT.has(state.group)) return sorted.map(keyFn);
-  const buckets = new Map();
-  for (const it of sorted){
-    const g = groupOf(it, isMessage);
-    if (!buckets.has(g.key)) buckets.set(g.key, []);
-    buckets.get(g.key).push(it);
-  }
   const out = [];
-  for (const bucket of buckets.values()) for (const it of bucket) out.push(keyFn(it));
+  for (const {items} of groupBuckets(sorted, isMessage))
+    for (const it of items) out.push(keyFn(it));
   return out;
 }
 
@@ -979,11 +1052,11 @@ function renderWords(){
        not shown. All of them are still in
        <span class="mono">data/command-center/said.jsonl</span>.</div>` : '';
   if (!rows.length){
-    $('#list').innerHTML = head + note + `<div class="empty">${
-      state.saidError ? 'The record could not be read.' : 'Nothing yet.'}</div>`;
+    paintList(head + note + `<div class="empty">${
+      state.saidError ? 'The record could not be read.' : 'Nothing yet.'}</div>`);
     return;
   }
-  $('#list').innerHTML = head + note + rows.map(r => wordRow(r, 'list')).join('');
+  paintList(head + note + rows.map(r => wordRow(r, 'list')).join(''));
 }
 
 // Nothing in either list is drawn from a draft except the unsent-draft row on
@@ -1002,7 +1075,50 @@ function draftTyped(){
   if (state.tab === 'words') renderWords();
 }
 
+// #list is its own scroll container (.list{overflow-y:auto}), so assigning
+// its innerHTML on every 3-second poll drops his scroll offset to the top -
+// the page moving under him even once the bucket order above is stable. Kept
+// only across a repaint of the SAME view: a real tab/group/filter change is
+// meant to land at the top, a poll repaint of what he is already looking at
+// is not.
+let listPainted = null;
+function paintList(html){
+  const pane = $('#list');
+  const sig = [state.tab, state.group, state.sfilter, state.q].join('\u0000');
+  const same = sig === listPainted;
+  const where = pane.scrollTop;
+  pane.innerHTML = html;
+  listPainted = sig;
+  pane.scrollTop = same ? where : 0;
+}
+
+// The gutter is two fixed buttons, never re-created, so their disabled state
+// is the only thing a render needs to keep current - enabled whenever there
+// is something to act on (an open pane, or a selection even with no pane
+// open, e.g. after Ctrl-clicking a row without opening it).
+function renderGutter(){
+  const has = state.selected.size > 0 || !!state.open;
+  $('#gutter-archive').disabled = !has;
+  $('#gutter-hold').disabled = !has;
+}
+
+// Forwards to whichever Archive/Hold button the open pane already has - one
+// copy of the action, not a second one living in the gutter - or to the bulk
+// actions when a multi-select is active. See CSS .gutter for why this exists.
+function gutterArchive(){
+  if (state.selected.size){ bulkArchiveSelected(); return; }
+  const btn = $('#main [data-archive-item], #main [data-archive-msg], #main [data-archive-word]');
+  if (btn) btn.click();
+}
+function gutterHold(){
+  if (state.selected.size){ bulkHoldSelected(); return; }
+  const btn = $('#main [data-hold-item], #main [data-unhold-item], ' +
+    '#main [data-hold-msg], #main [data-unhold-msg], #main [data-hold-word], #main [data-unhold-word]');
+  if (btn) btn.click();
+}
+
 function renderList(){
+  renderGutter();
   const items = state.view.items || [];
   // The server's own count of the current log, not the client's accumulated
   // cache: a message archived through any other route (another tab,
@@ -1014,7 +1130,8 @@ function renderList(){
   $('#n-archived').textContent = state.archivedTotal
     + archivedItemsList().length + archivedWordsList().length;
   $('#n-hold').textContent = heldItemsList().length + heldWordsList().length + heldMessagesList().length;
-  $('#n-waiting').textContent = items.filter(i => !isDeferred(i) && !isItemArchived(i) && !isItemHeld(i)).length;
+  $('#n-waiting').textContent = items.filter(i => !isDeferred(i) && !isItemArchived(i) && !isItemHeld(i)).length
+    + waitingMessages().length;
   $('#n-words').textContent = draftCount();
   // The count is what needs his attention right now: a decision waiting on
   // his call, or work already underway that a "0" badge would hide entirely -
@@ -1038,7 +1155,7 @@ function renderList(){
   const empty = state.q || state.sfilter ? 'Nothing matches.'
     : !state.scanned ? 'The records have not been read yet.'
     : 'Nothing is waiting on you.<br>Firstmate is getting on with it.';
-  $('#list').innerHTML = rowsHtml(rows, it => itemRow(it, 'list'), empty);
+  paintList(rowsHtml(rows, it => it.__msg ? messageRow(it, 'list') : itemRow(it, 'list'), empty));
 }
 
 // The Archived tab is every kind of row he can archive, together: messages
@@ -1067,10 +1184,10 @@ function renderHold(){
     ['Waiting-on-you items', items, it => itemRow(it, 'held')],
     ['My words', words, r => wordRow(r, 'held')],
   ].filter(([, rows]) => rows.length);
-  $('#list').innerHTML = sections.length
+  paintList(sections.length
     ? sections.map(([title, rows, fn]) => `<div class="worksection"><h3>${esc(title)}
         <span class="n">${rows.length}</span></h3>${rows.map(fn).join('')}</div>`).join('')
-    : `<div class="empty">Nothing on hold.</div>`;
+    : `<div class="empty">Nothing on hold.</div>`);
 }
 
 // Messages are the default list and the reason this page exists: everything
@@ -1118,8 +1235,68 @@ function renderMessages(archived){
         narrow the search to reach older ones.</div>` : '')
     : (more ? `<button class="older" id="older">Showing
         ${held.length} of ${Math.max(total, held.length)} — load older messages</button>` : '');
-  $('#list').innerHTML = note
-    + rowsHtml(rows, m => messageRow(m, archived ? 'archived' : 'list'), empty, true, asked ? answered : '') + older;
+  paintList(selectionBarHtml() + note
+    + rowsHtml(rows, m => messageRow(m, archived ? 'archived' : 'list'), empty, true, asked ? answered : '') + older);
+}
+
+// --- multi-select on the Messages list ---------------------------------------
+// His ask 2026-09-24: shift-select a range of messages, ctrl/cmd-click to add
+// or drop one, then one Hold (or Archive) for the whole selection in a single
+// pass, rather than opening and holding each message one at a time.
+function selectionBarHtml(){
+  const n = state.selected.size;
+  if (!n) return '';
+  return `<div class="selbar"><span>${n} selected</span>
+    <button id="bulk-hold" ${state.bulkBusy ? 'disabled' : ''}>Hold</button>
+    <button id="bulk-archive" ${state.bulkBusy ? 'disabled' : ''}>Archive</button>
+    <button id="bulk-clear" ${state.bulkBusy ? 'disabled' : ''}>Clear</button></div>`;
+}
+
+// The anchor is which row a plain or ctrl/cmd click last landed on - not
+// persisted, and not part of `state`, since it means nothing once the page
+// reloads or the selection is cleared by a plain click elsewhere.
+let selectAnchor = null;
+function toggleMessageSelection(key, e){
+  if (e.shiftKey && selectAnchor){
+    const domKeys = [...$('#list').querySelectorAll('[data-key^="msg/"]')].map(el => el.dataset.key);
+    const i = domKeys.indexOf(selectAnchor), j = domKeys.indexOf(key);
+    if (i >= 0 && j >= 0){
+      const [lo, hi] = i < j ? [i, j] : [j, i];
+      if (!(e.ctrlKey || e.metaKey)) state.selected.clear();
+      for (let k = lo; k <= hi; k++) state.selected.add(domKeys[k]);
+      renderList();
+      return;
+    }
+  }
+  if (state.selected.has(key)) state.selected.delete(key); else state.selected.add(key);
+  selectAnchor = key;
+  renderList();
+}
+
+async function bulkArchiveSelected(){
+  const ms = [...state.selected].filter(k => k.startsWith('msg/'))
+    .map(k => findMessageById(k.slice(4))).filter(m => m && !m.archived);
+  if (!ms.length){ state.selected.clear(); renderList(); return; }
+  state.bulkBusy = true; renderList();
+  await Promise.all(ms.map(async m => {
+    try {
+      const {ok, data} = await post('/api/archive', {msg:m.id, archived:true});
+      if (ok && data.ok) moveArchived(m, true);
+    } catch (e) { /* next poll reconciles */ }
+  }));
+  state.selected.clear();
+  state.bulkBusy = false;
+  render();
+}
+
+function bulkHoldSelected(){
+  for (const key of state.selected){
+    if (!key.startsWith('msg/')) continue;
+    const m = findMessageById(key.slice(4));
+    if (m && !m.held) setMsgHeld(m, true);
+  }
+  state.selected.clear();
+  renderList();
 }
 
 // --- Work: the /bearings lavish board's four sections, in the rail itself ---
@@ -1191,7 +1368,7 @@ function renderWork(){
   html += workSectionHtml('Underway', w.underway || [], workUnderwayRow, 'Nothing is underway.');
   html += workSectionHtml('Recently landed', w.landed || [], workLandedRow, 'Nothing landed recently.');
   html += workSectionHtml('Charted next', w.charted || [], workChartedRow, 'Nothing is charted next.');
-  $('#list').innerHTML = html;
+  paintList(html);
 }
 
 async function loadWork(){
@@ -1280,14 +1457,8 @@ function rowsHtml(rows, rowFn, emptyText, isMessage, label){
          recorded time and cannot be ordered — they follow at the end.</div>` : '';
     return head + note + rows.map(rowFn).join('');
   }
-  const buckets = new Map();
-  for (const it of rows){
-    const g = groupOf(it, isMessage);
-    if (!buckets.has(g.key)) buckets.set(g.key, {g, items:[]});
-    buckets.get(g.key).items.push(it);
-  }
   let html = head;
-  for (const {g, items:bucket} of buckets.values()){
+  for (const {g, items:bucket} of groupBuckets(rows, isMessage)){
     const sub = g.g2 === undefined ? ''
       : g.none ? `<div class="g2 none">${esc(g.noneLabel)}</div>`
                : `<div class="g2">${esc(g.g2)}</div>`;
@@ -1308,7 +1479,8 @@ function messageRow(m, mode){
     m.worktree ? m.worktree.replace(/^.*\//, '') : 'no worktree',
     m.branch || 'no branch',
   ];
-  return `<div class="row"><button class="item ${state.seen[msgKey(m)] ? 'answered' : ''}"
+  return `<div class="row"><button class="item ${state.seen[msgKey(m)] ? 'answered' : ''}${
+      state.selected.has(msgKey(m)) ? ' selected' : ''}"
       data-key="${esc(msgKey(m))}" aria-current="${state.open === msgKey(m)}">
     <span class="item-top">
       <span class="item-title">${esc(m.title)}</span>
@@ -2177,7 +2349,7 @@ document.addEventListener('click', async e => {
     const it = (state.view.items || []).find(i => itemKey(i) === key);
     if (it){
       const wasArchiving = !isItemArchived(it);
-      const keys = displayOrder(visible(), false, false, itemKey);
+      const keys = displayOrder(visible(), false, false, rowKey);
       setItemArchived(it, wasArchiving);
       if (wasArchiving && state.open === key) advanceTo(keys, key);
     }
@@ -2213,7 +2385,7 @@ document.addEventListener('click', async e => {
     const it = (state.view.items || []).find(i => itemKey(i) === key);
     if (it){
       const toHold = !isItemHeld(it);
-      const keys = displayOrder(visible(), false, false, itemKey);
+      const keys = displayOrder(visible(), false, false, rowKey);
       setItemHeld(it, toHold);
       if (toHold && state.open === key) advanceTo(keys, key);
     }
@@ -2248,8 +2420,24 @@ document.addEventListener('click', async e => {
     renderList();
     return;
   }
+  if (e.target.id === 'gutter-archive'){ gutterArchive(); return; }
+  if (e.target.id === 'gutter-hold'){ gutterHold(); return; }
+  if (e.target.id === 'bulk-hold'){ bulkHoldSelected(); return; }
+  if (e.target.id === 'bulk-archive'){ await bulkArchiveSelected(); return; }
+  if (e.target.id === 'bulk-clear'){ state.selected.clear(); renderList(); return; }
   const row = e.target.closest('.item, .word');
-  if (row){ if (row.dataset.key) open(row.dataset.key); return; }
+  if (row){
+    const key = row.dataset.key;
+    if (key && key.startsWith('msg/') && (e.shiftKey || e.ctrlKey || e.metaKey)){
+      toggleMessageSelection(key, e);
+      return;
+    }
+    if (key){
+      if (state.selected.size){ state.selected.clear(); }
+      open(key);
+    }
+    return;
+  }
   if (e.target.id === 'send'){ await sendAnswer(); return; }
   if (e.target.id === 'sendreply'){ await sendReply(); return; }
   if (e.target.id === 'archive'){
