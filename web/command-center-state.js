@@ -122,6 +122,27 @@ function orderRows(rows, group, newestDefault) {
   return dated.concat(undated);
 }
 
+// --- stable group order across polls --------------------------------------------
+// A grouped view's buckets used to be built in the order their first row was
+// reached in the time-sorted list above, so a new message landing on a row
+// gave that row a new time and could move its bucket to the top of a poll
+// repaint out from under him (his report 2026-09-24: "the project I'm working
+// on goes down"). While a Group by is active the bucket order follows the
+// chosen key instead - project name, then worktree/branch - and stays put:
+// a bucket already on screen keeps its place, a brand-new one is appended at
+// the end, never sorted in above the one he is reading.
+function stableGroupOrder(prevOrder, keys, infoOf) {
+  const present = new Set(keys);
+  const known = (prevOrder || []).filter(k => present.has(k));
+  const knownSet = new Set(known);
+  const fresh = keys.filter(k => !knownSet.has(k)).sort((a, b) => {
+    const ga = infoOf(a), gb = infoOf(b);
+    const c = String(ga.g1 || '').localeCompare(String(gb.g1 || ''));
+    return c !== 0 ? c : String(ga.g2 || '').localeCompare(String(gb.g2 || ''));
+  });
+  return known.concat(fresh);
+}
+
 // --- My words, grouped by conversation -------------------------------------------
 // His ruling 2026-09-21: "sort things according to my last reply" - My words
 // groups by conversation (the same key its row already opens by: a message it
@@ -309,6 +330,35 @@ function replyTarget(message, items) {
   return item ? { kind: 'answer', item } : { kind: 'note', settled: true };
 }
 
+// --- does a captured message need him to decide something? ----------------------
+// A message the recorder marked as a QUESTION always does (message.question,
+// set by fm-captain-message-sweep.py, read by replyTarget above). His report
+// 2026-09-24: "I see many messages in the Messages group that need my input
+// but are not in the Waiting on You group" - a message can plainly ask him to
+// decide/approve/choose without ever being recorded as one. Rather than
+// guessing at intent, this looks for a literal question or the same handful
+// of phrases firstmate itself uses to hand him a decision.
+const DECISION_PHRASES = ['reply 1 or 2', 'say the word', 'your call', 'waiting on your'];
+function looksLikeQuestion(text) {
+  const t = String(text || '').trim();
+  if (!t) return false;
+  if (t.endsWith('?')) return true;
+  const low = t.toLowerCase();
+  return DECISION_PHRASES.some(p => low.includes(p)) || /\bmerge\b[^.!]*\?/i.test(t);
+}
+
+// Waiting on you only while unanswered: once something in the said log
+// answers this message (repliesTo in bin/command-center.html: r.msg ===
+// message.id) it leaves Waiting on you but stays in Messages, same as an
+// answered captain hold leaves the waiting queue but stays in the backlog.
+function messageNeedsReply(message, saidRows) {
+  if (!message) return false;
+  const flagged = Boolean(message.question) || looksLikeQuestion(message.text)
+    || looksLikeQuestion(message.title);
+  if (!flagged) return false;
+  return !(saidRows || []).some(r => r.msg === message.id);
+}
+
 // --- may the message list claim to be complete? ---------------------------------
 // The messages are captured from the conversation record by
 // bin/fm-captain-message-sweep.py, which writes a health record every run; the
@@ -386,6 +436,7 @@ function itemKey(it) {
 if (typeof module === 'object' && module.exports)
   module.exports = { pollFacts, tense, transportFailure, verdictFor,
                      releaseVerdicts, itemKey, shapeMessage, orderRows,
+                     stableGroupOrder, looksLikeQuestion, messageNeedsReply,
                      replyTarget, foldSaid, wordsAfter,
                      listSignature, mayRelease, logRead,
                      sendState, sendKeys, spokenFor, sameWords,

@@ -7,7 +7,8 @@ const assert = require('assert');
 const path = require('path');
 const {
   pollFacts, tense, transportFailure, verdictFor, releaseVerdicts, itemKey,
-  shapeMessage, orderRows, replyTarget, foldSaid, wordsAfter,
+  shapeMessage, orderRows, stableGroupOrder, looksLikeQuestion, messageNeedsReply,
+  replyTarget, foldSaid, wordsAfter,
   listSignature, mayRelease, logRead, sendState, sendKeys, spokenFor, sameWords,
   heldWith, captureBand, saidDigest, mergeMessages,
   wordConversationKey, orderWordsByLastReply,
@@ -206,6 +207,44 @@ test('a row with no usable time is never given a position among the dated', () =
   assert.strictEqual(ids(orderRows(rows, 'oldest', true)), 'm1,m2,mx');
 });
 
+// His report 2026-09-24: a Group by list re-sorted itself under him while he
+// was reading, so the project he was in dropped down the page and another
+// took its place. That happened because the old bucket order was built fresh
+// from a time-sorted list every poll; stableGroupOrder instead follows the
+// chosen key once (project name, then worktree/branch) and only ever adds a
+// brand-new key at the end.
+const info = { alpha:{g1:'alpha'}, bravo:{g1:'bravo'}, charlie:{g1:'charlie'} };
+const infoOf = k => info[k];
+
+test('a fresh Group by view orders its buckets by key, not by time', () => {
+  assert.deepStrictEqual(
+    stableGroupOrder([], ['charlie', 'alpha', 'bravo'], infoOf),
+    ['alpha', 'bravo', 'charlie']);
+});
+
+test('a new message landing on an existing bucket does not move it', () => {
+  // bravo was open and reading; alpha then gets a new, newer message, which
+  // the old code let jump alpha's bucket above bravo's.
+  const established = stableGroupOrder([], ['alpha', 'bravo', 'charlie'], infoOf);
+  const afterPoll = stableGroupOrder(established, ['alpha', 'bravo', 'charlie'], infoOf);
+  assert.deepStrictEqual(afterPoll, established,
+    'the group order changed on a poll that added no new group');
+});
+
+test('a brand-new bucket is appended, never inserted above the one he is in', () => {
+  const established = stableGroupOrder([], ['bravo', 'charlie'], infoOf);
+  // "alpha" would sort first alphabetically, but it is new this poll and must
+  // land at the end, not above bravo.
+  const afterPoll = stableGroupOrder(established, ['bravo', 'charlie', 'alpha'], infoOf);
+  assert.deepStrictEqual(afterPoll, ['bravo', 'charlie', 'alpha']);
+});
+
+test('a bucket that has emptied out drops from the order without disturbing the rest', () => {
+  const established = stableGroupOrder([], ['alpha', 'bravo', 'charlie'], infoOf);
+  const afterPoll = stableGroupOrder(established, ['alpha', 'charlie'], infoOf);
+  assert.deepStrictEqual(afterPoll, ['alpha', 'charlie']);
+});
+
 // A reply's verdict is not an item's to release: the message log is append-only,
 // so a scan of the work records is no evidence that his reply did not land.
 test('a scan never re-offers a reply whose delivery was unconfirmed', () => {
@@ -245,6 +284,37 @@ test('a question is never answered against another home', () => {
   assert.strictEqual(
     replyTarget({ question: true, task: 't1' },
                 [Object.assign({}, hold, { home: 'mate' })]).kind, 'note');
+});
+
+// --- does a captured message need him to decide something? ----------------------
+// His report 2026-09-24: "I see many messages in the Messages group that need
+// my input but are not in the Waiting on You group." A message counts as
+// waiting when it was recorded as a question, or when its own words plainly
+// ask him to decide, and stops counting once he has replied to it.
+test('a literal question is recognised even when it was not flagged as one', () => {
+  assert.strictEqual(looksLikeQuestion('Should I merge this now?'), true);
+  assert.strictEqual(looksLikeQuestion('Here is the status update.'), false);
+  assert.strictEqual(looksLikeQuestion(''), false);
+});
+
+test('the same handful of phrases firstmate uses to hand him a decision are recognised', () => {
+  assert.strictEqual(looksLikeQuestion('Reply 1 or 2 to pick a direction'), true);
+  assert.strictEqual(looksLikeQuestion('Say the word and I will ship it'), true);
+  assert.strictEqual(looksLikeQuestion('Your call on which branch to keep'), true);
+  assert.strictEqual(looksLikeQuestion('Waiting on your go-ahead'), true);
+});
+
+test('a message needs a reply when recorded as a question or plainly asking one, until he replies', () => {
+  const flagged = { id: 'm1', question: true, text: 'status update, nothing to decide' };
+  const worded = { id: 'm2', question: false, text: 'Can I merge this branch?' };
+  const plain = { id: 'm3', question: false, text: 'Deployed to staging.' };
+  assert.strictEqual(messageNeedsReply(flagged, []), true);
+  assert.strictEqual(messageNeedsReply(worded, []), true);
+  assert.strictEqual(messageNeedsReply(plain, []), false);
+  assert.strictEqual(messageNeedsReply(flagged, [{ msg: 'm1' }]), false,
+    'a message he already replied to is no longer waiting on him');
+  assert.strictEqual(messageNeedsReply(worded, [{ msg: 'm9' }]), true,
+    'a reply to a different message must not settle this one');
 });
 
 // --- two rows, one send --------------------------------------------------------
