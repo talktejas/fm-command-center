@@ -253,7 +253,8 @@
     display:flex;align-items:center;gap:7px}
   .msg-who .t{margin-left:auto;font-weight:500;color:var(--faint);font-variant-numeric:tabular-nums}
   .msg-text{font-size:14px;white-space:pre-wrap;word-break:break-word}
-  .msg-text a{color:var(--accent);word-break:break-all}
+  .msg-text a,.word-text a{color:var(--accent);word-break:break-all}
+  .word-text{word-break:break-word}
 
   .track{display:flex;flex-wrap:wrap;gap:6px;margin-top:10px;padding-top:9px;
     border-top:1px solid rgba(0,0,0,.07)}
@@ -495,6 +496,33 @@ const SEND_VERDICT = {
 const $ = s => document.querySelector(s);
 const esc = s => String(s == null ? '' : s)
   .replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+
+// His report: "none of the link is fucking clickable" - every URL in his or
+// firstmate's own words must be a real, clickable link, everywhere he reads
+// one. This runs on ALREADY-ESCAPED text (esc()'s own output), so it only
+// ever turns a literal http(s):// run esc() left untouched into an anchor -
+// it never reinterprets anything typed as markup. A sentence character stuck
+// right against the end of a URL (a period, a closing bracket, ...) almost
+// never belongs to it, so it is peeled back off the link.
+const LINK_RE = /(https?:\/\/[^\s<>"]+)/g;
+function linkify(escapedText){
+  return String(escapedText || '').replace(LINK_RE, url => {
+    let trail = '';
+    while (url && /[.,!?;:)\]}]/.test(url[url.length - 1])) {
+      trail = url[url.length - 1] + trail;
+      url = url.slice(0, -1);
+    }
+    return url ? `<a href="${url}" target="_blank" rel="noopener">${url}</a>${trail}` : trail;
+  });
+}
+// Every place on this page that shows firstmate's or his own free text goes
+// through one of these two, so a clickable link is never a call site an
+// editor can forget to add: a plain line (escape, then link) or a
+// multi-paragraph body (blank-line-separated, single newlines kept as <br>,
+// each paragraph escaped and linked the same way).
+const linked = t => linkify(esc(t));
+const para = t => linked(t).split(/\n{2,}/)
+  .map(x => `<p>${x.replace(/\n/g, '<br>')}</p>`).join('');
 
 const state = {
   tab:'messages', group:'project', sfilter:'', q:'', homes:new Set(),
@@ -1025,7 +1053,7 @@ function wordRow(r, mode){
     : esc(r.title || r.item || '—');
   const out = wordOutcome(r);
   const excerpt = original && original.text
-    ? esc(original.text).slice(0, 160) + (original.text.length > 160 ? '…' : '') : '';
+    ? linked(original.text.slice(0, 160)) + (original.text.length > 160 ? '…' : '') : '';
   const originalHtml = original
     ? `<div class="msg-text quiet">${excerpt || '<i>No detail recorded.</i>'}</div>
        <span class="item-sub">${[original.project || 'Not recorded',
@@ -1042,7 +1070,7 @@ function wordRow(r, mode){
     </span>
     ${originalHtml}
     <span class="word-text ${draft ? 'draftbox'
-      : r.kind === 'note' ? 'notebox' : ''}">${esc(r.text)}</span>
+      : r.kind === 'note' ? 'notebox' : ''}">${linked(r.text)}</span>
     <span class="word-out">${out}</span>
   </button></div>`;
 }
@@ -1055,7 +1083,7 @@ function renderWordPane(key, rows){
   const r0 = rows[0];
   const thread = rows.slice().reverse().map(r => `<div class="msg you">
       <div class="msg-who">You<span class="t">${esc(localTime(r.at))}</span>${recvDotHtml(r)}</div>
-      <div class="msg-text">${esc(r.text)}</div>
+      <div class="msg-text">${linked(r.text)}</div>
       ${messageImagesHtml(r.images)}
       <div class="proof">${wordOutcome(r)}</div>
     </div>`).join('');
@@ -1588,7 +1616,7 @@ function threadHtml(it){
     const mins = Math.round(waited / 60);
     return `<div class="msg you">
         <div class="msg-who">You<span class="t">${esc(localTime(m.at))}</span></div>
-        <div class="msg-text">${esc(m.text)}</div>${trackHtml(m)}
+        <div class="msg-text">${linked(m.text)}</div>${trackHtml(m)}
       </div>` + (stuck ? `<div class="stuck-bar">
         <b>This has not been picked up for ${mins} minutes.</b>
         <div class="sub">Firstmate rings an unread message every ${GRACE_SECS} seconds and
@@ -1626,11 +1654,9 @@ function renderMessagePane(m){
   const replies = repliesTo(m).slice().reverse();   // the log is newest first
   const cell = (label, value, na) =>
     `<div><dt>${label}</dt><dd class="${value ? '' : 'na'}">${esc(value || na)}</dd></div>`;
-  const para = t => esc(t || '').split(/\n{2,}/)
-    .map(x => `<p>${x.replace(/\n/g, '<br>')}</p>`).join('');
   const thread = replies.map(r => `<div class="msg you">
       <div class="msg-who">You<span class="t">${esc(localTime(r.at))}</span>${recvDotHtml(r)}</div>
-      <div class="msg-text">${esc(r.text)}</div>
+      <div class="msg-text">${linked(r.text)}</div>
       ${messageImagesHtml(r.images)}
       <div class="proof">${wordOutcome(r)}</div>
     </div>`).join('');
@@ -1721,8 +1747,7 @@ function renderMain(){
     return;
   }
   const L = LISTEN[it.listen] || LISTEN.unknown;
-  const detail = esc(it.detail || '').split(/\n{2,}/)
-    .map(p => `<p>${p.replace(/\n/g, '<br>')}</p>`).join('');
+  const detail = para(it.detail);
   const draft = state.draft[itemKey(it)] || '';
   const going = isSending(itemKey(it));
   const verdict = SEND_VERDICT[(state.outcome[itemKey(it)] || {}).outcome];
@@ -1740,7 +1765,7 @@ function renderMain(){
   const answeredHtml = answered.length ? `<div class="thread"><h3>What you answered</h3>${
     answered.map(r => `<div class="msg you">
         <div class="msg-who">You<span class="t">${esc(localTime(r.at))}</span>${recvDotHtml(r)}</div>
-        <div class="msg-text">${esc(r.text)}</div>
+        <div class="msg-text">${linked(r.text)}</div>
         ${messageImagesHtml(r.images)}
         <div class="proof">${wordOutcome(r)}</div>
       </div>`).join('')

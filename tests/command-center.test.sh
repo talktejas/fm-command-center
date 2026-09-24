@@ -1155,6 +1155,79 @@ test_the_server_serves_the_pages_decision_rules() {
   pass "the server serves decision rules the page can actually use"
 }
 
+# The captain: "none of the link is fucking clickable" - the link rendering
+# was lost entirely when this page was extracted into its own repo (nothing
+# in the served page turned a URL into an anchor at all). This runs the
+# ACTUAL served page's own linkify/linked/para functions (extracted from the
+# live HTTP response, the same way the test above runs its served decision
+# rules), then checks every surface that shows free text - Messages, Waiting
+# on you (question text), My words (its list-row excerpt and its own reply
+# box), Info/Archived/On hold (the same message pane and list row every other
+# tab already shares), and a threaded firstmate answer - actually calls
+# linked() or para() on its text, not a bare esc(), by finding each call site
+# in the served bytes.
+test_a_url_becomes_a_real_link_on_every_surface_that_shows_free_text() {
+  local home port body helpers out
+  home="$TMP_ROOT/linkify"
+  seed_home "$home"
+  start_server "$home" || fail "the server did not start"
+  port=$SERVER_PORT
+  body=$(curl -s -m 30 "http://127.0.0.1:$port/")
+  stop_server
+  assert_contains "$body" "<title>Firstmate Command Center</title>" \
+    "the page was not served"
+
+  # The helper block itself: esc -> linkify -> linked/para, with no DOM
+  # dependency, so it can be executed exactly as served.
+  printf '%s\n' "$body" \
+    | sed -n '/^const esc = s =>/,/^const state = {/p' | sed '$d' \
+    > "$TMP_ROOT/linkify-helpers.js"
+  assert_contains "$(cat "$TMP_ROOT/linkify-helpers.js")" "function linkify(" \
+    "the served page carries no linkify function at all"
+  printf '%s\n' 'module.exports = { esc, linkify, linked, para };' \
+    >> "$TMP_ROOT/linkify-helpers.js"
+  out=$(node -e '
+    const h = require(process.argv[1]);
+    const plain = h.linked("Check https://example.com/pr/9 now.");
+    const trimmed = h.linked("See (https://example.com/a).");
+    const multi = h.para("First line https://example.com/x.\n\nSecond paragraph.");
+    process.stdout.write(JSON.stringify({
+      hasAnchor: plain.indexOf(
+        "<a href=\"https://example.com/pr/9\" target=\"_blank\" rel=\"noopener\">") !== -1,
+      hrefHasNoTrailingParen: trimmed.indexOf("href=\"https://example.com/a\"") !== -1
+        && trimmed.indexOf("</a>).") !== -1,
+      paragraphsAndLink: multi.indexOf("<p>") !== -1 && multi.indexOf("<a href") !== -1
+        && multi.indexOf("Second paragraph") !== -1,
+      plainTextUntouched: h.linked("no url here").indexOf("<a ") === -1,
+    }));
+  ' "$TMP_ROOT/linkify-helpers.js") || fail "the served page's own linkify/linked/para could not be executed"
+  assert_contains "$out" '"hasAnchor":true' \
+    "linked() did not turn a plain URL into a real <a target=_blank> link"
+  assert_contains "$out" '"hrefHasNoTrailingParen":true' \
+    "a trailing sentence character was swallowed into the href"
+  assert_contains "$out" '"paragraphsAndLink":true' \
+    "para() (multi-paragraph bodies - Messages and Waiting-on-you question text) does not link URLs"
+  assert_contains "$out" '"plainTextUntouched":true' \
+    "text with no URL was altered"
+
+  # Each surface's own render call site - a regression that quietly reverts
+  # one back to a bare esc() must fail here even though the helper above still
+  # works everywhere else.
+  assert_contains "$body" 'linked(r.text)}</span>' \
+    "My words' own reply/note box does not link URLs"
+  assert_contains "$body" 'linked(original.text.slice(0, 160))' \
+    "My words' list-row excerpt (markup already allowed there) does not link URLs"
+  assert_contains "$body" "para(m.text) || '<p class=\"quiet\">No text recorded.</p>'" \
+    "a message's own pane (Messages/Info/Archived/On hold all open through it) does not link URLs"
+  assert_contains "$body" 'const detail = para(it.detail)' \
+    "a Waiting-on-you item's own question text does not link URLs"
+  assert_contains "$body" 'linked(m.text)}</div>${trackHtml(m)}' \
+    "what you sent to a worker does not link URLs"
+  assert_equals "4" "$(grep -o 'linked(r.text)' <<<"$body" | wc -l)" \
+    "his own reply/note box, his reply thread, a plain note's thread, and a Waiting-on-you item's answered thread must each link URLs"
+  pass "a URL becomes a real link on every surface that shows free text"
+}
+
 # The page's decision rules live in web/command-center-state.js because they are
 # what got the rules wrong twice; these execute that file itself.
 test_the_pages_decision_rules_hold() {
@@ -3144,6 +3217,7 @@ test_send_note_survives_multibyte_reply_text
 test_concurrent_polls_produce_one_scan
 test_the_pages_decision_rules_hold
 test_the_server_serves_the_pages_decision_rules
+test_a_url_becomes_a_real_link_on_every_surface_that_shows_free_text
 test_a_message_names_the_project_the_worktree_and_the_branch
 test_a_taskless_message_is_matched_to_the_one_task_it_names
 test_a_message_naming_two_tasks_is_left_blank_rather_than_guessed
