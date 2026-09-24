@@ -457,6 +457,18 @@ post() {  # <port> <path> <json>
     "http://127.0.0.1:$1$2"
 }
 
+# Raw bytes, not JSON - what a paste/drop/attach actually sends. Sets
+# UPLOAD_CODE in the CALLER's shell, the same way start_server sets
+# SERVER_PORT - must not be used inside a command substitution or the
+# assignment is lost to the subshell. The response body lands in
+# $TMP_ROOT/upload-body.json; read it with upload_image_body.
+upload_image() {  # <port> <file> <content-type>
+  UPLOAD_CODE=$(curl -s -o "$TMP_ROOT/upload-body.json" -w '%{http_code}' \
+    -X POST -H "Content-Type: $3" --data-binary "@$2" \
+    "http://127.0.0.1:$1/api/upload")
+}
+upload_image_body() { cat "$TMP_ROOT/upload-body.json"; }
+
 # The click does not wait on a shell command: the server records his words and
 # answers at once, then writes the outcome as an amendment naming that sid.
 # The page folds the pair and shows the outcome in place, and so do these tests.
@@ -2940,6 +2952,162 @@ test_the_stop_hook_captures_in_a_primary_and_stays_inert_elsewhere() {
   pass "the Stop hook captures in a primary checkout and stays inert everywhere else"
 }
 
+# --- pasted/dropped reply images ---------------------------------------------
+# Ctrl-V into a reply box (docs/command-center.md's paste-images feature):
+# an uploaded image is saved under the command center's own data, served back
+# by id, and its saved path is what reaches firstmate - never the bytes
+# themselves and never a browser-only copy.
+test_a_pasted_image_round_trips_into_the_delivered_note() {
+  local home port png body id sid resolved marker
+  home="$TMP_ROOT/image-note"
+  seed_home "$home"
+  start_server "$home" || fail "the server did not start"
+  port=$SERVER_PORT
+
+  png="$TMP_ROOT/one.png"
+  printf '\x89PNG\r\n\x1a\nfaketestbytes' > "$png"
+  upload_image "$port" "$png" "image/png"
+  [ "$UPLOAD_CODE" = "200" ] || fail "a plain PNG upload was answered $UPLOAD_CODE, not 200"
+  body=$(upload_image_body)
+  assert_contains "$body" '"ok":true' "a plain PNG upload was refused"
+  id=$(jq -r .id <<<"$body")
+  [ -n "$id" ] && [ "$id" != "null" ] || fail "the upload did not return an image id"
+  case "$id" in *.png) ;; *) fail "the returned id did not carry the png extension" ;; esac
+
+  assert_equals "$(cat "$png")" "$(curl -s "http://127.0.0.1:$port/image/$id")" \
+    "the image was not served back byte-for-byte at /image/<id>"
+
+  result=$(post "$port" /api/note "$(jq -cn --arg t "Look at this." --arg i "$id" '{text:$t,images:[$i]}')")
+  assert_contains "$result" '"ok":true' "a note with an attached image was not accepted"
+  sid=$(jq -r .sid <<<"$result")
+  resolved=$(wait_outcome "$home" "$sid") || fail "the note's delivery never resolved"
+  assert_contains "$resolved" '"outcome":"sent"' "the note with an image was not delivered"
+
+  marker="[image: $home/data/command-center/images/$id]"
+  wait_for "the delivered note never named the saved image's path" \
+    bash -c "grep -qF '$marker' '$home'/state/inbox/*.note 2>/dev/null"
+
+  assert_equals "$id" "$(curl -s -m 30 "http://127.0.0.1:$port/api/said" \
+      | jq -r '[.said[] | select(.kind=="note")][0].images[0]')" \
+    "the said.jsonl record did not keep the image id alongside his words"
+  stop_server
+  pass "a pasted image uploads, is attached to a note, and its saved path reaches firstmate's inbox note"
+}
+
+# Several images per reply (the spec's own words), all landing on the one note.
+test_several_images_attach_to_one_answer() {
+  local home port png1 png2 id1 id2 result marker1 marker2
+  home="$TMP_ROOT/image-multi"
+  seed_home "$home"
+  FM_HOME="$home" FM_ROOT_OVERRIDE="$FIRSTMATE_ROOT" \
+    "$TASKS_AXI" add cc-imgs "Ship the icon set" --kind ship --repo demo \
+    >/dev/null 2>"$TMP_ROOT/axi.err" \
+    || fail "the fixture task could not be added: $(cat "$TMP_ROOT/axi.err")"
+  FM_HOME="$home" FM_ROOT_OVERRIDE="$FIRSTMATE_ROOT" \
+    "$CAPTAIN_HOLD" hold cc-imgs --reason "Which icon?" \
+    >/dev/null 2>"$TMP_ROOT/axi.err" \
+    || fail "the fixture task could not be held: $(cat "$TMP_ROOT/axi.err")"
+
+  start_server "$home" || fail "the server did not start"
+  port=$SERVER_PORT
+  curl -s -m 120 -o /dev/null "http://127.0.0.1:$port/api/items"
+
+  printf 'one' > "$TMP_ROOT/a.png"
+  printf 'two' > "$TMP_ROOT/b.jpg"
+  upload_image "$port" "$TMP_ROOT/a.png" "image/png"
+  id1=$(jq -r .id <<<"$(upload_image_body)")
+  upload_image "$port" "$TMP_ROOT/b.jpg" "image/jpeg"
+  id2=$(jq -r .id <<<"$(upload_image_body)")
+  [ -n "$id1" ] && [ -n "$id2" ] && [ "$id1" != "$id2" ] \
+    || fail "two uploads did not return two distinct ids"
+
+  result=$(post "$port" /api/answer \
+    "$(jq -cn --arg i1 "$id1" --arg i2 "$id2" \
+      '{home:"main",id:"cc-imgs",source:"hold",key:"cc-imgs",text:"The round one.",images:[$i1,$i2]}')")
+  assert_contains "$result" '"ok":true' "an answer with two images was not accepted"
+  wait_outcome "$home" "$(jq -r .sid <<<"$result")" >/dev/null \
+    || fail "the two-image answer's delivery never resolved"
+
+  marker1="[image: $home/data/command-center/images/$id1]"
+  marker2="[image: $home/data/command-center/images/$id2]"
+  wait_for "the first of two images never reached the inbox note" \
+    bash -c "grep -qF '$marker1' '$home'/state/inbox/*.note 2>/dev/null"
+  assert_grep "$marker2" "$home"/state/inbox/*.note \
+    "the second of two images never reached the same inbox note"
+
+  assert_equals 2 "$(curl -s -m 30 "http://127.0.0.1:$port/api/said" \
+      | jq -r '[.said[] | select(.item=="cc-imgs")][0].images | length')" \
+    "the record did not keep both attached image ids"
+  stop_server
+  pass "several images attach to one answer and every one of them reaches the delivered note"
+}
+
+# Survives a refresh and a restart (the spec's own words): the saved bytes and
+# the record naming them are both server-side, never browser storage.
+test_uploaded_images_survive_a_restart() {
+  local home port id body
+  home="$TMP_ROOT/image-restart"
+  seed_home "$home"
+  start_server "$home" || fail "the server did not start"
+  port=$SERVER_PORT
+
+  printf 'restart-bytes' > "$TMP_ROOT/restart.png"
+  upload_image "$port" "$TMP_ROOT/restart.png" "image/png"
+  id=$(jq -r .id <<<"$(upload_image_body)")
+  [ -n "$id" ] && [ "$id" != "null" ] || fail "the upload did not return an image id"
+
+  body=$(post "$port" /api/note "$(jq -cn --arg i "$id" '{text:"kept across a restart",images:[$i]}')")
+  wait_outcome "$home" "$(jq -r .sid <<<"$body")" >/dev/null \
+    || fail "the note's delivery never resolved before the restart"
+  stop_server
+
+  [ -f "$home/data/command-center/images/$id" ] \
+    || fail "the saved image did not survive on disk at all"
+
+  start_server "$home" || fail "the server did not come back up after a restart"
+  port=$SERVER_PORT
+  assert_equals "restart-bytes" "$(curl -s "http://127.0.0.1:$port/image/$id")" \
+    "the image was not served the same after a restart"
+  assert_equals "$id" "$(curl -s -m 30 "http://127.0.0.1:$port/api/said" \
+      | jq -r '[.said[] | select(.kind=="note")][0].images[0]')" \
+    "the note's attached image id did not survive a restart of the server"
+  stop_server
+  pass "a saved image and the record naming it both survive a server restart"
+}
+
+# Common types only, a sensible size cap, a clear message when exceeded - the
+# spec's own words - and nothing refused is ever written to disk.
+test_an_oversize_or_wrong_type_image_is_refused_and_nothing_is_saved() {
+  local home port body
+  home="$TMP_ROOT/image-oversize"
+  seed_home "$home"
+  start_server "$home" || fail "the server did not start"
+  port=$SERVER_PORT
+
+  head -c 9000000 /dev/zero > "$TMP_ROOT/big.png"   # over the 8 MB per-image cap
+  upload_image "$port" "$TMP_ROOT/big.png" "image/png"
+  [ "$UPLOAD_CODE" = "413" ] || fail "an oversize image was answered $UPLOAD_CODE, not 413"
+  body=$(upload_image_body)
+  assert_contains "$body" '"ok":false' "an oversize image was accepted"
+  assert_contains "$body" 'too big' "an oversize image was refused without a clear reason"
+
+  printf 'hello' > "$TMP_ROOT/not-an-image.txt"
+  upload_image "$port" "$TMP_ROOT/not-an-image.txt" "text/plain"
+  [ "$UPLOAD_CODE" = "400" ] || fail "a non-image upload was answered $UPLOAD_CODE, not 400"
+  body=$(upload_image_body)
+  assert_contains "$body" '"ok":false' "a non-image upload was accepted"
+
+  [ -z "$(ls "$home/data/command-center/images" 2>/dev/null)" ] \
+    || fail "a refused upload was still written under the command center's data directory"
+
+  # A send naming an image id that was never uploaded is refused the same way
+  # a forged item id already is - it is never silently dropped from his words.
+  body=$(post "$port" /api/note '{"text":"x","images":["deadbeefdeadbeefdeadbeefdeadbeef.png"]}')
+  assert_contains "$body" '"ok":false' "a note naming an image that was never uploaded was accepted"
+  stop_server
+  pass "an oversize or wrong-type image is refused with a clear message and nothing reaches disk"
+}
+
 trap stop_server EXIT
 
 test_only_live_captain_holds_are_carded
@@ -3027,3 +3195,7 @@ test_a_home_with_no_conversation_record_reports_capture_inactive
 test_the_server_captures_the_conversation_with_no_agent_involved
 test_a_delivery_orphaned_by_a_restart_reads_back_as_unknown
 test_the_stop_hook_captures_in_a_primary_and_stays_inert_elsewhere
+test_a_pasted_image_round_trips_into_the_delivered_note
+test_several_images_attach_to_one_answer
+test_uploaded_images_survive_a_restart
+test_an_oversize_or_wrong_type_image_is_refused_and_nothing_is_saved

@@ -118,6 +118,14 @@ Replying never removes a captain-hold or open-status item from **Waiting on you*
 
 A note that answers nothing (typed with no item open) goes through `bin/fm-inbox.sh note` alone, the same as it always has.
 
+## Pasted/dropped images
+
+Ctrl-V into any reply box (Messages, Waiting on you, My words' note box), dropping a file onto one, or the small 📎 Attach button beside it, all attach an image the same way — several per reply. Common types only (PNG, JPEG, GIF, WEBP) and a per-image size cap (8 MB, `MAX_IMAGE_BYTES` in `command-center.py`), refused up front with a plain message when exceeded; nothing over the cap is ever written to disk.
+
+Each image is uploaded as soon as it is attached, raw bytes over `POST /api/upload` (Content-Type is its mime type, not JSON — the page already has the bytes from a paste, drop or file picker), saved under `<home>/data/command-center/images/<uuid>.<ext>` and served back by id at `GET /image/<id>` — never browser storage, so a thumbnail survives a refresh and a restart the same way `said.jsonl` already does. A send names the ids it attached (`images: [...]` on `/api/note`, `/api/reply`, `/api/answer`); the server checks every id against a file that is actually on disk before it sends anything.
+
+The delivered note carries your words, then one `[image: <abs path>]` line per attached image, so firstmate reads them straight off disk — the image is never inlined or described, only pointed to. `said.jsonl`'s own `text` field stays exactly what you typed; `images` is recorded alongside it so My words and the threaded conversation under a message or an item can show the same thumbnails, opening full size on click.
+
 ## Archive and Hold
 
 Every row you can act on — a Messages row, a Waiting-on-you item, a My words conversation — carries its own **Archive** and **Hold** buttons, one click moves it with no confirmation: Archive to the Archived tab, Hold to the On hold tab (**Back to list** there returns it). Hold is only ever your own parking — nothing it touches is ever sent to firstmate.

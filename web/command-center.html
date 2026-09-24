@@ -309,6 +309,21 @@
   .dead-warn{background:var(--hot-soft);border:1px solid var(--hot-line);border-radius:7px;
     padding:10px 12px;font-size:12.5px;color:#8f1f18;margin-bottom:11px}
 
+  .attach-strip{display:flex;flex-wrap:wrap;gap:8px;margin-top:9px}
+  .attach-thumb{position:relative;width:56px;height:56px;border-radius:6px;overflow:hidden;
+    border:1px solid var(--line);background:#eef1f4}
+  .attach-thumb img{width:100%;height:100%;object-fit:cover;display:block}
+  .attach-thumb .rm{position:absolute;top:0;right:0;background:rgba(20,26,34,.65);color:#fff;
+    border:0;width:17px;height:17px;line-height:17px;font-size:12px;cursor:pointer;padding:0}
+  .attach-btn{background:transparent;border:1px solid var(--line);border-radius:7px;
+    padding:8px 13px;font-size:13px;color:var(--dim);cursor:pointer}
+  .attach-btn:hover{border-color:#c8cfd9;color:var(--ink)}
+  .attach-err{font-size:12px;color:var(--hot);margin-top:6px}
+  .msg-images{display:flex;flex-wrap:wrap;gap:8px;margin-top:8px}
+  .msg-images a{display:block;width:72px;height:72px;border-radius:6px;overflow:hidden;
+    border:1px solid var(--line)}
+  .msg-images img{width:100%;height:100%;object-fit:cover;display:block}
+
   /* ---------- toast ---------- */
   .toast{position:fixed;left:50%;bottom:26px;transform:translateX(-50%);
     background:var(--ink);color:#fff;border-radius:9px;padding:11px 17px;font-size:13.5px;
@@ -413,6 +428,12 @@
     <p>Not answering anything — a thought, an instruction, a correction. It is queued for
        firstmate's next turn.</p>
     <textarea id="note-text" placeholder="Stop everything on JewelTrek until I have looked at 183."></textarea>
+    <div class="reply-foot">
+      <button type="button" class="attach-btn" data-attach-btn>📎 Attach image</button>
+      <input type="file" accept="image/png,image/jpeg,image/gif,image/webp" multiple
+        data-attach-input style="display:none">
+    </div>
+    <div data-attach-strip="note"></div>
     <div class="dlg-foot">
       <button class="defer" value="cancel">Cancel</button>
       <button class="send" value="send">Queue it</button>
@@ -501,6 +522,10 @@ const state = {
   // Not persisted - a fresh load or tab switch starts with nothing selected.
   selected:new Set(), bulkBusy:false,
   sending:false, flash:null, error:null, seen:load('cc.seen',{}), draft:load('cc.draft',{}),
+  // Pasted/dropped images attached to a reply, by the same conversation key
+  // as draft: {id, name} per image, uploaded as soon as they're attached so
+  // a send just names ids. Cleared for a key once that reply is accepted.
+  images:load('cc.images',{}), imageErr:{},
   note:load('cc.note',''), outcome:load('cc.outcome',{}), scanned:false, saidError:null,
   offline:null, unread:null, confirmed:false, readAt:null,
   // A message's own explicit Archive/Restore, kept until the opposite click:
@@ -1031,6 +1056,7 @@ function renderWordPane(key, rows){
   const thread = rows.slice().reverse().map(r => `<div class="msg you">
       <div class="msg-who">You<span class="t">${esc(localTime(r.at))}</span>${recvDotHtml(r)}</div>
       <div class="msg-text">${esc(r.text)}</div>
+      ${messageImagesHtml(r.images)}
       <div class="proof">${wordOutcome(r)}</div>
     </div>`).join('');
   paintMain(key, `<div class="main-inner">
@@ -1605,6 +1631,7 @@ function renderMessagePane(m){
   const thread = replies.map(r => `<div class="msg you">
       <div class="msg-who">You<span class="t">${esc(localTime(r.at))}</span>${recvDotHtml(r)}</div>
       <div class="msg-text">${esc(r.text)}</div>
+      ${messageImagesHtml(r.images)}
       <div class="proof">${wordOutcome(r)}</div>
     </div>`).join('');
   paintMain(key, `<div class="main-inner">
@@ -1631,6 +1658,7 @@ function renderMessagePane(m){
     <div class="reply">
       <label for="reply">Your reply — in your own words</label>
       <textarea id="reply" placeholder="Type here…">${esc(draft)}</textarea>
+      ${attachHtml(key)}
       <div class="reply-foot">
         <button class="send" id="sendreply" ${
           draft.trim() && !state.sending && !verdict && !sending ? '' : 'disabled'}>${
@@ -1663,6 +1691,7 @@ function renderMessagePane(m){
     $('#sendreply').disabled = !ta.value.trim() || state.sending || !!verdict || sending;
     draftTyped();
   });
+  wireAttach($('.reply'), key);
 }
 
 function renderMain(){
@@ -1712,6 +1741,7 @@ function renderMain(){
     answered.map(r => `<div class="msg you">
         <div class="msg-who">You<span class="t">${esc(localTime(r.at))}</span>${recvDotHtml(r)}</div>
         <div class="msg-text">${esc(r.text)}</div>
+        ${messageImagesHtml(r.images)}
         <div class="proof">${wordOutcome(r)}</div>
       </div>`).join('')
   }</div>` : '';
@@ -1746,6 +1776,7 @@ function renderMain(){
       ${deadWarn}
       <label for="reply">Your answer — in your own words</label>
       <textarea id="reply" placeholder="Type here…">${esc(draft)}</textarea>
+      ${attachHtml(itemKey(it))}
       <div class="reply-foot">
         <button class="send" id="send" ${
           draft.trim() && !state.sending && !verdict && !going ? '' : 'disabled'}>${
@@ -1780,6 +1811,7 @@ function renderMain(){
     $('#send').disabled = !ta.value.trim() || state.sending || !!verdict || going;
     draftTyped();
   });
+  wireAttach($('.reply'), itemKey(it));
 }
 
 // ONE OWNER OF THE PANE'S HTML. Whatever rebuilds it, his place survives: the
@@ -2244,6 +2276,125 @@ async function post(url, body){
   return { ok: res.ok, data: await res.json().catch(() => ({})) };
 }
 
+// --- pasted/dropped reply images ---------------------------------------------
+// Mirrors the server's own list/cap (command-center.py IMAGE_MIME_EXT/
+// MAX_IMAGE_BYTES/MAX_IMAGES) so a bad file is refused before it is even
+// uploaded; the server enforces the same limits regardless, this is just
+// so he isn't left waiting on a request that was always going to fail.
+const IMAGE_TYPES = ['image/png', 'image/jpeg', 'image/gif', 'image/webp'];
+const MAX_IMAGE_BYTES = 8 * 1024 * 1024;
+const MAX_IMAGES = 6;
+
+function imageStripHtml(key){
+  const items = state.images[key] || [];
+  const err = state.imageErr[key];
+  if (!items.length && !err) return '';
+  const thumbs = items.map(im => `<div class="attach-thumb">
+      <img src="/image/${esc(im.id)}" alt="">
+      <button type="button" class="rm" data-rm-image="${esc(im.id)}" data-image-key="${esc(key)}"
+        aria-label="Remove image">✕</button>
+    </div>`).join('');
+  return `<div class="attach-strip">${thumbs}</div>${
+    err ? `<div class="attach-err">${esc(err)}</div>` : ''}`;
+}
+
+function messageImagesHtml(images){
+  if (!images || !images.length) return '';
+  return `<div class="msg-images">${images.map(id =>
+    `<a href="/image/${esc(id)}" target="_blank" rel="noopener"><img src="/image/${esc(id)}" alt=""></a>`
+  ).join('')}</div>`;
+}
+
+async function uploadImage(key, file){
+  if (!IMAGE_TYPES.includes(file.type)){
+    state.imageErr[key] = 'Only PNG, JPEG, GIF or WEBP images are accepted.';
+    renderAttachStrip(key);
+    return;
+  }
+  if (file.size > MAX_IMAGE_BYTES){
+    state.imageErr[key] = `Too big: the limit is ${MAX_IMAGE_BYTES / (1<<20)} MB per image.`;
+    renderAttachStrip(key);
+    return;
+  }
+  if ((state.images[key] || []).length >= MAX_IMAGES){
+    state.imageErr[key] = `Up to ${MAX_IMAGES} images per reply.`;
+    renderAttachStrip(key);
+    return;
+  }
+  delete state.imageErr[key];
+  let res;
+  try {
+    res = await fetch('/api/upload', {
+      method: 'POST', headers: {'Content-Type': file.type}, body: file });
+  } catch (err) {
+    state.imageErr[key] = 'The image could not be uploaded — try again.';
+    renderAttachStrip(key);
+    return;
+  }
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok || !data.ok){
+    state.imageErr[key] = data.error || 'The image could not be uploaded.';
+    renderAttachStrip(key);
+    return;
+  }
+  state.images[key] = (state.images[key] || []).concat([{id: data.id, name: file.name || ''}]);
+  save('cc.images', state.images);
+  renderAttachStrip(key);
+}
+
+async function attachFiles(key, files){
+  for (const file of Array.from(files || [])) await uploadImage(key, file);
+}
+
+// A repaint over the poll cadence would drop focus/caret the same way a
+// draft keystroke would; the strip is a small DOM patch instead, keyed by
+// whichever box owns it (id="attach-strip-<key-slot>").
+function renderAttachStrip(key){
+  const slot = document.querySelector(`[data-attach-strip="${cssEsc(key)}"]`);
+  if (slot) slot.outerHTML = `<div data-attach-strip="${esc(key)}">${imageStripHtml(key)}</div>`;
+}
+function cssEsc(s){ return String(s).replace(/["\\]/g, '\\$&'); }
+
+function wireAttach(container, key){
+  const input = container.querySelector('[data-attach-input]');
+  const btn = container.querySelector('[data-attach-btn]');
+  const box = container.querySelector('textarea');
+  if (btn && input) btn.addEventListener('click', () => input.click());
+  if (input) input.addEventListener('change', async () => {
+    await attachFiles(key, input.files);
+    input.value = '';
+  });
+  if (box) box.addEventListener('paste', async e => {
+    const files = Array.from(e.clipboardData?.items || [])
+      .filter(i => i.kind === 'file' && i.type.startsWith('image/'))
+      .map(i => i.getAsFile()).filter(Boolean);
+    if (files.length) await attachFiles(key, files);
+  });
+  container.addEventListener('dragover', e => { e.preventDefault(); });
+  container.addEventListener('drop', async e => {
+    e.preventDefault();
+    const files = Array.from(e.dataTransfer?.files || []).filter(f => f.type.startsWith('image/'));
+    if (files.length) await attachFiles(key, files);
+  });
+  container.addEventListener('click', e => {
+    const rm = e.target.closest('[data-rm-image]');
+    if (!rm) return;
+    const id = rm.dataset.rmImage;
+    state.images[key] = (state.images[key] || []).filter(im => im.id !== id);
+    save('cc.images', state.images);
+    renderAttachStrip(key);
+  });
+}
+
+function attachHtml(key){
+  return `<div class="reply-foot">
+      <button type="button" class="attach-btn" data-attach-btn>📎 Attach image</button>
+      <input type="file" accept="image/png,image/jpeg,image/gif,image/webp" multiple
+        data-attach-input style="display:none">
+    </div>
+    <div data-attach-strip="${esc(key)}">${imageStripHtml(key)}</div>`;
+}
+
 // The click never waits on a shell command. The server writes his words to the
 // durable record and answers 202 before it runs anything, so this returns as
 // soon as they are safe, he moves straight to the next item, and the outcome
@@ -2253,11 +2404,12 @@ async function sendAnswer(){
   if (!it) return;
   const text = (state.draft[itemKey(it)] || '').trim();
   if (!text || state.sending || isSending(itemKey(it))) return;
+  const images = (state.images[itemKey(it)] || []).map(im => im.id);
   state.sending = true; renderMain();
   let ok = false, data = {};
   try {
     ({ ok, data } = await post('/api/answer',
-      { home: it.home, id: it.id, source: it.source, key: it.key || '', text }));
+      { home: it.home, id: it.id, source: it.source, key: it.key || '', text, images }));
   } catch (err) {
     // The request never came back, so it is not known whether the server took
     // his words. On the SEND route the steer may already sit on the worker's
@@ -2291,7 +2443,8 @@ async function sendAnswer(){
   // second click there would really send a second answer.
   state.pending[data.sid] = {key: itemKey(it), text, at: Date.now()};
   delete state.failed[itemKey(it)];
-  save('cc.pending', state.pending); save('cc.failed', state.failed);
+  delete state.images[itemKey(it)];
+  save('cc.pending', state.pending); save('cc.failed', state.failed); save('cc.images', state.images);
   await loadSaid();
   const next = ordered(visible()).find(r => itemKey(r) !== itemKey(it));
   state.open = next ? itemKey(next) : null;
@@ -2304,10 +2457,11 @@ async function sendReply(){
   const key = msgKey(m);
   const text = (state.draft[key] || '').trim();
   if (!text || state.sending || isSending(key)) return;
+  const images = (state.images[key] || []).map(im => im.id);
   state.sending = true; renderMain();
   let ok = false, data = {};
   try {
-    ({ ok, data } = await post('/api/reply', { msg: m.id, text }));
+    ({ ok, data } = await post('/api/reply', { msg: m.id, text, images }));
   } catch (err) {
     // The request never came back. A reply now only ever reaches firstmate's
     // captain inbox, so the worst case is a second note, never a second steer
@@ -2322,10 +2476,11 @@ async function sendReply(){
     state.pending[data.sid] = {key, item: data.item_key || null, text,
                                at: Date.now()};
     delete state.failed[key];
+    delete state.images[key];
     // A reply never archives anything on its own any more - only his own
     // explicit Archive click does that. Sometimes a reply is just a comment
     // he wants to keep checking on.
-    save('cc.pending', state.pending); save('cc.failed', state.failed);
+    save('cc.pending', state.pending); save('cc.failed', state.failed); save('cc.images', state.images);
     await loadSaid();
     render();
     const sent = $('#sendnote');
@@ -2545,14 +2700,17 @@ $('#note-text').value = state.note;
 $('#note-text').addEventListener('input', e => {
   state.note = e.target.value; save('cc.note', state.note);
 });
+wireAttach($('#note-dlg'), 'note');
+renderAttachStrip('note');
 
 $('#note-dlg').addEventListener('close', async function(){
   const text = $('#note-text').value.trim();
   if (this.returnValue !== 'send' || !text) return;
   const btn = $('#open-note');
+  const images = (state.images.note || []).map(im => im.id);
   let ok = false, data = {};
   try {
-    ({ ok, data } = await post('/api/note', { text }));
+    ({ ok, data } = await post('/api/note', { text, images }));
   } catch (err) {
     // As on the answer path: the request never came back, so the server may
     // have started the note and been restarted before it could answer. A second
@@ -2568,7 +2726,9 @@ $('#note-dlg').addEventListener('close', async function(){
   if (ok && data.ok){
     state.pending[data.sid] = {key: 'note', text, at: Date.now()};
     delete state.failed.note;
-    save('cc.pending', state.pending); save('cc.failed', state.failed);
+    delete state.images.note;
+    save('cc.pending', state.pending); save('cc.failed', state.failed); save('cc.images', state.images);
+    renderAttachStrip('note');
     btn.textContent = '✎  Written down — going out now';
   } else {
     btn.textContent = data.outcome === 'unknown'
