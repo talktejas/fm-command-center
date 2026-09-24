@@ -11,7 +11,8 @@ const {
   replyTarget, foldSaid, wordsAfter,
   listSignature, mayRelease, logRead, sendState, sendKeys, spokenFor, sameWords,
   heldWith, captureBand, saidDigest, mergeMessages,
-  wordConversationKey, orderWordsByLastReply,
+  wordConversationKey, orderWordsByLastReply, waitingCount, wordOriginal,
+  isInfoOnlyMessage,
 } = require(path.join(__dirname, '..', 'web', 'command-center-state.js'));
 
 // Quiet on success: tests/command-center.test.sh runs this and reports the
@@ -315,6 +316,92 @@ test('a message needs a reply when recorded as a question or plainly asking one,
     'a message he already replied to is no longer waiting on him');
   assert.strictEqual(messageNeedsReply(worded, [{ msg: 'm9' }]), true,
     'a reply to a different message must not settle this one');
+});
+
+// His report 2026-09-24: "an item must never leave Waiting on you because his
+// reply was a QUESTION. Only a reply that decides ... removes it." saidRows is
+// newest first, so the first row naming a message is his latest reply to it.
+test('a reply that only asks firstmate something back never settles a waiting message', () => {
+  const flagged = { id: 'm1', question: true, text: 'Merge feature/x into develop?' };
+  assert.strictEqual(messageNeedsReply(flagged, [{ msg: 'm1', text: 'What do you mean by merge here?' }]),
+    true, 'a clarifying reply must not clear Waiting on you');
+  assert.strictEqual(messageNeedsReply(flagged, [{ msg: 'm1', text: 'Why?' }]),
+    true, 'a bare question mark reply must not clear Waiting on you either');
+  assert.strictEqual(messageNeedsReply(flagged, [{ msg: 'm1', text: 'Yes, merge it.' }]),
+    false, 'a decisive reply clears Waiting on you as before');
+  // Newest first: his second, decisive reply supersedes his first, clarifying one.
+  assert.strictEqual(messageNeedsReply(flagged, [
+    { msg: 'm1', text: 'Yes, merge it.' },
+    { msg: 'm1', text: 'Which branch do you mean?' },
+  ]), false, 'the latest reply is what decides, not an earlier clarifying one');
+});
+
+// A scanned captain-hold item has no other tab to fall back into the way a
+// message falls back to Messages, so unlike messageNeedsReply, answering it -
+// even decisively - must never remove it: only Archive or Hold does
+// (AGENTS.md). waitingCount must also never move from opening a row or typing
+// into it, since it is pure over items/messages/said alone.
+test('opening a row or typing into it cannot move the Waiting on you count', () => {
+  const items = [
+    { home: 'main', source: 'hold', id: 'a', key: '', archived: false, held: false, deferred_until: null },
+    { home: 'main', source: 'hold', id: 'b', key: '', archived: false, held: false, deferred_until: null },
+  ];
+  const messages = [];
+  const said = [];
+  const now = 1_800_000_000;
+  const first = waitingCount(items, messages, said, now);
+  const second = waitingCount(items, messages, said, now);   // simulates a second, unrelated poll
+  assert.strictEqual(first, 2);
+  assert.strictEqual(second, 2, 'polling again with nothing changed must not move the count');
+  // An item stays counted even once he has answered it - only Archive/Hold removes it.
+  const said2 = [{ item_key: itemKey(items[0]), text: 'Green. Blue reads as disabled.' }];
+  assert.strictEqual(waitingCount(items, messages, said2, now), 2,
+    'answering an item must not drop it from Waiting on you; only Archive/Hold does');
+  // Archiving is the only thing that removes it.
+  const archived = [Object.assign({}, items[0], { archived: true }), items[1]];
+  assert.strictEqual(waitingCount(archived, messages, said, now), 1);
+});
+
+// His report 2026-09-24 (screenshot of My words): "why i am just getting my
+// replies without the original message and context ... i would know what i
+// replied to what." Every reply resolves to what it answered - an item, a
+// message - or null for a genuine standalone note.
+test('a My words row resolves what it was replying to, or null for a plain note', () => {
+  const items = [{ home: 'main', source: 'hold', id: 'a', key: '', title: 'Blue or green?',
+    detail: 'The colour call.', project: 'demo', worktree: '/wt/demo', branch: 'main' }];
+  const messages = [{ id: 'm1', title: 'Merge diamond?', text: 'Reply "merge diamond branch"',
+    project: 'jt2627s', worktree: '/wt/jt', branch: 'feature/diamond' }];
+  const itemReply = { item_key: itemKey(items[0]), key: itemKey(items[0]), text: 'Green.' };
+  assert.deepStrictEqual(wordOriginal(itemReply, items, messages),
+    { key: itemKey(items[0]), title: 'Blue or green?', text: 'The colour call.',
+      project: 'demo', worktree: '/wt/demo', branch: 'main' });
+  const msgReply = { msg: 'm1', key: 'msg/m1', text: 'merge diamond branch' };
+  assert.deepStrictEqual(wordOriginal(msgReply, items, messages),
+    { key: 'msg/m1', title: 'Merge diamond?', text: 'Reply "merge diamond branch"',
+      project: 'jt2627s', worktree: '/wt/jt', branch: 'feature/diamond' });
+  const note = { kind: 'note', key: 'note', text: 'Just checking in.' };
+  assert.strictEqual(wordOriginal(note, items, messages), null,
+    'a standalone note names nothing to reply to');
+});
+
+// His ask 2026-09-24: "add one more info tab so from messages split into two
+// all the messages like nothing new, we are progressing etc. etc." - pure
+// progress/no-change chatter is Info; anything reporting a real outcome, a
+// landed change, a decision or a problem stays in Messages. Kept conservative:
+// a message that plainly asks him something is never info-only.
+test('pure status chatter is info-only; anything with a decision or an outcome is not', () => {
+  assert.strictEqual(isInfoOnlyMessage({ text: 'Nothing new for the captain.' }), true);
+  assert.strictEqual(isInfoOnlyMessage({ text: "That's metals 08, paused for Codex quota. Nothing new for the captain." }), true);
+  assert.strictEqual(isInfoOnlyMessage({ text: 'Still running.' }), true);
+  assert.strictEqual(isInfoOnlyMessage({ text: 'Ack.' }), true);
+  assert.strictEqual(isInfoOnlyMessage({ text: 'The metal chain is finished and verified end to end. Ready for your merge.' }), false,
+    'a landed outcome must stay in Messages even without a question in it');
+  assert.strictEqual(isInfoOnlyMessage({ text: 'Reply 1 or 2. Nothing merges until you decide.' }), false,
+    'a decision ask must never be swallowed by Info, whatever else it says');
+  assert.strictEqual(isInfoOnlyMessage({ question: true, text: 'Nothing new for the captain.' }), false,
+    'a message the recorder marked as a question is never info-only');
+  assert.strictEqual(isInfoOnlyMessage({ text: 'The build failed on the integration branch.' }), false,
+    'an unrecognised message defaults to Messages, never to Info');
 });
 
 // --- two rows, one send --------------------------------------------------------
