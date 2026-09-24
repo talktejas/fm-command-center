@@ -115,6 +115,36 @@ SCAN_TIMEOUT = 240
 SEND_TIMEOUT = 120
 SCAN_WAIT = 30
 
+# Pasted/dropped images on a reply. Common types only, a sensible per-image
+# cap, and a hard count so one reply cannot carry an unbounded attachment.
+IMAGE_MIME_EXT = {
+    "image/png": "png", "image/jpeg": "jpg", "image/gif": "gif", "image/webp": "webp",
+}
+MAX_IMAGE_BYTES = 8 * 1024 * 1024
+MAX_IMAGES = 6
+IMAGE_ID_RE = re.compile(r"^[a-f0-9]{32}\.(png|jpg|gif|webp)$")
+IMAGE_CTYPE = {"png": "image/png", "jpg": "image/jpeg", "gif": "image/gif", "webp": "image/webp"}
+
+
+def images_dir(home):
+    """Where pasted/dropped reply images are saved - the command center's own
+    data, never browser storage, so a thumbnail survives a refresh and a
+    restart the same way said.jsonl already does. See images_field/deliver
+    below for how a saved file's path reaches firstmate."""
+    return os.path.join(home, "data", "command-center", "images")
+
+
+def append_image_markers(text, home, images):
+    """The text firstmate actually receives: his words, then one
+    "[image: <abs path>]" line per attached image, so firstmate can read them
+    from disk. The displayed/recorded text (said.jsonl's own "text" field)
+    stays exactly what he typed - only the delivered note body grows these
+    lines."""
+    if not images:
+        return text
+    lines = "\n".join(f"[image: {os.path.join(images_dir(home), name)}]" for name in images)
+    return f"{text}\n{lines}"
+
 
 def dump(obj):
     """Compact JSON for the wire: no filler whitespace on a 3-second poll."""
@@ -1752,6 +1782,67 @@ class Handler(BaseHTTPRequestHandler):
             return None, f"too long: the limit is {MAX_TEXT} bytes"
         return text, None
 
+    def _images_field(self, payload):
+        """Validate the optional list of already-uploaded image ids a reply
+        names. Each id must be one /api/upload actually returned and its file
+        must still be on disk - anything else is refused rather than sent to
+        firstmate as a path that does not exist."""
+        images = payload.get("images")
+        if images is None:
+            return [], None
+        if not isinstance(images, list) or len(images) > MAX_IMAGES or not all(
+                isinstance(i, str) and IMAGE_ID_RE.match(i) for i in images):
+            return None, "unknown image"
+        home = self.records.home
+        for name in images:
+            if not os.path.isfile(os.path.join(images_dir(home), name)):
+                return None, "that image is no longer there - attach it again"
+        return images, None
+
+    def _handle_upload(self):
+        """POST /api/upload: one image's raw bytes, Content-Type its mime
+        type. Not JSON - base64 in a JSON body would cost a third more bytes
+        for no reason, and the page already has the raw bytes from a paste,
+        drop or file picker. Returns the id a send's "images" list names."""
+        if not self._local_request():
+            self._json(403, {"ok": False, "error": "refused: not this page"})
+            return
+        ctype = self.headers.get("Content-Type", "").split(";", 1)[0].strip().lower()
+        ext = IMAGE_MIME_EXT.get(ctype)
+        try:
+            length = int(self.headers.get("Content-Length", "0"))
+        except ValueError:
+            length = -1
+        if length <= 0 or self.headers.get("Transfer-Encoding"):
+            self.close_connection = True
+            return
+        if not ext:
+            self.close_connection = True
+            self._json(400, {"ok": False,
+                             "error": "only PNG, JPEG, GIF or WEBP images are accepted"})
+            return
+        if length > MAX_IMAGE_BYTES:
+            # Refused without reading: draining an oversize body just to say no
+            # to it is the DoS this cap exists to prevent.
+            self.close_connection = True
+            self._json(413, {"ok": False,
+                             "error": f"too big: the limit is {MAX_IMAGE_BYTES // (1 << 20)} MB per image"})
+            return
+        raw = self.rfile.read(length)
+        if len(raw) != length:
+            self.close_connection = True
+            return
+        name = f"{uuid.uuid4().hex}.{ext}"
+        path = os.path.join(images_dir(self.records.home), name)
+        try:
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            with open(path, "wb") as fh:
+                fh.write(raw)
+        except OSError as exc:
+            self._json(503, {"ok": False, "error": f"the image could not be saved: {exc}"})
+            return
+        self._json(200, {"ok": True, "id": name})
+
     # --- routes --------------------------------------------------------------
     def do_GET(self):
         path = self.path.split("?", 1)[0]
@@ -1769,6 +1860,23 @@ class Handler(BaseHTTPRequestHandler):
                            "text/plain; charset=utf-8")
                 return
             self._send(200, body, ctype + "; charset=utf-8")
+            return
+
+        if path.startswith("/image/"):
+            name = path[len("/image/"):]
+            if not IMAGE_ID_RE.match(name):
+                self._send(404, b"not found", "text/plain; charset=utf-8")
+                return
+            try:
+                with open(os.path.join(images_dir(self.records.home), name), "rb") as fh:
+                    body = fh.read()
+            except OSError:
+                self._send(404, b"not found", "text/plain; charset=utf-8")
+                return
+            ext = name.rsplit(".", 1)[1]
+            # Never re-checked once fetched: an id names one file forever, so
+            # the browser's own cache is free to keep it.
+            self._send(200, body, IMAGE_CTYPE[ext])
             return
 
         if path == "/api/items":
@@ -1884,6 +1992,11 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_POST(self):
         path = self.path.split("?", 1)[0]
+        if path == "/api/upload":
+            # Raw image bytes, not JSON, and bigger than the JSON body cap
+            # below - handled before _body() touches the socket.
+            self._handle_upload()
+            return
         payload = self._body()
         ctype = self.headers.get("Content-Type", "").split(";", 1)[0].strip().lower()
         if not self._local_request() or ctype != "application/json":
@@ -1938,6 +2051,10 @@ class Handler(BaseHTTPRequestHandler):
         if err:
             self._json(400, {"ok": False, "error": err})
             return
+        images, ierr = self._images_field(payload)
+        if ierr:
+            self._json(400, {"ok": False, "error": ierr})
+            return
 
         if path == "/api/note":
             # Approved proposal section 3: a note attached to no item still goes
@@ -1948,15 +2065,17 @@ class Handler(BaseHTTPRequestHandler):
             records = self.records
 
             def deliver_note():
+                body = append_image_markers(text, records.home, images)
                 try:
-                    outcome, route, detail, note_id = send_note(records.home, text)
+                    outcome, route, detail, note_id = send_note(records.home, body)
                 except subprocess.SubprocessError as exc:
                     outcome, route, detail, note_id = "unknown", "fm-inbox.sh note", str(exc), None
                 return {"outcome": outcome, "route": route, "detail": detail, "note_id": note_id}
 
-            sid, error = accept_said(self.records.home,
-                                     {"kind": "note", "home": "main", "text": text},
-                                     deliver_note)
+            entry = {"kind": "note", "home": "main", "text": text}
+            if images:
+                entry["images"] = images
+            sid, error = accept_said(self.records.home, entry, deliver_note)
             if error:
                 self._json(503, {"ok": False, "error": error})
                 return
@@ -2011,7 +2130,8 @@ class Handler(BaseHTTPRequestHandler):
                     return {"outcome": "failed", "route": "", "home": "main",
                             "detail": unread}
                 if item:
-                    outcome, route, detail, note_id = deliver_to_inbox(main_home_path, item, text)
+                    body = append_image_markers(text, records.home, images)
+                    outcome, route, detail, note_id = deliver_to_inbox(main_home_path, item, body)
                     if outcome == "sent":
                         records.invalidate()
                     return {"resolved": "answer", "outcome": outcome,
@@ -2020,8 +2140,9 @@ class Handler(BaseHTTPRequestHandler):
                             "source": item["source"], "key": item.get("key"),
                             "item_key": item_key(item), "note_id": note_id,
                             "sent_count": len(item.get("sent") or [])}
+                body = append_image_markers(text, records.home, images)
                 try:
-                    outcome, route, detail, note_id = send_note(records.home, text)
+                    outcome, route, detail, note_id = send_note(records.home, body)
                 except subprocess.SubprocessError as exc:
                     outcome, route, detail, note_id = "unknown", "fm-inbox.sh note", str(exc), None
                 return {"resolved": "note", "outcome": outcome, "route": route,
@@ -2031,6 +2152,8 @@ class Handler(BaseHTTPRequestHandler):
                      "title": message.get("title"), "text": text}
             if item:
                 entry["item_key"] = item_key(item)
+            if images:
+                entry["images"] = images
             sid, error = accept_said(self.records.home, entry, deliver_reply)
             if error:
                 self._json(503, {"ok": False, "error": error})
@@ -2073,18 +2196,22 @@ class Handler(BaseHTTPRequestHandler):
             records = self.records
 
             def deliver_answer():
-                outcome, route, detail, note_id = deliver_to_inbox(main_home_path, item, text)
+                body = append_image_markers(text, records.home, images)
+                outcome, route, detail, note_id = deliver_to_inbox(main_home_path, item, body)
                 if outcome == "sent":
                     records.invalidate()     # force a rescan on the next poll
                 return {"outcome": outcome, "route": route, "detail": detail,
                         "mode": "note", "note_id": note_id}
 
-            sid, error = accept_said(self.records.home, {
+            answer_entry = {
                 "kind": "answer", "home": home_id, "item": task_id,
                 "source": item["source"], "key": item.get("key"),
                 "item_key": item_key(item), "title": item.get("title"),
                 "text": text, "sent_count": len(item.get("sent") or []),
-            }, deliver_answer)
+            }
+            if images:
+                answer_entry["images"] = images
+            sid, error = accept_said(self.records.home, answer_entry, deliver_answer)
             if error:
                 self._json(503, {"ok": False, "error": error})
                 return
