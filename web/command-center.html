@@ -2538,6 +2538,16 @@ async function sendReply(){
 
 // --- events ------------------------------------------------------------------
 document.addEventListener('click', async e => {
+  // A real link (linkify's own <a target=_blank>, e.g. a URL inside My
+  // words' own row button) must act like a real link and nothing else. His
+  // report: "why every link i click fucking opens two tabs" - a linked row
+  // (word-text sits inside <button class="word">) both followed the link AND
+  // matched the row-open handler below, which re-renders #list synchronously
+  // out from under the very click still bubbling through it; some clicks then
+  // land twice, on the original element and its replacement. Bailing out
+  // here, before ANY delegated handler below can act (or re-render anything),
+  // leaves the browser's own click-through untouched.
+  if (e.target.closest('a[href]')) return;
   const tab = e.target.closest('.tab');
   if (tab){
     state.tab = tab.dataset.tab;
