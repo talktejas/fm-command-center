@@ -1228,6 +1228,42 @@ test_a_url_becomes_a_real_link_on_every_surface_that_shows_free_text() {
   pass "a URL becomes a real link on every surface that shows free text"
 }
 
+# His report: "why every link i click fucking opens two tabs" - a linked URL
+# in My words' own row (word-text) sits inside that row's own <button
+# class="word">, which the document's single delegated click handler also
+# matches (`e.target.closest('.item, .word')`) to open the row. One real
+# click both followed the link AND opened the row - and opening the row
+# re-renders #list synchronously, replacing the very button/anchor still
+# mid-click, which drove the browser to fire a second navigation (reproduced
+# live: one real click on that link opened two tabs, confirmed with
+# chrome-devtools-axi's `pages` list before/after; the fix below made it one).
+# No headless DOM is available here (stdlib only, no browser in this suite),
+# so this pins the fix structurally: the handler must bail out on a real link
+# before it reaches ANY delegated action, first in source order, every time -
+# a later edit that moves the row-open check above this guard, or drops the
+# guard, fails here rather than shipping a silent regression.
+test_clicking_a_linked_url_never_also_triggers_a_delegated_row_action() {
+  local home port body handler guard_at row_open_at archive_at tab_at
+  home="$TMP_ROOT/linkify-doubletab"
+  seed_home "$home"
+  start_server "$home" || fail "the server did not start"
+  port=$SERVER_PORT
+  body=$(curl -s -m 30 "http://127.0.0.1:$port/")
+  stop_server
+
+  handler=$(printf '%s\n' "$body" | grep -n "document.addEventListener('click'" | head -1 | cut -d: -f1)
+  [ -n "$handler" ] || fail "the page's single delegated click handler is missing entirely"
+  guard_at=$(printf '%s\n' "$body" | grep -n "e.target.closest('a\[href\]')" | head -1 | cut -d: -f1)
+  [ -n "$guard_at" ] || fail "the click handler has no guard for a real link at all - every linked URL nested in a clickable row will double-open"
+  row_open_at=$(printf '%s\n' "$body" | grep -n "e.target.closest('.item, .word')" | head -1 | cut -d: -f1)
+  [ -n "$row_open_at" ] || fail "the row-open check this guard must precede is missing (did it move or get renamed?)"
+  [ "$guard_at" -gt "$handler" ] || fail "the link guard is not even inside the click handler"
+  [ "$guard_at" -lt "$row_open_at" ] || fail "the link guard runs AFTER the row-open check - a click on a linked URL inside a row's own button would still open the row and can still double-open the tab"
+  assert_contains "$(sed -n "${guard_at}p" <<<"$body")" 'return;' \
+    "the link guard does not bail out of the handler, so it guards nothing"
+  pass "clicking a linked URL never also triggers a delegated row action"
+}
+
 # The page's decision rules live in web/command-center-state.js because they are
 # what got the rules wrong twice; these execute that file itself.
 test_the_pages_decision_rules_hold() {
@@ -3218,6 +3254,7 @@ test_concurrent_polls_produce_one_scan
 test_the_pages_decision_rules_hold
 test_the_server_serves_the_pages_decision_rules
 test_a_url_becomes_a_real_link_on_every_surface_that_shows_free_text
+test_clicking_a_linked_url_never_also_triggers_a_delegated_row_action
 test_a_message_names_the_project_the_worktree_and_the_branch
 test_a_taskless_message_is_matched_to_the_one_task_it_names
 test_a_message_naming_two_tasks_is_left_blank_rather_than_guessed
