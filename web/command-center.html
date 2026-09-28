@@ -671,11 +671,17 @@ const rowKey = it => it.__msg ? msgKey(it) : itemKey(it);
 const repliesTo = m => state.said.filter(r => r.msg === m.id);
 // A conversation's own thread: his replies, oldest first, interleaved with
 // whatever firstmate answer the matching rule attaches to each one
-// (threadRows, bin/command-center-state.js). state.messages is the same
-// loaded window every other lookup on this page reads from - an answer that
-// has aged out of it simply does not thread, same as it would not be found
-// anywhere else on the page either.
-const threadEntries = repliesOldestFirst => threadRows(repliesOldestFirst, state.messages);
+// (threadRows, bin/command-center-state.js), looked up in every message the
+// page holds, archived ones included: an answer he archives still threads
+// under the message it answers wherever that one sits (his question
+// 2026-09-28, "but what if i have already archived that message?"). An answer
+// that has aged out of both windows simply does not thread, same as it would
+// not be found anywhere else on the page either.
+function heldMessages(){
+  const ids = new Set(state.messages.map(m => m.id));
+  return state.messages.concat(state.archivedMessages.filter(m => !ids.has(m.id)));
+}
+const threadEntries = repliesOldestFirst => threadRows(repliesOldestFirst, heldMessages());
 // How long a reply has been waiting, in the same units ageLabel already
 // speaks - built on the one clock the page trusts (nowSecs), not a second one.
 const waitLabel = at => ageLabel({ since_epoch: Math.floor(Date.parse(at || '') / 1000) || null });
@@ -737,8 +743,12 @@ function visibleMessages(allProjects){
   // message still waiting on him is listed only in Waiting on you, so a batch
   // here can never reach it. Archived rows are never waiting.
   const listed = archived ? m => !isMsgHeld(m) : m => inMessagesTab(m, state.said, state.view.items);
+  // Unsearched, a recorded answer is folded into the conversation it
+  // continues (foldAnswers, bin/command-center-state.js) rather than listed on
+  // its own; a search shows whatever matched, answers included.
   const rows = !state.q.trim()
-    ? (archived ? state.archivedMessages : state.messages).filter(listed)
+    ? foldAnswers(archived ? state.archivedMessages : state.messages, state.said, heldMessages())
+      .filter(listed)
     : ((archived ? state.archivedFound : state.found) || {}).rows
       ? (archived ? state.archivedFound : state.found).rows.filter(listed)
       : [];
@@ -1170,7 +1180,8 @@ function renderList(){
   // classification only exists client-side, over whatever window is loaded.
   // Both badges are exactly what visibleMessages() would show for that tab,
   // the same window-based rule n-hold already uses.
-  const unheldMsgs = (state.messages || []).filter(m => inMessagesTab(m, state.said, state.view.items));
+  const unheldMsgs = foldAnswers(state.messages, state.said, heldMessages())
+    .filter(m => inMessagesTab(m, state.said, state.view.items));
   const infoCount = unheldMsgs.filter(isInfoOnlyMessage).length;
   $('#n-messages').textContent = unheldMsgs.length - infoCount + noteRows().length;
   $('#n-info').textContent = infoCount;
@@ -1598,12 +1609,18 @@ function messageRow(m, mode){
   const named = replyTarget(m, state.view.items).item;
   const replies = repliesTo(m);
   const status = replies.length ? threadStatus(threadEntries(replies.slice().reverse())) : null;
+  // A recorded answer listed on its own - only when the message it continues
+  // is not held here (foldAnswers) - says what it answers (answerFor).
+  const answer = answerFor(m, state.said, heldMessages());
   const where = [
     m.project || 'Not recorded',
     m.worktree ? m.worktree.replace(/^.*\//, '') : 'no worktree',
     m.branch || 'no branch',
   ];
-  return `<div class="row"><button class="item ${state.seen[msgKey(m)] ? 'answered' : ''}${
+  // Seen means seen since the newest answer folded into it (answered_by), so a
+  // conversation an answer just brought back reads unread again.
+  const seen = state.seen[msgKey(m)] && (!m.answered_by || state.seen['msg/' + m.answered_by]);
+  return `<div class="row"><button class="item ${seen ? 'answered' : ''}${
       state.selected.has(msgKey(m)) ? ' selected' : ''}"
       data-key="${esc(msgKey(m))}" aria-current="${state.open === msgKey(m)}">
     <span class="item-top">
@@ -1619,6 +1636,8 @@ function messageRow(m, mode){
       ${where.map((w, i) => (i ? '<span class="sep">·</span>' : '') +
         `<span class="${i ? 'mono' : ''}">${esc(w)}</span>`).join('')}
     </span>
+    ${answer ? `<span class="item-sub"><span>In answer to ${answer.title
+      ? `“${esc(answer.title)}”` : 'your note'}</span></span>` : ''}
   </button></div>`;
 }
 
@@ -1802,8 +1821,9 @@ function renderMessagePane(m){
   const cell = (label, value, na) =>
     `<div><dt>${label}</dt><dd class="${value ? '' : 'na'}">${esc(value || na)}</dd></div>`;
   // A message firstmate recorded as the answer to something he sent
-  // (answeredSend) shows that first: his query, then this answer.
-  const asked = answeredSend(m, state.said);
+  // (answerFor) shows that first: the message he replied to, when the page
+  // holds it (archived or not), then his query, then this answer.
+  const answer = answerFor(m, state.said, heldMessages());
   paintMain(key, `<div class="main-inner">
     <div class="crumbs">
       <span class="kind k-decision">firstmate said</span>
@@ -1817,8 +1837,10 @@ function renderMessagePane(m){
       ${cell('Branch', m.branch, 'Not recorded')}
     </div>
     ${m.context_source ? `<div class="quiet">${esc(m.context_source)}</div>` : ''}
-    ${asked ? `<div class="thread"><h3>In answer to what you said</h3>${
-      threadEntryHtml({kind: 'you', row: asked})}</div>` : ''}
+    ${answer ? `<div class="thread"><h3>In answer to what you said${answer.title
+      ? ` about “${esc(answer.title)}”` : ''}</h3>${
+      answer.original ? threadEntryHtml({kind: 'firstmate', row: answer.original}) : ''}${
+      threadEntryHtml({kind: 'you', row: answer.send})}</div>` : ''}
     <div class="msg them">
       <div class="msg-who">Firstmate<span class="t">${esc(localTime(m.at))}</span></div>
       <div class="msg-text">${para(m.text) || '<p class="quiet">No text recorded.</p>'}</div>
@@ -1981,7 +2003,11 @@ function open(key){
   const isMsg = String(key).startsWith('msg/');
   state.openMsg = isMsg ? openedMessage() : null;
   state.openNote = '';
-  state.seen[key] = true; save('cc.seen', state.seen);
+  state.seen[key] = true;
+  // Opening a conversation reads the answers folded into it too (foldAnswers).
+  if (state.openMsg) for (const e of threadEntries(repliesTo(state.openMsg)))
+    if (e.kind === 'firstmate') state.seen[msgKey(e.row)] = true;
+  save('cc.seen', state.seen);
   render();
   if (isMsg && !state.openMsg) fetchMessage(key.slice(4));
 }
@@ -2010,7 +2036,7 @@ async function fetchMessage(id){
 function moveArchived(m, archived){
   m.archived = archived;
   m.archived_at = archived ? nowIso() : null;
-  state.archiveOverride[m.id] = archived;
+  state.archiveOverride[m.id] = { archived, at: nowIso() };
   state.messages = state.messages.filter(x => x.id !== m.id);
   state.archivedMessages = state.archivedMessages.filter(x => x.id !== m.id);
   if (archived) {
@@ -2038,9 +2064,12 @@ function applyArchiveOverride(){
     if (state.archivedFound) state.archivedFound.rows = keep(state.archivedFound.rows);
     state.view.items = (state.view.items || []).filter(it => !state.deleted.has(itemKey(it)));
   }
-  for (const [id, archived] of Object.entries(state.archiveOverride)){
+  for (const [id, { archived, at }] of Object.entries(state.archiveOverride)){
     if (archived){
       const i = state.messages.findIndex(x => x.id === id);
+      // An answer that arrived after his Archive restored it (the server's
+      // restore_answered): that is newer than his click, so it stands.
+      if (i >= 0 && state.messages[i].restored_at > at){ delete state.archiveOverride[id]; continue; }
       if (i >= 0){
         const [m] = state.messages.splice(i, 1);
         m.archived = true;
@@ -2162,6 +2191,10 @@ async function loadMessages(){
     // window since it was read is still one of the things firstmate said.
     const fresh = (body.messages || []).map(shapeMessage);
     state.messages = mergeMessages(fresh, state.messages);
+    // A message the server now serves as current is not archived, whatever
+    // the page last read: an answer brought it back (restore_answered).
+    const current = new Set(fresh.map(m => m.id));
+    state.archivedMessages = state.archivedMessages.filter(m => !current.has(m.id));
     state.more = state.messages.length > fresh.length ? state.more : !!body.more;
     // Waiting on you is built from these rows (waitingMessageRows), so the
     // newest window alone would silently drop every question older than it
@@ -2785,7 +2818,10 @@ $('#note-dlg').addEventListener('close', async function(){
   await loadSaid(); render();
 });
 
-Promise.all([loadSaid(), loadMessages(), loadWork()]).then(([said]) => {
+// The archived window is read once up front too, so a recorded answer to a
+// message he already archived can show that message (answerFor) without his
+// first opening Archived.
+Promise.all([loadSaid(), loadMessages(), loadWork(), loadArchivedMessages()]).then(([said]) => {
   reconcilePending(said.read);
   renderList();
   return poll();

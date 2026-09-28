@@ -455,6 +455,48 @@ function answeredSend(message, saidRows) {
   return (saidRows || []).find(r => r.note_id === message.answers) || null;
 }
 
+// What a recorded answer answers, for its own row and pane (his question
+// 2026-09-28, "but what if i have already archived that message?"): the send
+// it names, and the message that send replied to - looked up in `messages`,
+// which the page passes archived ones included, so an answer to a message he
+// archived still says plainly what it answers. `title` comes off the send
+// itself (said.jsonl records the title it replied to), so an item reply or an
+// original the page no longer holds still names what it was about.
+function answerFor(message, saidRows, messages) {
+  const send = answeredSend(message, saidRows);
+  if (!send) return null;
+  const original = send.msg ? (messages || []).find(m => m.id === send.msg) || null : null;
+  return { send, original, title: (original && original.title) || send.title || null };
+}
+
+// One record, one tab (his ruling 2026-09-28, "i think u unarchive that and
+// continue the thread"): a recorded answer to one of his replies is part of
+// that message's conversation, so it is threaded there and never listed as a
+// row of its own. The conversation it continues sorts by the answer's time,
+// since that is the last thing firstmate said in it, and carries `answered_by`
+// (the newest answer's id) so the page can show it unread again. An answer
+// whose message `allMessages` does not hold - aged out of every window the
+// page has - stays a row of its own, since there is nowhere else to show it.
+function foldAnswers(rows, saidRows, allMessages) {
+  const held = new Set((allMessages || []).map(m => m.id));
+  const latest = {};
+  const folded = new Set();
+  for (const m of allMessages || []) {
+    const a = answerFor(m, saidRows, allMessages);
+    const of = a && a.send.msg;
+    if (!of || of === m.id || !held.has(of)) continue;
+    folded.add(m.id);
+    const at = Date.parse(m.at || '');
+    if (!isNaN(at) && !(latest[of] && latest[of].at >= at)) latest[of] = { at, id: m.id };
+  }
+  return (rows || []).filter(m => !folded.has(m.id)).map(m => {
+    const l = latest[m.id];
+    if (!l) return m;
+    return Object.assign({}, m, { answered_by: l.id,
+      since_epoch: Math.max(m.since_epoch || 0, Math.floor(l.at / 1000)) });
+  });
+}
+
 // The full conversation, oldest first: his reply, then firstmate's answer -
 // every recorded one, else the one the rule above finds - then his next reply,
 // and so on. The same candidate message is never claimed twice - once
@@ -568,6 +610,9 @@ function looksLikeInfoOnly(text) {
 function isInfoOnlyMessage(message) {
   if (!message) return false;
   if (message.question) return false;
+  // An answer to something he sent is never noise: it is how an answer to a
+  // message he already archived comes back to him (answerFor below).
+  if (message.answers) return false;
   return looksLikeInfoOnly(message.text || message.title);
 }
 
@@ -693,4 +738,4 @@ if (typeof module === 'object' && module.exports)
                      waitingItems, waitingMessageRows, waitingCount,
                      looksLikeInfoOnly, isInfoOnlyMessage,
                      saidTaskId, matchAnswer, threadRows, threadStatus,
-                     recordedAnswers, answeredSend, noteThreads };
+                     recordedAnswers, answeredSend, answerFor, foldAnswers, noteThreads };

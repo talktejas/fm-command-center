@@ -13,7 +13,7 @@ const {
   heldWith, captureBand, saidDigest, mergeMessages,
   waitingCount, waitingMessageRows, inMessagesTab, onHisBoard,
   isInfoOnlyMessage, saidTaskId, matchAnswer, threadRows, threadStatus,
-  recordedAnswers, answeredSend, noteThreads,
+  recordedAnswers, answeredSend, answerFor, foldAnswers, noteThreads,
 } = require(path.join(__dirname, '..', 'web', 'command-center-state.js'));
 
 // Quiet on success: tests/command-center.test.sh runs this and reports the
@@ -795,6 +795,35 @@ test('only answerable, undeleted notes are their own conversations', () => {
     { kind: 'reply', sid: 'd', answerable: true },
   ];
   assert.deepStrictEqual(noteThreads(rows).map(r => r.sid), ['a']);
+});
+
+test('an answer continues the conversation it answers instead of a row of its own', () => {
+  // His ruling 2026-09-28: "i think u unarchive that and continue the thread".
+  const original = shapeMessage({ id: 'm1', at: '2026-09-28T10:00:00Z', title: 'Heads up on answers', text: 'From now on...' });
+  const other = shapeMessage({ id: 'm0', at: '2026-09-28T10:07:00Z', title: 'Unrelated', text: 'Build passed.' });
+  const send = { kind: 'note', msg: 'm1', title: 'Heads up on answers', at: '2026-09-28T10:05:00Z',
+    text: 'but what if i have already archived that message?', note_id: 'n1' };
+  const answer = shapeMessage({ id: 'a1', at: '2026-09-28T10:10:00Z', title: 'Comes back', text: 'Nothing new for the captain.', answers: 'n1' });
+  const all = [answer, other, original];
+  const rows = foldAnswers(all, [send], all);
+  // One record, one tab: the answer is not a row; the conversation carries it
+  // and leads the list at the answer's time, marked with the newest answer.
+  assert.deepStrictEqual(rows.map(m => m.id), ['m0', 'm1']);
+  const m1 = rows.find(m => m.id === 'm1');
+  assert.strictEqual(m1.answered_by, 'a1');
+  assert.strictEqual(m1.since_epoch, answer.since_epoch);
+  assert.strictEqual(rows.find(m => m.id === 'm0').answered_by, undefined);
+  // Folded wherever the original sits - archived rows are in `all` too.
+  assert.deepStrictEqual(foldAnswers([answer, other], [send], all).map(m => m.id), ['m0']);
+  // The original aged out of everything the page holds: the answer keeps its
+  // own row, says what it answers, and is never buried under Info.
+  assert.deepStrictEqual(foldAnswers([answer, other], [send], [answer, other]).map(m => m.id), ['a1', 'm0']);
+  assert.deepStrictEqual(answerFor(answer, [send], [answer]), { send, original: null, title: 'Heads up on answers' });
+  assert.strictEqual(isInfoOnlyMessage(answer), false);
+  assert.strictEqual(answerFor(original, [send], all), null);
+  // It threads under the original, archived itself or not.
+  assert.deepStrictEqual(threadRows([send], [original, Object.assign({ archived: true }, answer)])
+    .map(e => e.kind + ':' + (e.row.id || e.row.text)), ['you:' + send.text, 'firstmate:a1']);
 });
 
 process.exit(failures ? 1 : 0);

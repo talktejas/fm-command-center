@@ -1785,6 +1785,10 @@ def read_messages(home, limit=MESSAGE_WINDOW, before=None, query=None, archived=
                     continue
                 if not archived and len(rows) == limit:
                     return rows, True, None
+                if amendment.get("answer"):
+                    # Restored by restore_answered: when, so the page's own
+                    # in-flight Archive override yields to it.
+                    row = dict(row, restored_at=amendment.get("at"))
                 rows.append(dict(row, archived=archived,
                                   held=held.get(("message", row["id"])) == "held"))
     except FileNotFoundError:
@@ -1907,12 +1911,18 @@ def reply_body(message, text):
             + (f" ({work})" if work else "") + f":\n{text}")
 
 
-def record_archive(home, msg_id, archived):
-    """Append one archive amendment beside the message it changes."""
-    data = (json.dumps({"kind": "archive" if archived else "unarchive",
-                        "of": msg_id, "at": utc_now()}) + "\n").encode("utf-8")
+ARCHIVE_LOCK = threading.RLock()
+
+
+def record_archive(home, msg_id, archived, answer=None):
+    """Append one archive amendment beside the message it changes. `answer`
+    names the recorded answer that restored it (restore_answered)."""
+    amendment = {"kind": "archive" if archived else "unarchive", "of": msg_id, "at": utc_now()}
+    if answer:
+        amendment["answer"] = answer
+    data = (json.dumps(amendment) + "\n").encode("utf-8")
     try:
-        with open(message_log(home), "a+b", buffering=0) as fh:
+        with ARCHIVE_LOCK, open(message_log(home), "a+b", buffering=0) as fh:
             if fh.seek(0, os.SEEK_END) > 0:
                 fh.seek(-1, os.SEEK_END)
                 if fh.read(1) != b"\n":
@@ -1921,6 +1931,49 @@ def record_archive(home, msg_id, archived):
     except OSError as exc:
         return f"the archive record could not be written: {exc}"
     return None
+
+
+def restore_answered(home):
+    """Bring back a message he archived before its answer arrived.
+
+    His ruling 2026-09-28 ("i think u unarchive that and continue the thread"):
+    archiving a message means he is done looking at it, not that he refuses
+    the answer. When firstmate records an answer (`answers`, the note id his
+    reply went out as - fm-captain-message.sh --answers) AFTER he archived the
+    message that reply was about, the message is unarchived by an ordinary
+    amendment, the same record his own Restore writes, so the answer threads
+    on under it in Messages. Archived again after the answer, it stays
+    archived: only an answer newer than his archive restores it.
+    """
+    with ARCHIVE_LOCK:
+        archived_at, answered = {}, {}
+        try:
+            with open(message_log(home), encoding="utf-8") as fh:
+                for line in fh:
+                    try:
+                        row = json.loads(line)
+                    except json.JSONDecodeError:
+                        continue
+                    if row.get("kind") in ("archive", "unarchive") and row.get("of"):
+                        archived_at[row["of"]] = row.get("at") if row["kind"] == "archive" else None
+                    elif row.get("id") and row.get("answers") and row.get("at"):
+                        if row["at"] >= answered.get(row["answers"], ("",))[0]:
+                            answered[row["answers"]] = (row["at"], row["id"])
+        except OSError:
+            return
+        if not answered or not any(archived_at.values()):
+            return
+        rows, error, _ = read_log(said_log(home), LOG_LIMIT)
+        if error:
+            return
+        sent_on = {r["sid"]: r["msg"] for r in rows
+                   if r.get("kind") != "outcome" and r.get("sid") and r.get("msg")}
+        for r in rows:
+            msg = sent_on.get(r.get("of") if r.get("kind") == "outcome" else r.get("sid"))
+            at, answer = answered.get(r.get("note_id"), (None, None))
+            if msg and at and archived_at.get(msg) and at > archived_at[msg]:
+                record_archive(home, msg, False, answer=answer)
+                archived_at[msg] = None
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -2231,6 +2284,7 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_header("Content-Length", "0")
                 self.end_headers()
                 return
+            restore_answered(self.records.home)
             rows, more, error = read_messages(self.records.home,
                                               before=before, query=query,
                                               archived=archived)
