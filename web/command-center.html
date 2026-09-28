@@ -47,6 +47,10 @@
     align-items:center;justify-content:center;color:var(--ink)}
   .gutter button:hover:not(:disabled){background:var(--accent-soft);border-color:var(--accent)}
   .gutter button:disabled{opacity:.35;cursor:default}
+  /* Delete sits apart from Archive/Hold and turns red once armed - it needs a
+     second click (armDelete) since he has no way back to a deleted row. */
+  .gutter #gutter-delete{margin-top:14px}
+  .gutter #gutter-delete.armed,.selbar #bulk-delete.armed{background:var(--hot);border-color:var(--hot);color:#fff}
 
   /* ---------- left rail ---------- */
   .rail{border-right:1px solid var(--line);background:var(--panel);display:flex;flex-direction:column;overflow:hidden}
@@ -149,6 +153,7 @@
   .selbar button{font-size:12px;padding:3px 10px;border-radius:6px;border:1px solid var(--line);
     background:#fff;cursor:pointer}
   .selbar button:disabled{opacity:.5;cursor:default}
+  .selbar #bulk-delete{margin-left:auto;color:var(--hot);border-color:var(--hot-line)}
   .item-top{display:flex;align-items:center;gap:7px;margin-bottom:3px}
   .lamp{width:8px;height:8px;border-radius:50%;flex:none}
   .lamp.busy{background:var(--ok)}
@@ -418,6 +423,7 @@
   <div class="gutter" id="gutter">
     <button id="gutter-archive" title="Archive" aria-label="Archive">🗄</button>
     <button id="gutter-hold" title="Hold" aria-label="Hold">⏸</button>
+    <button id="gutter-delete" title="Delete for good" aria-label="Delete">🗑</button>
   </div>
   <main class="main" id="main"></main>
 </div>
@@ -549,6 +555,10 @@ const state = {
   // to add or drop one row, then one Hold or Archive for the whole selection.
   // Not persisted - a fresh load or tab switch starts with nothing selected.
   selected:new Set(), bulkBusy:false,
+  // Keys (msg/<id> or itemKey) deleted this session: the server already
+  // leaves them out, this only stops a poll already in flight, or a message
+  // mergeMessages keeps from an older window, bringing one back meanwhile.
+  deleted:new Set(), deleteArmed:null,
   sending:false, flash:null, error:null, seen:load('cc.seen',{}), draft:load('cc.draft',{}),
   // Pasted/dropped images attached to a reply, by the same conversation key
   // as draft: {id, name} per image, uploaded as soon as they're attached so
@@ -1201,6 +1211,12 @@ function renderGutter(){
   const has = state.selected.size > 0 || !!state.open;
   $('#gutter-archive').disabled = !has;
   $('#gutter-hold').disabled = !has;
+  const del = deleteTargets();
+  const armed = del.length > 0 && state.deleteArmed === del.join('|');
+  $('#gutter-delete').disabled = !del.length;
+  $('#gutter-delete').classList.toggle('armed', armed);
+  $('#gutter-delete').title = armed ? `Click again to delete ${del.length === 1 ? 'it' : del.length}`
+    : 'Delete for good';
 }
 
 // Forwards to whichever Archive/Hold button the open pane already has - one
@@ -1358,31 +1374,101 @@ function renderMessages(archived){
 function selectionBarHtml(){
   const n = state.selected.size;
   if (!n) return '';
+  const dis = state.bulkBusy ? 'disabled' : '';
+  const armed = state.deleteArmed === deleteTargets().join('|');
   return `<div class="selbar"><span>${n} selected</span>
-    <button id="bulk-hold" ${state.bulkBusy ? 'disabled' : ''}>Hold</button>
-    <button id="bulk-archive" ${state.bulkBusy ? 'disabled' : ''}>Archive</button>
-    <button id="bulk-clear" ${state.bulkBusy ? 'disabled' : ''}>Clear</button></div>`;
+    <button id="bulk-hold" ${dis}>Hold</button>
+    <button id="bulk-archive" ${dis}>Archive</button>
+    <button id="bulk-clear" ${dis}>Clear selection</button>
+    <button id="bulk-delete" class="${armed ? 'armed' : ''}" ${dis}>${
+      armed ? `Click again to delete ${n}` : 'Delete'}</button></div>`;
 }
 
-// The anchor is which row a plain or ctrl/cmd click last landed on - not
-// persisted, and not part of `state`, since it means nothing once the page
-// reloads or the selection is cleared by a plain click elsewhere.
+// The ordinary file-manager/mail-client convention (his report 2026-09-28:
+// shift-click did not select the run in between): a plain click opens one
+// row and makes it the anchor; shift-click selects every row from the
+// anchor to the clicked one, in on-screen order, replacing the selection
+// (ctrl/cmd+shift adds the run instead) and leaving the anchor where it was;
+// ctrl/cmd-click adds or drops that one row and moves the anchor to it. The
+// row open in the pane counts as selected when a multi-select starts from
+// it. Not persisted: an anchor means nothing once the page reloads.
 let selectAnchor = null;
 function toggleMessageSelection(key, e){
-  if (e.shiftKey && selectAnchor){
-    const domKeys = [...$('#list').querySelectorAll('[data-key^="msg/"]')].map(el => el.dataset.key);
-    const i = domKeys.indexOf(selectAnchor), j = domKeys.indexOf(key);
-    if (i >= 0 && j >= 0){
-      const [lo, hi] = i < j ? [i, j] : [j, i];
-      if (!(e.ctrlKey || e.metaKey)) state.selected.clear();
-      for (let k = lo; k <= hi; k++) state.selected.add(domKeys[k]);
-      renderList();
-      return;
-    }
+  if (!state.selected.size && state.open && state.open.startsWith('msg/')){
+    state.selected.add(state.open);
+    selectAnchor = selectAnchor || state.open;
   }
-  if (state.selected.has(key)) state.selected.delete(key); else state.selected.add(key);
-  selectAnchor = key;
+  const domKeys = [...$('#list').querySelectorAll('[data-key^="msg/"]')].map(el => el.dataset.key);
+  const i = domKeys.indexOf(selectAnchor), j = domKeys.indexOf(key);
+  if (e.shiftKey && i >= 0 && j >= 0){
+    const [lo, hi] = i < j ? [i, j] : [j, i];
+    if (!(e.ctrlKey || e.metaKey)) state.selected.clear();
+    for (let k = lo; k <= hi; k++) state.selected.add(domKeys[k]);
+  } else if (e.shiftKey){
+    state.selected.add(key);      // no anchor on screen: the run is just this row
+    selectAnchor = key;
+  } else {
+    if (state.selected.has(key)) state.selected.delete(key); else state.selected.add(key);
+    selectAnchor = key;
+  }
   renderList();
+}
+
+// --- Delete ------------------------------------------------------------------
+// His ask 2026-09-28: some rows are junk - gone for good, not archived. The
+// same /api/park record Archive/Hold already use, state "deleted" (the server
+// then leaves the row out of every list); nothing firstmate wrote is touched.
+// A message or a Waiting-on-you item can be deleted; a My words conversation
+// cannot - that log is his own record of what he said.
+function deleteTargets(){
+  if (state.selected.size) return [...state.selected].sort();
+  const k = state.open;
+  if (!k) return [];
+  if (k.startsWith('msg/')) return findMessageById(k.slice(4)) ? [k] : [];
+  return (state.view.items || []).some(i => itemKey(i) === k) ? [k] : [];
+}
+// No dialog: the first click arms Delete for exactly what it would delete
+// (a changed selection is a different target, so it never inherits an arm),
+// and only a second click within a few seconds deletes.
+let deleteArmTimer = null;
+async function armOrDelete(){
+  const keys = deleteTargets();
+  if (!keys.length || state.bulkBusy) return;
+  const sig = keys.join('|');
+  clearTimeout(deleteArmTimer);
+  if (state.deleteArmed !== sig){
+    state.deleteArmed = sig;
+    deleteArmTimer = setTimeout(() => { state.deleteArmed = null; renderList(); }, 4000);
+    renderList();
+    return;
+  }
+  state.deleteArmed = null;
+  await deleteKeys(keys);
+}
+async function deleteKeys(keys){
+  const single = keys.length === 1 && keys[0] === state.open && !state.selected.size;
+  const order = !single ? null : state.open.startsWith('msg/')
+    ? displayOrder(visibleMessages(), true, true, msgKey)
+    : displayOrder(visible(), false, false, rowKey);
+  state.bulkBusy = true; renderList();
+  let failed = 0;
+  await Promise.all(keys.map(async key => {
+    const isMsg = key.startsWith('msg/');
+    try {
+      const {ok, data} = await post('/api/park', {target: isMsg ? 'message' : 'item',
+        key: isMsg ? key.slice(4) : key, state: 'deleted'});
+      if (ok && data.ok) state.deleted.add(key); else failed++;
+    } catch (e) { failed++; }
+  }));
+  state.bulkBusy = false;
+  state.selected.clear();
+  applyArchiveOverride();
+  if (state.deleted.has(state.open)){
+    if (order) { advanceTo(order, state.open); return; }
+    state.open = null;
+  }
+  if (failed) state.openNote = `${failed} could not be deleted - try again.`;
+  render();
 }
 
 async function bulkArchiveSelected(){
@@ -2007,6 +2093,14 @@ function moveArchived(m, archived){
 // once the write is actually on disk. Once his own click is the last word on
 // an id, no poll's answer may contradict it until the opposite click does.
 function applyArchiveOverride(){
+  if (state.deleted.size){
+    const keep = rows => (rows || []).filter(m => !state.deleted.has(msgKey(m)));
+    state.messages = keep(state.messages);
+    state.archivedMessages = keep(state.archivedMessages);
+    if (state.found) state.found.rows = keep(state.found.rows);
+    if (state.archivedFound) state.archivedFound.rows = keep(state.archivedFound.rows);
+    state.view.items = (state.view.items || []).filter(it => !state.deleted.has(itemKey(it)));
+  }
   for (const [id, archived] of Object.entries(state.archiveOverride)){
     if (archived){
       const i = state.messages.findIndex(x => x.id === id);
@@ -2098,6 +2192,7 @@ async function poll(){
     const arrived = (next.items || []).map(itemKey).filter(k => !before.has(k));
     commit({ kind:'body', error: next.error || null });
     state.view = next;
+    applyArchiveOverride();
     state.scanned = true;
     state.outcome = releaseVerdicts(state.outcome, next);
     save('cc.outcome', state.outcome);
@@ -2592,6 +2687,11 @@ async function sendReply(){
 }
 
 // --- events ------------------------------------------------------------------
+// Shift-click on a row extends the row selection, not the browser's own text
+// selection across the list.
+document.addEventListener('mousedown', e => {
+  if (e.shiftKey && e.target.closest('#list .item')) e.preventDefault();
+});
 document.addEventListener('click', async e => {
   // A real link (linkify's own <a target=_blank>, e.g. a URL inside My
   // words' own row button) must act like a real link and nothing else. His
@@ -2713,6 +2813,7 @@ document.addEventListener('click', async e => {
   }
   if (e.target.id === 'gutter-archive'){ gutterArchive(); return; }
   if (e.target.id === 'gutter-hold'){ gutterHold(); return; }
+  if (e.target.id === 'gutter-delete' || e.target.id === 'bulk-delete'){ await armOrDelete(); return; }
   if (e.target.id === 'bulk-hold'){ bulkHoldSelected(); return; }
   if (e.target.id === 'bulk-archive'){ await bulkArchiveSelected(); return; }
   if (e.target.id === 'bulk-clear'){ state.selected.clear(); renderList(); return; }
@@ -2725,6 +2826,7 @@ document.addEventListener('click', async e => {
     }
     if (key){
       if (state.selected.size){ state.selected.clear(); }
+      selectAnchor = key;
       open(key);
     }
     return;

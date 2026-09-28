@@ -476,9 +476,12 @@ def parked_log(home):
 
 
 def record_parked(home, target, key, state):
-    """Append one parking amendment. `state` is "archived", "held" or "none"
-    (back to its ordinary list) - the latest amendment for a (target, key)
-    pair wins, read back by read_parked.
+    """Append one parking amendment. `state` is "archived", "held",
+    "deleted" (gone from every list for good - his junk, never shown again)
+    or "none" (back to its ordinary list) - the latest amendment for a
+    (target, key) pair wins, read back by read_parked. Like the rest of this
+    log, "deleted" only records what he removed from his view: nothing
+    firstmate wrote is ever edited or removed.
     """
     entry = {"kind": "park", "target": target, "of": key,
              "state": state, "at": utc_now()}
@@ -493,7 +496,7 @@ def record_parked(home, target, key, state):
 
 
 def read_parked(home):
-    """{(target, key): "archived"|"held"} for every row still parked - a row
+    """{(target, key): "archived"|"held"|"deleted"} for every row still parked - a row
     whose latest amendment is "none" is left out entirely, the same as one
     never parked at all. Newest first, so the first amendment seen per pair
     is the one that stands.
@@ -506,7 +509,7 @@ def read_parked(home):
         if pair in seen or not pair[1]:
             continue
         seen.add(pair)
-        if row.get("state") in ("archived", "held"):
+        if row.get("state") in ("archived", "held", "deleted"):
             parked[pair] = row["state"]
     return parked
 
@@ -1416,7 +1419,7 @@ def message_totals(home):
     except OSError:
         pass
     held = read_parked(home)
-    ids = [i for i in ids if held.get(("message", i)) != "held"]
+    ids = [i for i in ids if held.get(("message", i)) not in ("held", "deleted")]
     archived = sum(1 for i in ids if states.get(i))
     return len(ids) - archived, archived
 
@@ -1523,6 +1526,8 @@ def read_messages(home, limit=MESSAGE_WINDOW, before=None, query=None, archived=
                         skipping = False
                     continue
                 if bool(archive_state.get(row["id"])) != archived:
+                    continue
+                if held.get(("message", row["id"])) == "deleted":
                     continue
                 if needle and not matches(row, needle, replies):
                     continue
@@ -1904,7 +1909,10 @@ class Handler(BaseHTTPRequestHandler):
             view = json.loads(body)
             view["error"] = self.records.error
             parked = read_parked(self.records.home)
-            for it in view.get("items", []):
+            # A deleted item is gone from the view outright, not flagged.
+            view["items"] = [it for it in view.get("items", [])
+                             if parked.get(("item", item_key(it))) != "deleted"]
+            for it in view["items"]:
                 key = item_key(it)
                 it["archived"] = parked.get(("item", key)) == "archived"
                 it["held"] = parked.get(("item", key)) == "held"
@@ -2032,13 +2040,17 @@ class Handler(BaseHTTPRequestHandler):
             # storage, so it survives a refresh and reads the same from any
             # browser. No confirmation and no undo route beyond sending the
             # opposite state - the same one-click shape /api/archive already
-            # has.
+            # has. Delete is the one exception to "no confirmation": the page
+            # asks for a second click before it sends "deleted" here, since
+            # he has no route back to a deleted row. My words is his own
+            # record (said.jsonl's promise), so it is never deleted.
             target = payload.get("target")
             key = payload.get("key")
             state = payload.get("state")
             if target not in ("item", "word", "message") \
                     or not isinstance(key, str) or not key or len(key) > 400 \
-                    or state not in ("archived", "held", "none"):
+                    or state not in ("archived", "held", "deleted", "none") \
+                    or (state == "deleted" and target == "word"):
                 self._json(400, {"ok": False, "error": "unknown park request"})
                 return
             error = record_parked(self.records.home, target, key, state)
