@@ -295,13 +295,20 @@ function sameWords(a, b) {
 // whatever decision that task happens to be stopped on. Everything else is a
 // note to firstmate, which is his words reaching firstmate without being
 // delivered as an answer to a question he was not looking at.
+// A decision firstmate has already closed is still served (remember_waiting),
+// but it is settled, exactly as the server's waiting_question reads it: the
+// reply is a note, and `item` is handed back so the pane can show what
+// firstmate recorded as the answer.
 function replyTarget(message, items) {
   if (!message.question) return { kind: 'note' };
   const key = message.question_key || '';
-  const item = (items || []).find(it => it.home === 'main' && it.id === message.task
+  const named = (items || []).filter(it => it.home === 'main' && it.id === message.task
     && (key ? it.source === 'status' && (it.key || '') === key
             : it.source === 'hold'));
-  return item ? { kind: 'answer', item } : { kind: 'note', settled: true };
+  const open = named.find(it => !it.closed);
+  if (open) return { kind: 'answer', item: open };
+  return named.length ? { kind: 'note', settled: true, item: named[0] }
+                      : { kind: 'note', settled: true };
 }
 
 // --- does a captured message need him to decide something? ----------------------
@@ -335,21 +342,42 @@ function looksLikeClarifyingReply(text) {
   return CLARIFY_PHRASES.some(p => low.includes(p));
 }
 
-// Waiting on you only while unanswered: once something in the said log
-// answers this message (repliesTo in bin/command-center.html: r.msg ===
-// message.id) it leaves Waiting on you but stays in Messages, same as an
-// answered captain hold leaves the waiting queue but stays in the backlog.
-// saidRows is newest first (bin/command-center.py's read_said), so the first
-// match naming this message is his LATEST reply to it - and a latest reply
-// that only asks firstmate something back never counts as the answer this
-// message is waiting on, so it stays exactly as if unanswered.
-function messageNeedsReply(message, saidRows) {
+// Waiting on him until it is answered or settled. saidRows is newest first
+// (bin/command-center.py's read_said), so the first row naming this message is
+// his LATEST reply to it - and a latest reply that only asks firstmate
+// something back never counts as the answer, so it stays waiting. A question
+// whose decision firstmate has since closed is settled too (replyTarget).
+function messageNeedsReply(message, saidRows, items) {
   if (!message) return false;
   const flagged = Boolean(message.question) || looksLikeQuestion(message.text)
     || looksLikeQuestion(message.title);
   if (!flagged) return false;
+  const named = replyTarget(message, items).item;
+  if (named && named.closed) return false;
   const latest = (saidRows || []).find(r => r.msg === message.id);
   return !latest || looksLikeClarifyingReply(latest.text);
+}
+
+// --- one record, one tab ----------------------------------------------------------
+// His ruling 2026-09-28: "Don't duplicate the items. If an item is in Waiting
+// for You, don't put the same item in the message tab" - archiving a batch in
+// Messages quietly took three rows out of Waiting on you. So a message waiting
+// on him is listed ONLY in Waiting on you; once answered or settled it moves to
+// Messages (or Info), and only there can a batch reach it. Every badge counts
+// through these same two rules, so no record is counted twice.
+function inMessagesTab(message, saidRows, items) {
+  return !message.held && !messageNeedsReply(message, saidRows, items);
+}
+
+// His board shows only what firstmate has put to HIM (his ruling 2026-09-28,
+// shown "CI check failing: ... provider reported failure"): a captain hold. A
+// worker's own needs-decision/blocked status line is the worker asking
+// FIRSTMATE; firstmate escalates one by recording a question message
+// (--question-key), and that message is what he sees. The scan still reads
+// status decisions - reply routing and firstmate's own view need them - they
+// are just never a row or a count on any of his tabs.
+function onHisBoard(item) {
+  return Boolean(item) && item.source === 'hold';
 }
 
 // --- threading firstmate's later answer under his reply --------------------
@@ -558,23 +586,24 @@ function isItemDeferred(it, nowSecs) {
     /^\d{4}-\d{2}-\d{2}$/.test(it.deferred_until) &&
     Date.parse(it.deferred_until + 'T00:00:00Z') / 1000 > nowSecs;
 }
-// A scanned captain-hold item leaves Waiting on you only by an explicit
-// Archive or Hold (AGENTS.md: "Replying or answering never archives or
-// removes anything on its own") - unlike a message, it has no other tab to
-// fall back into, so answering it, even decisively, must never make it
-// disappear outright.
+// A captain hold leaves Waiting on you only by his explicit Archive, Hold or
+// Delete (AGENTS.md: "Replying or answering never archives or removes anything
+// on its own"): it has no Messages-like tab where settled holds live, so
+// answered or closed it stays here, marked, rather than vanishing. A message
+// does have one, so answered or settled it moves there (inMessagesTab above) -
+// only the record he answered moves, and the pane stays on it.
 function waitingItems(items, nowSecs) {
-  return (items || []).filter(it =>
+  return (items || []).filter(it => onHisBoard(it) &&
     !isItemDeferred(it, nowSecs) && !it.archived && !it.held);
 }
-function waitingMessageRows(messages, saidRows) {
+function waitingMessageRows(messages, saidRows, items) {
   return (messages || [])
-    .filter(m => !m.held && messageNeedsReply(m, saidRows))
+    .filter(m => !m.held && messageNeedsReply(m, saidRows, items))
     .map(m => Object.assign({__msg: true}, m));
 }
 function waitingCount(items, messages, saidRows, nowSecs) {
   return waitingItems(items, nowSecs).length
-    + waitingMessageRows(messages, saidRows).length;
+    + waitingMessageRows(messages, saidRows, items).length;
 }
 
 // --- may the message list claim to be complete? ---------------------------------
@@ -660,7 +689,7 @@ if (typeof module === 'object' && module.exports)
                      listSignature, mayRelease, logRead,
                      sendState, sendKeys, sameWords,
                      heldWith, captureBand, saidDigest, mergeMessages,
-                     isItemDeferred, looksLikeClarifyingReply,
+                     isItemDeferred, looksLikeClarifyingReply, inMessagesTab, onHisBoard,
                      waitingItems, waitingMessageRows, waitingCount,
                      looksLikeInfoOnly, isInfoOnlyMessage,
                      saidTaskId, matchAnswer, threadRows, threadStatus,

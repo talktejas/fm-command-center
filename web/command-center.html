@@ -733,10 +733,14 @@ function visibleMessages(allProjects){
   // true of them; the project filter is (inProject) - a message has one too. Until the server has answered what he is
   // typing now, its last answer stays on screen under its own query.
   const archived = state.tab === 'archived';
+  // One record, one tab (inMessagesTab, bin/command-center-state.js): a
+  // message still waiting on him is listed only in Waiting on you, so a batch
+  // here can never reach it. Archived rows are never waiting.
+  const listed = archived ? m => !isMsgHeld(m) : m => inMessagesTab(m, state.said, state.view.items);
   const rows = !state.q.trim()
-    ? (archived ? state.archivedMessages : state.messages).filter(m => !isMsgHeld(m))
+    ? (archived ? state.archivedMessages : state.messages).filter(listed)
     : ((archived ? state.archivedFound : state.found) || {}).rows
-      ? (archived ? state.archivedFound : state.found).rows.filter(m => !isMsgHeld(m))
+      ? (archived ? state.archivedFound : state.found).rows.filter(listed)
       : [];
   // Messages splits into two (his ask 2026-09-24): Info takes only genuine
   // noise, Messages everything else - since his report 2026-09-28, anything
@@ -815,23 +819,26 @@ function passesState(it){
 function waitingMessages(){
   if (state.sfilter) return [];
   const q = state.q.trim().toLowerCase();
-  // waitingMessageRows (bin/command-center-state.js) is pure over state.messages
-  // and state.said alone - opening a row or typing into it touches neither, so
-  // that can never shrink this list on its own (his report 2026-09-24: "i had
-  // two items in waiting on you... clicked one... now there was only 1").
-  return waitingMessageRows(state.messages, state.said)
+  // waitingMessageRows (bin/command-center-state.js) is pure over the messages,
+  // what he said and the scanned items - opening a row or typing into it
+  // touches none of those, so that can never shrink this list on its own (his
+  // report 2026-09-24: "i had two items in waiting on you... clicked one... now
+  // there was only 1"). A reply moves only the message it answers, to Messages.
+  return waitingMessageRows(state.messages, state.said, state.view.items)
     .filter(m => !q || haystack(m).includes(q));
 }
 
 function visible(allProjects){
   const q = state.q.trim().toLowerCase();
-  const items = (state.view.items || []).filter(it =>
+  const items = (state.view.items || []).filter(it => onHisBoard(it) &&
     !isItemArchived(it) && !isItemHeld(it) &&
     passesState(it) && (!q || haystack(it).includes(q)));
   const rows = items.concat(waitingMessages());
   return allProjects ? rows : rows.filter(inProject);
 }
-const archivedItemsList = () => (state.view.items || []).filter(isItemArchived);
+// Only what firstmate put to him is on any of his tabs (onHisBoard).
+const boardItems = () => (state.view.items || []).filter(onHisBoard);
+const archivedItemsList = () => boardItems().filter(isItemArchived);
 // Archived is one list of every kind of row he can archive, drawn by the very
 // row builders the other tabs use (his report 2026-09-28: "archiving changes
 // where an item lives, never how it looks") and ordered by when each was
@@ -845,7 +852,7 @@ function archivedRows(){
   return orderRows(msgs.concat(items), state.group, true, archivedEpoch);
 }
 const archivedRowHtml = r => r.__msg ? messageRow(r, 'archived') : itemRow(r, 'archived');
-const heldItemsList = () => (state.view.items || []).filter(isItemHeld);
+const heldItemsList = () => boardItems().filter(isItemHeld);
 const heldMessagesList = () => state.messages.concat(state.archivedMessages)
   .filter((m, i, all) => all.findIndex(x => x.id === m.id) === i && isMsgHeld(m));
 
@@ -1026,7 +1033,7 @@ function itemRow(it, mode){
   else if (isStuck(it))   flag = '<span class="flag f-stuck">stuck</span>';
   else if (isPending(it)) flag = '<span class="flag f-sent">sent</span>';
   else if (isDeferred(it)) flag = `<span class="flag f-sent">until ${esc(it.deferred_until)}</span>`;
-  else if (it.closed) flag = '<span class="flag f-sent">closed</span>';
+  else if (it.closed) flag = settledFlag(it);
   else {
     const answered = state.said.filter(r => r.item_key === itemKey(it)).slice().reverse();
     if (answered.length) flag = threadBadgeHtml(threadStatus(threadEntries(answered)));
@@ -1090,17 +1097,14 @@ function wordOutcome(r){
     // Written down and on its way. The command has not answered yet, so
     // nothing is claimed about delivery until it does.
     case 'sending': return 'Going out now — the outcome appears when it answers';
-    // An answer or a note now only ever reaches firstmate's captain inbox:
-    // it is durably queued there, and firstmate closes the decision itself
-    // once it reads it - never claimed closed here.
-    case 'sent':
-      return r.kind === 'answer' ? 'Sent to firstmate.' : 'Delivered through ' + esc(r.route);
+    // An answer, a reply and a note all only ever reach firstmate's captain
+    // inbox, so each says so in the same words: durably queued there, and
+    // firstmate closes the decision itself once it reads it - never claimed
+    // closed here.
+    case 'sent': return 'Sent to firstmate.';
     case 'unknown':
       return 'Delivery unknown — it may already have arrived: ' + esc(r.detail || '');
-    default:
-      return r.kind === 'answer'
-        ? 'Not sent — try again. ' + esc(r.detail || '')
-        : 'Not sent: ' + esc(r.detail || '');
+    default: return 'Not sent — try again. ' + esc(r.detail || '');
   }
 }
 
@@ -1166,7 +1170,7 @@ function renderList(){
   // classification only exists client-side, over whatever window is loaded.
   // Both badges are exactly what visibleMessages() would show for that tab,
   // the same window-based rule n-hold already uses.
-  const unheldMsgs = (state.messages || []).filter(m => !isMsgHeld(m));
+  const unheldMsgs = (state.messages || []).filter(m => inMessagesTab(m, state.said, state.view.items));
   const infoCount = unheldMsgs.filter(isInfoOnlyMessage).length;
   $('#n-messages').textContent = unheldMsgs.length - infoCount + noteRows().length;
   $('#n-info').textContent = infoCount;
@@ -1174,14 +1178,13 @@ function renderList(){
     + archivedItemsList().length;
   $('#n-hold').textContent = heldItemsList().length + heldMessagesList().length;
   // waitingCount (bin/command-center-state.js) is pure over the scanned items,
-  // the messages and what he has said back - opening a row or typing into it
-  // touches none of those, so this cannot move on its own (see waitingMessages
-  // above).
+  // the messages and what he said - opening a row or typing into it touches
+  // neither, so this cannot move on its own (see waitingMessages above).
   $('#n-waiting').textContent = waitingCount(items, state.messages, state.said, nowSecs());
   // The count is what needs his attention right now: a decision waiting on
   // his call, or work already underway that a "0" badge would hide entirely -
   // Recently landed and Charted next stay read-only context, not counted.
-  $('#n-work').textContent = (state.work.captains_call || []).length
+  $('#n-work').textContent = workCalls().length
     + (state.work.underway || []).length;
   document.querySelectorAll('.tab').forEach(t =>
     t.setAttribute('aria-selected', String(t.dataset.tab === state.tab)));
@@ -1423,6 +1426,12 @@ function workStatusHtml(id){
   if (!s) return '';
   return `<div class="work-status">${esc(s)}</div>`;
 }
+// One record, one tab (his ruling 2026-09-28): a Captain's Call his board
+// already carries - in Waiting on you, or archived or held from there - is
+// listed and answered there, with the same box and send as every other row,
+// not here a second time with an inline box of its own.
+const workCalls = () => (state.work.captains_call || []).filter(r =>
+  !boardItems().some(it => it.id === r.id && (it.key || '') === (r.key || '')));
 function workDecisionRow(r){
   const sending = state.workSending[r.id] === 'Sending…';
   return `<div class="work-row" data-work-id="${esc(r.id)}">
@@ -1469,7 +1478,7 @@ function renderWork(){
   if (w.error) html += `<div class="archive-note" style="background:var(--warn-soft)">
     <b>The work board could not be fully read.</b> ${esc(w.error)}</div>`;
   else if (!state.workRead) html += `<div class="archive-note">Reading the fleet…</div>`;
-  html += workSectionHtml("Captain’s Call", w.captains_call || [], workDecisionRow,
+  html += workSectionHtml("Captain’s Call", workCalls(), workDecisionRow,
     'Nothing is waiting on your call.');
   html += workSectionHtml('Underway', w.underway || [], workUnderwayRow, 'Nothing is underway.');
   html += workSectionHtml('Recently landed', w.landed || [], workLandedRow, 'Nothing landed recently.');
@@ -1583,21 +1592,12 @@ function rowsHtml(rows, rowFn, emptyText, isMessage, label){
 // His standing rule: every row names the project, the worktree and the branch.
 // A field the record does not carry says so; none of the three is ever guessed.
 function messageRow(m, mode){
-  const replied = repliesTo(m).length;
-  // A latest reply that only asked firstmate something back is not the
-  // decision this message is waiting on (his report 2026-09-24), so a message
-  // still tagged __msg (still listed in Waiting on you) despite a reply says
-  // what it is actually waiting on now, rather than the plain "replied" flag.
-  // Archived tags its messages too (archivedRows), so the tab is checked as
-  // well: an archived message looks exactly as it did in Messages.
-  const latest = latestReplyTo(m);
-  const clarifying = m.__msg && state.tab === 'waiting' && latest
-    && looksLikeClarifyingReply(latest.text);
-  // The thread marker: only worth computing once he has actually replied, and
-  // only shown when neither of the two more specific badges above already
-  // says something about the same reply.
-  const status = replied && !clarifying
-    ? threadStatus(threadEntries(repliesTo(m).slice().reverse())) : null;
+  // One marker, the same in every tab the message is listed in: settled by
+  // firstmate (the decision it asked about is closed), else the thread's own
+  // "awaiting firstmate"/"answered" once he has replied.
+  const named = replyTarget(m, state.view.items).item;
+  const replies = repliesTo(m);
+  const status = replies.length ? threadStatus(threadEntries(replies.slice().reverse())) : null;
   const where = [
     m.project || 'Not recorded',
     m.worktree ? m.worktree.replace(/^.*\//, '') : 'no worktree',
@@ -1609,9 +1609,8 @@ function messageRow(m, mode){
     <span class="item-top">
       <span class="item-title">${esc(m.title)}</span>
       ${state.failed[msgKey(m)] ? '<span class="flag f-stuck">not sent</span>'
-        : clarifying ? '<span class="flag f-sent">awaiting firstmate’s explanation</span>'
-        : status ? threadBadgeHtml(status)
-        : replied ? '<span class="flag f-sent">replied</span>' : ''}
+        : named && named.closed ? settledFlag(named)
+        : threadBadgeHtml(status)}
       <span class="age" title="from the time firstmate sent it">${ageLabel(m)}</span>
       ${recvDotHtml(latestReplyTo(m))}
     </span>
@@ -1647,6 +1646,79 @@ const threadEntryHtml = e => e.kind === 'you' ? `<div class="msg you">
       <div class="msg-who">Firstmate<span class="t">${esc(localTime(e.row.at))}</span></div>
       <div class="msg-text">${para(e.row.text) || '<p class="quiet">No text recorded.</p>'}</div>
     </div>`;
+
+// His replies and firstmate's answers to them, the same section on every pane.
+function saidBackHtml(entries){
+  const short = state.saidDropped ? `<div class="archive-note" style="background:var(--warn-soft)"><b>Your
+       own words are shortened here.</b> ${state.saidDropped} older entr${
+       state.saidDropped === 1 ? 'y is' : 'ies are'} not shown, so a reply you
+       sent long ago may be missing from the thread below.</div>` : '';
+  return short + (entries.length ? `<div class="thread"><h3>${entries.some(e => e.kind === 'firstmate')
+    ? 'What you said back — and firstmate’s answer' : 'What you said back'}</h3>${
+    entries.map(threadEntryHtml).join('')}</div>` : '');
+}
+
+// A decision firstmate has closed stays listed until his own Archive, so it
+// says it is settled and shows the answer that settled it (closed_answer in
+// command-center.py) - his report 2026-09-28: a question firstmate had already
+// answered itself sat there looking like it still wanted him.
+function settledFlag(it){
+  return `<span class="flag f-sent">${it.answer ? 'answered by firstmate' : 'closed'}</span>`;
+}
+function settledHtml(it){
+  if (!it || !it.closed) return '';
+  const a = it.answer;
+  return `<div class="thread"><h3>Firstmate has settled this</h3><div class="msg them">
+      <div class="msg-who">Firstmate<span class="t">${esc(a ? a.label : 'Closed')} · ${
+        esc(localTime(it.closed_at))}</span></div>
+      <div class="msg-text">${a ? para(a.text)
+        : '<p class="quiet">Firstmate closed this without recording an answer.</p>'}</div>
+      ${a ? `<div class="proof">as recorded in ${esc(a.from)}</div>` : ''}
+    </div></div>`;
+}
+
+// ONE reply box, on every pane - an item's and a message's alike, whichever
+// tab it was opened from (his report 2026-09-28: "when i click send to
+// firstmate why the hell it behaves differently then the messages tab?"). The
+// same label, button, notes and draft handling, and the same send (sendReply).
+// `going` is the one line that differs: where this record's reply goes.
+function replyBoxHtml(key, going, warn){
+  const draft = state.draft[key] || '';
+  const verdict = SEND_VERDICT[(state.outcome[key] || {}).outcome];
+  const sending = isSending(key);
+  return `<div class="reply">
+      ${warn || ''}
+      <label for="reply">Your reply — in your own words</label>
+      <textarea id="reply" placeholder="Type here…">${esc(draft)}</textarea>
+      ${attachHtml(key)}
+      <div class="reply-foot">
+        <button class="send" id="send" ${
+          draft.trim() && !state.sending && !verdict && !sending ? '' : 'disabled'}>${
+          verdict ? esc(verdict.label)
+                  : sending ? 'Going out now'
+                  : state.sending ? 'Sending…' : 'Send to firstmate'}</button>
+        ${verdict
+          ? '<button class="defer" id="sendanyway">Send anyway — this may be a second copy</button>'
+          : ''}
+        ${draft.trim() ? '<span class="draft-flag">Draft kept</span>' : ''}
+        <span class="send-note" id="sendnote">${verdict
+          ? verdict.note + ' <span class="mono">' + esc(state.outcome[key].detail || '') + '</span>'
+          : sending
+          ? 'Written down. Going out now — the outcome appears here when the command answers.'
+          : failedNote(key) || going}</span>
+      </div>
+    </div>`;
+}
+function wireReplyBox(key){
+  const ta = $('#reply');
+  ta.addEventListener('input', () => {
+    state.draft[key] = ta.value;
+    save('cc.draft', state.draft);
+    $('#send').disabled = !ta.value.trim() || state.sending || isSending(key)
+      || !!SEND_VERDICT[(state.outcome[key] || {}).outcome];
+  });
+  wireAttach($('.reply'), key);
+}
 
 // A note's own pane: his note, then every answer firstmate recorded against
 // it, or plainly nothing yet. It has no reply box of its own - each answer is
@@ -1710,15 +1782,10 @@ function threadHtml(it){
 // from the message's own record.
 function renderMessagePane(m){
   const key = msgKey(m);
-  const draft = state.draft[key] || '';
-  // The same verdict an answer gets, on the same route: a reply to a waiting
-  // task IS a steer, so an unconfirmed delivery forbids a second one here too.
-  const verdict = SEND_VERDICT[(state.outcome[key] || {}).outcome];
   // Where it is about to go, by the rule the server routes by. He is told
   // before he sends, because a reply delivered as the answer to a question he
   // was not looking at is the worst thing this page could do.
   const target = replyTarget(m, state.view.items);
-  const sending = isSending(key);
   const going = (m.question && !(state.scanned && state.confirmed))
     ? 'Where this goes cannot be told yet: the records have not been read. The server decides it from them when you send.'
     : target.kind === 'answer'
@@ -1734,11 +1801,6 @@ function renderMessagePane(m){
   const status = threadStatus(entries);
   const cell = (label, value, na) =>
     `<div><dt>${label}</dt><dd class="${value ? '' : 'na'}">${esc(value || na)}</dd></div>`;
-  // In order: his reply, then - only when the matching rule attached one -
-  // firstmate's own answer to it, before his next reply. A wrong thread is
-  // worse than none, so an entry only ever appears here when threadRows
-  // (bin/command-center-state.js) actually found it.
-  const thread = entries.map(threadEntryHtml).join('');
   // A message firstmate recorded as the answer to something he sent
   // (answeredSend) shows that first: his query, then this answer.
   const asked = answeredSend(m, state.said);
@@ -1761,33 +1823,9 @@ function renderMessagePane(m){
       <div class="msg-who">Firstmate<span class="t">${esc(localTime(m.at))}</span></div>
       <div class="msg-text">${para(m.text) || '<p class="quiet">No text recorded.</p>'}</div>
     </div>
-    ${state.saidDropped ? `<div class="archive-note" style="background:var(--warn-soft)"><b>Your
-       own words are shortened here.</b> ${state.saidDropped} older entr${
-       state.saidDropped === 1 ? 'y is' : 'ies are'} not shown, so a reply you
-       sent long ago may be missing from the thread below.</div>` : ''}
-    ${thread ? `<div class="thread"><h3>${entries.some(e => e.kind === 'firstmate')
-      ? 'What you said back — and firstmate’s answer' : 'What you said back'}</h3>${thread}</div>` : ''}
-    <div class="reply">
-      <label for="reply">Your reply — in your own words</label>
-      <textarea id="reply" placeholder="Type here…">${esc(draft)}</textarea>
-      ${attachHtml(key)}
-      <div class="reply-foot">
-        <button class="send" id="sendreply" ${
-          draft.trim() && !state.sending && !verdict && !sending ? '' : 'disabled'}>${
-          verdict ? esc(verdict.label)
-                  : sending ? 'Going out now'
-                  : state.sending ? 'Sending…' : 'Reply to firstmate'}</button>
-        ${verdict
-          ? '<button class="defer" id="sendanyway">Send anyway — this may be a second copy</button>'
-          : ''}
-        ${draft.trim() ? '<span class="draft-flag">Draft kept</span>' : ''}
-        <span class="send-note" id="sendnote">${verdict
-          ? verdict.note + ' <span class="mono">' + esc(state.outcome[key].detail || '') + '</span>'
-          : sending
-          ? 'Written down. Going out now — the outcome appears here when the command answers.'
-          : failedNote(key) || going}</span>
-      </div>
-    </div>
+    ${target.settled ? settledHtml(target.item) : ''}
+    ${saidBackHtml(entries)}
+    ${replyBoxHtml(key, going)}
     <div class="reply-foot">
       <button class="defer ${archiveRecvClass(latestReplyTo(m))}" data-archive-msg="${esc(m.id)}" ${state.archiving === m.id ? 'disabled' : ''}>${
         m.archived ? 'Restore to Messages' : state.archiving === m.id ? 'Archiving…' : 'Archive'}</button>
@@ -1796,13 +1834,7 @@ function renderMessagePane(m){
         : `<button class="defer" data-hold-msg="${esc(m.id)}">Hold</button>`}
     </div>
   </div>`);
-  const ta = $('#reply');
-  ta.addEventListener('input', () => {
-    state.draft[key] = ta.value;
-    save('cc.draft', state.draft);
-    $('#sendreply').disabled = !ta.value.trim() || state.sending || !!verdict || sending;
-  });
-  wireAttach($('.reply'), key);
+  wireReplyBox(key);
 }
 
 function renderMain(){
@@ -1824,36 +1856,22 @@ function renderMain(){
   if (!it){
     paintMain('', `<div class="blank"><strong>Pick something on the left.</strong>
       <span>Everything firstmate has said to you, newest first, with a box to reply in.<br>
-      <b>Waiting on you</b> is the queue it is still holding — questions and stopped workers.<br>
+      <b>Waiting on you</b> is what firstmate has put to you and is still waiting on.<br>
       New things appear on their own — you never reload, and you never get a new link.</span></div>`);
     return;
   }
   const L = LISTEN[it.listen] || LISTEN.unknown;
   const detail = para(it.detail);
-  const draft = state.draft[itemKey(it)] || '';
-  const going = isSending(itemKey(it));
-  const verdict = SEND_VERDICT[(state.outcome[itemKey(it)] || {}).outcome];
-  // Approved proposal section 7 proves delivery by the steering record existing;
-  // until it does, this is the captain's own way out - he is the one who can look.
-  const anyway = verdict
-    ? '<button class="defer" id="sendanyway">Send anyway — this may be a second copy</button>'
-    : '';
-  // What he has answered here, in the same format the Messages queue shows
-  // his own words in - a proper "You" entry with its time and its outcome,
-  // never a bare quoted fragment. Derived from the durable record, oldest
-  // first like any other conversation, so a superseding answer reads as what
-  // it is rather than replacing what came before it.
+  // What he has said here, oldest first, interleaved with firstmate's answers
+  // - the same thread, built the same way, as a message's own pane.
   const answered = state.said.filter(r => r.item_key === itemKey(it)).slice().reverse();
   const answerEntries = threadEntries(answered);
   const answerStatus = threadStatus(answerEntries);
-  // Same rule and same order as a message's own pane (threadEntries): his
-  // answer, then - only when threadRows actually found one - firstmate's own
-  // reply to it, before his next answer.
-  const answeredHtml = answerEntries.length ? `<div class="thread"><h3>${
-    answerEntries.some(e => e.kind === 'firstmate')
-      ? 'What you answered — and firstmate’s reply' : 'What you answered'}</h3>${
-    answerEntries.map(threadEntryHtml).join('')
-  }</div>` : '';
+  // Every answer now reaches firstmate's captain inbox (deliver_to_inbox in
+  // command-center.py), whatever the item is.
+  const going = it.closed
+    ? 'Firstmate has already settled this, so this reaches it as a note about it.'
+    : 'Goes to firstmate as your answer to this decision, and nothing else.';
   const cell = (label, value, na) =>
     `<div><dt>${label}</dt><dd class="${value ? '' : 'na'}">${esc(value || na)}</dd></div>`;
   const deadWarn = it.listen === 'dead' ? `<div class="dead-warn">
@@ -1880,31 +1898,10 @@ function renderMain(){
       <div class="msg-who">Firstmate<span class="t">${esc(ageTitle(it))}</span></div>
       <div class="msg-text">${detail || '<p class="quiet">No detail recorded.</p>'}</div>
     </div>
-    ${answeredHtml}
+    ${settledHtml(it)}
+    ${saidBackHtml(answerEntries)}
     ${threadHtml(it)}
-    <div class="reply">
-      ${deadWarn}
-      <label for="reply">Your answer — in your own words</label>
-      <textarea id="reply" placeholder="Type here…">${esc(draft)}</textarea>
-      ${attachHtml(itemKey(it))}
-      <div class="reply-foot">
-        <button class="send" id="send" ${
-          draft.trim() && !state.sending && !verdict && !going ? '' : 'disabled'}>${
-          verdict ? esc(verdict.label)
-                  : going ? 'Going out now'
-                  : state.sending ? 'Sending…' : 'Send to firstmate'}</button>
-        <button class="defer" id="defer">Not now</button>
-        ${anyway}
-        ${draft.trim() ? '<span class="draft-flag">Draft kept</span>' : ''}
-        <span class="send-note" id="sendnote">${verdict
-          ? verdict.note + ' <span class="mono">' + esc(state.outcome[itemKey(it)].detail || '') + '</span>'
-          : going
-          ? 'Written down. Going out now — the outcome appears here when the command answers.'
-          : failedNote(itemKey(it))
-          || 'Goes through ' + (it.source === 'hold' ? 'the decision record'
-                                                    : 'the worker’s steering inbox') + '.'}</span>
-      </div>
-    </div>
+    ${replyBoxHtml(itemKey(it), going, deadWarn)}
     <div class="reply-foot">
       <button class="defer ${archiveRecvClass(latestAnswerFor(it))}" data-archive-item="${esc(itemKey(it))}">${
         isItemArchived(it) ? 'Restore' : 'Archive'}</button>
@@ -1914,13 +1911,7 @@ function renderMain(){
     </div>
   </div>`);
 
-  const ta = $('#reply');
-  ta.addEventListener('input', () => {
-    state.draft[itemKey(it)] = ta.value;
-    save('cc.draft', state.draft);
-    $('#send').disabled = !ta.value.trim() || state.sending || !!verdict || going;
-  });
-  wireAttach($('.reply'), itemKey(it));
+  wireReplyBox(itemKey(it));
 }
 
 // ONE OWNER OF THE PANE'S HTML. Whatever rebuilds it, his place survives: the
@@ -2526,91 +2517,47 @@ function attachHtml(key){
     <div data-attach-strip="${esc(key)}">${imageStripHtml(key)}</div>`;
 }
 
-// The click never waits on a shell command. The server writes his words to the
-// durable record and answers 202 before it runs anything, so this returns as
-// soon as they are safe, he moves straight to the next item, and the outcome
-// appears on the row he answered when the command answers (applyOutcomes).
-async function sendAnswer(){
-  const it = (state.view.items || []).find(i => itemKey(i) === state.open);
-  if (!it) return;
-  const text = (state.draft[itemKey(it)] || '').trim();
-  if (!text || state.sending || isSending(itemKey(it))) return;
-  const images = (state.images[itemKey(it)] || []).map(im => im.id);
-  state.sending = true; renderMain();
-  let ok = false, data = {};
-  try {
-    ({ ok, data } = await post('/api/answer',
-      { home: it.home, id: it.id, source: it.source, key: it.key || '', text, images }));
-  } catch (err) {
-    // The request never came back, so it is not known whether the server took
-    // his words. On the SEND route the steer may already sit on the worker's
-    // inbox, so delivery is unknown and a second try is a second steer. A HOLD
-    // writes a local record with no delivery plane and fm-captain-hold.sh
-    // documents an exact retry as idempotent, so it is a plain failure.
-    data = transportFailure(it.source, String(err.message || err));
-  } finally {
-    state.sending = false;
-  }
-  if (!ok || !data.ok){
-    const verdict = verdictFor(it.source, data.outcome, data.detail,
-                               (it.sent || []).length);
-    if (verdict){
-      state.outcome[itemKey(it)] = verdict;
-      save('cc.outcome', state.outcome);
-      await loadSaid();
-      render();
-      return;
-    }
-    await loadSaid();
-    render();
-    const note = $('#sendnote');
-    if (note) note.innerHTML = `<b style="color:var(--hot)">Not sent.</b> ${
-      esc(data.error || data.detail || 'the command failed')} — your words are still here.`;
-    return;
-  }
-  // Accepted, not delivered: his words stay in the box until the outcome row
-  // says the send landed, and the item he just answered is never the one this
-  // opens next - the view has not been rescanned, so it still lists it and a
-  // second click there would really send a second answer.
-  state.pending[data.sid] = {key: itemKey(it), text, at: Date.now()};
-  delete state.failed[itemKey(it)];
-  delete state.images[itemKey(it)];
-  save('cc.pending', state.pending); save('cc.failed', state.failed); save('cc.images', state.images);
-  await loadSaid();
-  const next = ordered(visible()).find(r => itemKey(r) !== itemKey(it));
-  state.open = next ? itemKey(next) : null;
-  render();
-}
-
+// The ONE send behind every reply box (replyBoxHtml), an item's answer and a
+// message's reply alike. The click never waits on a shell command: the server
+// writes his words to the durable record and answers 202 before it runs
+// anything, and the outcome appears on the row he answered when the command
+// answers (applyOutcomes). Only the endpoint differs - the server decides from
+// the record where the words go. The pane STAYS on the row he answered: it
+// used to jump to the next item after an item's answer (but not a message's),
+// so his very next click - Archive - landed on a row he had never opened (his
+// report 2026-09-28: "i replied oone. and then the second one disappeard").
 async function sendReply(){
-  const m = openedMessage();
-  if (!m) return;
-  const key = msgKey(m);
+  const key = state.open;
+  const m = String(key || '').startsWith('msg/') ? openedMessage() : null;
+  const it = m ? null : (state.view.items || []).find(i => itemKey(i) === key);
+  if (!m && !it) return;
   const text = (state.draft[key] || '').trim();
   if (!text || state.sending || isSending(key)) return;
   const images = (state.images[key] || []).map(im => im.id);
   state.sending = true; renderMain();
   let ok = false, data = {};
   try {
-    ({ ok, data } = await post('/api/reply', { msg: m.id, text, images }));
+    ({ ok, data } = m
+      ? await post('/api/reply', { msg: m.id, text, images })
+      : await post('/api/answer', { home: it.home, id: it.id, source: it.source,
+                                    key: it.key || '', text, images }));
   } catch (err) {
-    // The request never came back. A reply now only ever reaches firstmate's
+    // The request never came back. Every send only ever reaches firstmate's
     // captain inbox, so the worst case is a second note, never a second steer
     // landing on a worker - safe to just say it failed and let him try again.
-    data = transportFailure('status', String(err.message || err));
+    data = transportFailure(it ? it.source : 'status', String(err.message || err));
   } finally {
     state.sending = false;
   }
   if (ok && data.ok){
-    // The server says which item it is steering, if any; that is what makes
-    // this send visible on the Waiting on you row as well as here.
-    state.pending[data.sid] = {key, item: data.item_key || null, text,
-                               at: Date.now()};
+    // Accepted, not delivered: his words stay in the box until the outcome row
+    // says the send landed. A reply that took a message's answer route names
+    // the item it answers too, so the send shows on that row as well.
+    state.pending[data.sid] = {key, item: data.item_key || null, text, at: Date.now()};
     delete state.failed[key];
     delete state.images[key];
-    // A reply never archives anything on its own any more - only his own
-    // explicit Archive click does that. Sometimes a reply is just a comment
-    // he wants to keep checking on.
+    // A reply never archives or removes anything on its own - only his own
+    // explicit Archive, Hold or Delete does.
     save('cc.pending', state.pending); save('cc.failed', state.failed); save('cc.images', state.images);
     await loadSaid();
     render();
@@ -2620,22 +2567,6 @@ async function sendReply(){
     return;
   }
   await loadSaid();
-  // An unconfirmed reply forbids a resend for exactly the reason an
-  // unconfirmed answer does, so it leaves the same standing verdict rather
-  // than a line of text the next render wipes. His words stay in the box.
-  const verdict = verdictFor('status', data.outcome, data.detail,
-                             repliesTo(m).length);
-  if (verdict){
-    state.outcome[key] = verdict;
-    // The request never came back, so which route ran is unknown: if this
-    // message named a question that is still waiting, that item is the one the
-    // steer may already have reached, and it is locked here too.
-    const target = replyTarget(m, state.view.items);
-    if (target.kind === 'answer') state.outcome[itemKey(target.item)] = verdict;
-    save('cc.outcome', state.outcome);
-    render();
-    return;
-  }
   render();
   const note = $('#sendnote');
   if (note) note.innerHTML = `<b style="color:var(--hot)">Not sent.</b> ${
@@ -2756,9 +2687,7 @@ document.addEventListener('click', async e => {
     }
     return;
   }
-  if (e.target.id === 'send'){ await sendAnswer(); return; }
-  if (e.target.id === 'sendreply'){ await sendReply(); return; }
-  if (e.target.id === 'defer'){ state.open = null; render(); return; }
+  if (e.target.id === 'send'){ await sendReply(); return; }
   if (e.target.id === 'sendanyway'){
     // heldWith comes from bin/command-center-state.js: one deliberate decision
     // to send again releases that send on every surface it was held against,

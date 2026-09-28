@@ -11,7 +11,7 @@ const {
   replyTarget, foldSaid, wordsAfter,
   listSignature, mayRelease, logRead, sendState, sendKeys, sameWords,
   heldWith, captureBand, saidDigest, mergeMessages,
-  waitingCount,
+  waitingCount, waitingMessageRows, inMessagesTab, onHisBoard,
   isInfoOnlyMessage, saidTaskId, matchAnswer, threadRows, threadStatus,
   recordedAnswers, answeredSend, noteThreads,
 } = require(path.join(__dirname, '..', 'web', 'command-center-state.js'));
@@ -296,6 +296,22 @@ test('a reply to a message that is not a question is a note', () => {
     'a settled question still claimed the answer route');
 });
 
+// A decision firstmate already closed is still served (remember_waiting), but
+// the server routes a reply to it as a note (waiting_question skips closed
+// ones), so the pane must say the same - and hand back the closed item so it
+// can show the answer firstmate recorded.
+test('a question whose decision firstmate closed is settled, not answerable', () => {
+  const closed = Object.assign({}, stopped, { closed: true, answer: { text: 'REST' } });
+  assert.deepStrictEqual(
+    replyTarget({ question: true, task: 't1', question_key: 'k1' }, [closed]),
+    { kind: 'note', settled: true, item: closed },
+    'a closed decision was offered as the answer route');
+  assert.deepStrictEqual(
+    replyTarget({ question: true, task: 't1', question_key: 'k1' }, [closed, stopped]),
+    { kind: 'answer', item: stopped },
+    'a reopened decision was shadowed by its old closed copy');
+});
+
 test('a question is never answered against another home', () => {
   assert.strictEqual(
     replyTarget({ question: true, task: 't1' },
@@ -349,6 +365,50 @@ test('a reply that only asks firstmate something back never settles a waiting me
     { msg: 'm1', text: 'Yes, merge it.' },
     { msg: 'm1', text: 'Which branch do you mean?' },
   ]), false, 'the latest reply is what decides, not an earlier clarifying one');
+});
+
+// His ruling 2026-09-28: "If an item is in Waiting for You, don't put the same
+// item in the message tab" - archiving everything in Messages had taken rows
+// out of Waiting on you. A message is in exactly one of the two, and only his
+// reply to IT (or firstmate settling its decision) moves it across.
+test('a message is listed in Waiting on you or in Messages, never both', () => {
+  const items = [Object.assign({}, stopped, { closed: true })];
+  const messages = [
+    { id: 'q1', text: 'Merge feature/x?' },
+    { id: 'q2', text: 'Should I ship it?' },
+    { id: 'q3', question: true, task: 't1', question_key: 'k1', text: 'Which shape?' },
+    { id: 'n1', text: 'Deployed to staging.' },
+    { id: 'h1', text: 'Tabs or spaces?', held: true },
+  ];
+  const said = [{ msg: 'q2', text: 'Ship it.' }];
+  const waiting = waitingMessageRows(messages, said, items).map(m => m.id);
+  const listed = messages.filter(m => inMessagesTab(m, said, items)).map(m => m.id);
+  assert.deepStrictEqual(waiting, ['q1'], 'only the unanswered question waits on him');
+  assert.deepStrictEqual(listed, ['q2', 'q3', 'n1'],
+    'an answered question, one firstmate settled, and a plain message are what Messages lists');
+  assert.strictEqual(waiting.filter(id => listed.includes(id)).length, 0,
+    'a message was listed in two tabs at once');
+  assert.strictEqual(waitingCount(items, messages, said, 0) + listed.length, 4,
+    'the two badges count some message twice, or a held one at all');
+  // A reply to q1 moves q1 and nothing else.
+  const after = [{ msg: 'q1', text: 'Yes, merge it.' }].concat(said);
+  assert.deepStrictEqual(waitingMessageRows(messages, after, items).map(m => m.id), []);
+  assert.deepStrictEqual(messages.filter(m => inMessagesTab(m, after, items)).map(m => m.id),
+    ['q1', 'q2', 'q3', 'n1'], 'a reply moved a message other than the one it answered');
+});
+
+// His ruling 2026-09-28 ("CI check failing: ... provider reported failure" -
+// "what the fuck is this?"): only what firstmate put to him is on his board. A
+// worker's own status decision is the worker asking firstmate.
+test('a worker status decision is never on his board, a captain hold is', () => {
+  const items = [
+    { home: 'main', source: 'hold', id: 'a', key: 'a' },
+    { home: 'main', source: 'status', id: 'b', key: 'ci-failing', title: 'CI check failing' },
+    { home: 'main', source: 'status', id: 'c', key: 'k', closed: true },
+  ];
+  assert.deepStrictEqual(items.filter(onHisBoard).map(it => it.id), ['a']);
+  assert.strictEqual(waitingCount(items, [], [], 0), 1,
+    'a worker status decision was counted on his board');
 });
 
 // A scanned captain-hold item has no other tab to fall back into the way a

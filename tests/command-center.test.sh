@@ -1218,6 +1218,8 @@ test_a_url_becomes_a_real_link_on_every_surface_that_shows_free_text() {
     "a Waiting-on-you item's own question text does not link URLs"
   assert_contains "$body" 'linked(m.text)}</div>${trackHtml(m)}' \
     "what you sent to a worker does not link URLs"
+  assert_contains "$body" '${a ? para(a.text)' \
+    "the answer firstmate recorded when it closed a decision does not link URLs"
   # A threaded conversation's own bubbles (a message's, an item's and a
   # note's own pane) are all drawn by the one threadEntryHtml, which reads its
   # row as `e.row`: his words through linked(), firstmate's through para().
@@ -2725,6 +2727,13 @@ test_an_item_firstmate_closes_stays_waiting_until_he_parks_it() {
     bash -c "curl -s -m 60 'http://127.0.0.1:$port/api/items' | jq -e '.items[] | select(.id == \"cc-live\" and .closed == true)'"
   assert_equals true "$(waiting_item "$port" main/status/t-ask/k-ask '.closed')" \
     "a decision firstmate resolved itself left Waiting on you"
+  # His report 2026-09-28: a question firstmate had already answered itself
+  # sat there looking like it still wanted him. It carries that answer; one
+  # closed with nothing recorded carries none rather than an invented one.
+  assert_equals 'firstmate: REST' "$(waiting_item "$port" main/status/t-ask/k-ask '.answer.text')" \
+    "a decision firstmate resolved itself did not carry the answer it recorded"
+  assert_equals null "$(waiting_item "$port" main/hold/cc-live/cc-live '.answer')" \
+    "a hold closed with no recorded answer was given one"
   assert_contains "$(waiting_item "$port" main/hold/cc-live/cc-live '.detail')" 'Body first paragraph.' \
     "a closed hold lost the text he needs to come back to"
   assert_equals closed "$(waiting_item "$port" main/hold/cc-live/cc-live '.listen')" \
@@ -2795,7 +2804,7 @@ PYEOF
     globalThis.applyArchiveOverride = () => {};
     const f = fetch; globalThis.fetch = (u, o) => f(base + u, o);
     vm.runInThisContext(fs.readFileSync(code, "utf8"));
-    const waiting = () => waitingMessageRows(state.messages, []).some(m => m.id === "q-old");
+    const waiting = () => waitingMessageRows(state.messages).some(m => m.id === "q-old");
     (async () => {
       await loadMessages();
       const first = waiting();
@@ -2816,6 +2825,141 @@ PYEOF
   assert_contains "$out" '"more":false' \
     "the page stopped walking the log with unarchived messages still unread"
   pass "an untouched question stays waiting however many newer messages arrive"
+}
+
+# His reports 2026-09-28. "again waiting on you i replied oone. and then the
+# second one disappeard": answering an item jumped the pane to the NEXT row, so
+# his Archive a moment later archived a row he never opened. "Don't duplicate
+# the items. If an item is in Waiting for You, don't put the same item in the
+# message tab": a question also listed in Messages went with a batch Archive
+# there. And "CI check failing ..." - "what the fuck is this?": a worker's own
+# status decision, firstmate's to answer, sat on his board. Several rows wait
+# here; one hold and one message are answered through the page's own served
+# Send button against the real server, firstmate then closes the hold, and the
+# message he answered is the only row that moves - to Messages - across that
+# poll and a restart, with the pane still on the row he answered, no record in
+# two tabs, no worker decision anywhere, and a batch Archive of everything in
+# Messages touching nothing in Waiting on you.
+board_tabs() {  # <port> - {"waiting": row keys in its oldest-first order, "messages": sorted row keys}
+  local body
+  body=$(jq -n --argjson i "$(curl -s -m 60 "http://127.0.0.1:$1/api/items")" \
+               --argjson m "$(curl -s -m 30 "http://127.0.0.1:$1/api/messages")" \
+               --argjson s "$(curl -s -m 30 "http://127.0.0.1:$1/api/said")" '{i: $i, m: $m, s: $s}')
+  node -e '
+    const st = require(process.argv[1]);
+    const {i, m, s} = JSON.parse(process.argv[2]);
+    const said = st.foldSaid(s.said), msgs = m.messages.map(st.shapeMessage);
+    const rows = st.waitingItems(i.items, Date.now() / 1000)
+      .concat(st.waitingMessageRows(msgs, said, i.items));
+    const key = r => r.__msg ? "msg/" + r.id : st.itemKey(r);
+    process.stdout.write(JSON.stringify({
+      waiting: st.orderRows(rows, "oldest").map(key),
+      messages: msgs.filter(x => st.inMessagesTab(x, said, i.items)).map(x => "msg/" + x.id).sort(),
+    }));
+  ' "$ROOT/web/command-center-state.js" "$body"
+}
+
+test_replying_to_one_waiting_row_moves_nothing_else() {
+  local home port body before after out expected
+  home="$TMP_ROOT/reply-scope"
+  seed_home "$home"
+  printf 'needs-decision [key=k-a]: [2026-09-27T01:00:00Z] REST or RPC?\n' > "$home/state/t-a.status"
+  printf 'blocked [key=ci]: [2026-09-27T02:00:00Z] CI check failing: Behavior portable serial 3 - provider reported failure\n' \
+    > "$home/state/t-b.status"
+  printf '%s\n' \
+    '{"id":"q-merge","at":"2026-09-27T03:00:00Z","title":"Merge the diamond stack?","text":"Merge the diamond stack?"}' \
+    '{"id":"q-ship","at":"2026-09-27T04:00:00Z","title":"Ship it?","text":"Should I ship the koin build?"}' \
+    '{"id":"n-progress","at":"2026-09-27T05:00:00Z","title":"progress","text":"Deployed to staging."}' \
+    > "$home/data/captain-messages.jsonl"
+  start_server "$home" || fail "the server did not start"
+  port=$SERVER_PORT
+  waiting_item "$port" main/status/t-b/ci '.id' | grep -q t-b \
+    || fail "the fixture's worker decision was not even scanned, so this proves nothing"
+  before=$(board_tabs "$port")
+  assert_equals '{"waiting":["main/hold/cc-live/cc-live","msg/q-merge","msg/q-ship"],"messages":["msg/n-progress"]}' \
+    "$before" "his board did not list exactly what firstmate put to him, each in one tab"
+
+  # The page's own Send button, as served, against the real server: its click
+  # handler and whatever send it calls, pressed on one item's pane and on one
+  # message's pane.
+  body=$(curl -s -m 30 "http://127.0.0.1:$port/")
+  printf '%s\n' "$body" | awk '/^async function (post|send[A-Za-z]*)\(/,/^}/;
+    /^document.addEventListener\(.click./,/^}\);/' > "$TMP_ROOT/send.js"
+  assert_contains "$(cat "$TMP_ROOT/send.js")" "e.target.id === 'send'" \
+    "the served page carries no Send button handler to run"
+  out=$(node -e '
+    const fs = require("fs"), vm = require("vm");
+    const [stateFile, code, base] = process.argv.slice(1);
+    Object.assign(globalThis, require(stateFile));
+    const f = fetch; globalThis.fetch = (u, o) => f(base + u, o);
+    const g = globalThis;
+    g.state = {draft: {}, images: {}, pending: {}, failed: {}, outcome: {}, sending: false,
+               view: {}, selected: new Set()};
+    g.save = g.render = g.renderMain = g.renderList = () => {};
+    g.loadSaid = async () => {};
+    g.isSending = () => false;
+    g.$ = () => null;
+    g.esc = s => String(s);
+    g.messages = [];
+    g.openedMessage = () => messages.find(m => "msg/" + m.id === state.open) || null;
+    g.visible = () => state.view.items.concat(messages.map(m => Object.assign({__msg: true}, m)));
+    g.ordered = rows => rows;
+    let handler = null;
+    g.document = {addEventListener: (type, fn) => { if (type === "click") handler = fn; }};
+    const pressSend = () => handler({target: {id: "send", closest: () => null}});
+    vm.runInThisContext(fs.readFileSync(code, "utf8"));
+    (async () => {
+      state.view = await (await f(base + "/api/items")).json();
+      messages = (await (await f(base + "/api/messages")).json()).messages;
+      const out = [];
+      for (const key of ["main/hold/cc-live/cc-live", "msg/q-ship"]) {
+        state.open = key;
+        state.draft[key] = "Go with the first one.";
+        await pressSend();
+        out.push(state.open === key ? "stayed" : "moved to " + state.open);
+      }
+      process.stdout.write(out.join(",") + " " + Object.keys(state.pending).length);
+    })().catch(e => { console.error(e.stack); process.exit(1); });
+  ' "$ROOT/web/command-center-state.js" "$TMP_ROOT/send.js" "http://127.0.0.1:$port" 2>&1) \
+    || fail "the page's own Send button could not be run: $out"
+  assert_equals "stayed,stayed 2" "$out" \
+    "a send moved the pane off the row he answered, so his next click lands on another"
+  wait_for "the item's answer never landed" said_has "$port" '.kind == "answer" and .outcome == "sent"'
+  wait_for "the message's reply never landed" said_has "$port" '.msg == "q-ship" and .outcome == "sent"'
+
+  # Firstmate reads his answer and closes that hold, recording his decision.
+  python3 - "$home/data/backlog.md" <<'PYEOF'
+import sys
+p = sys.argv[1]
+s = open(p).read().replace("- [ ] cc-live ", "- [x] cc-live ", 1).replace(
+    "  Body second paragraph, after a blank line.\n",
+    "  Body second paragraph, after a blank line.\n\n  Resolution recorded by fm-captain-hold.\n"
+    "  Resolution mode: answered\n\n  Captain decision:\n  Go with the first one.\n", 1)
+open(p, "w").write(s)
+PYEOF
+  wait_for "firstmate closing the answered hold was never picked up by the scan" \
+    bash -c "curl -s -m 60 'http://127.0.0.1:$port/api/items' | jq -e '.items[] | select(.id == \"cc-live\" and .closed == true)'"
+  # Only the message he answered moved, and to Messages; the hold he answered
+  # has no settled tab, so it stays, carrying the answer that closed it.
+  expected='{"waiting":["main/hold/cc-live/cc-live","msg/q-merge"],"messages":["msg/n-progress","msg/q-ship"]}'
+  assert_equals "$expected" "$(board_tabs "$port")" "replying to one row moved another"
+  assert_contains "$(waiting_item "$port" main/hold/cc-live/cc-live '.answer.text')" 'Go with the first one.' \
+    "the hold firstmate closed did not carry the answer that closed it"
+
+  stop_server
+  start_server "$home" || fail "the server did not restart"
+  port=$SERVER_PORT
+  assert_equals "$expected" "$(board_tabs "$port")" "a restart after the replies moved his board"
+
+  # His own scenario: select everything in Messages and archive it.
+  for key in $(board_tabs "$port" | jq -r '.messages[]'); do
+    post "$port" /api/archive "{\"msg\":\"${key#msg/}\",\"archived\":true}" >/dev/null
+  done
+  after=$(board_tabs "$port")
+  stop_server
+  assert_equals '{"waiting":["main/hold/cc-live/cc-live","msg/q-merge"],"messages":[]}' "$after" \
+    "archiving everything Messages lists took something out of Waiting on you"
+  pass "replying to one row moves only that row, each record sits in one tab, and worker decisions stay off his board"
 }
 
 test_park_refuses_an_unknown_target_or_state() {
@@ -3773,6 +3917,7 @@ test_a_recorded_answer_threads_under_the_note_it_answers
 test_park_refuses_an_unknown_target_or_state
 test_an_item_firstmate_closes_stays_waiting_until_he_parks_it
 test_an_old_question_is_still_waiting_after_many_newer_messages
+test_replying_to_one_waiting_row_moves_nothing_else
 test_a_reply_never_archives_its_message
 test_an_unchanged_message_poll_is_answered_without_the_log
 test_archive_click_stays_fast_under_a_concurrent_messages_poll
