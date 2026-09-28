@@ -406,23 +406,60 @@ function matchAnswer(row, taskId, messages, untilAt) {
   return inWindow.find(m => quotesOrNamesSubject(m, row.title)) || null;
 }
 
-// The full conversation, oldest first: his reply, then (when the rule above
-// finds one) firstmate's answer, then his next reply, and so on. The same
-// candidate message is never claimed twice - once threaded under a reply it
-// is out of the pool for every later one.
+// --- answers firstmate RECORDED as answers ------------------------------------
+// His report 2026-09-28: "why ... there is no response from u". The rule above
+// only guesses, so since then firstmate records an answer AS the answer to one
+// send of his: `fm-captain-message.sh --answers <note-id>` writes `answers` on
+// the message, naming the inbox note id his send was delivered as (said.jsonl's
+// note_id - the id `fm-inbox.sh list` shows firstmate). A recorded answer is
+// never guessed at: it threads under the send it names and nowhere else, and a
+// send with one never falls back to the guess. Everything recorded before this
+// carries no `answers`, so it threads exactly as it always did.
+const answersSend = (m, row) => Boolean(m && m.answers && row && row.note_id)
+  && m.answers === row.note_id;
+function recordedAnswers(row, messages) {
+  return (messages || []).filter(m => answersSend(m, row))
+    .sort((a, b) => Date.parse(a.at || '') - Date.parse(b.at || ''));
+}
+// The send of his a message records itself as answering, if the page holds it.
+function answeredSend(message, saidRows) {
+  if (!message || !message.answers) return null;
+  return (saidRows || []).find(r => r.note_id === message.answers) || null;
+}
+
+// The full conversation, oldest first: his reply, then firstmate's answer -
+// every recorded one, else the one the rule above finds - then his next reply,
+// and so on. The same candidate message is never claimed twice - once
+// threaded under a reply it is out of the pool for every later one - and a
+// recorded answer is never in the pool at all, since it names its own send.
 function threadRows(repliesOldestFirst, messages) {
   const used = new Set();
   const out = [];
   for (let i = 0; i < (repliesOldestFirst || []).length; i++) {
     const row = repliesOldestFirst[i];
     out.push({ kind: 'you', row });
+    const recorded = recordedAnswers(row, messages);
+    if (recorded.length) {
+      for (const m of recorded) out.push({ kind: 'firstmate', row: m });
+      continue;
+    }
     const taskId = saidTaskId(row, messages);
     const next = repliesOldestFirst[i + 1];
-    const pool = (messages || []).filter(m => !used.has(m.id));
+    const pool = (messages || []).filter(m => !used.has(m.id) && !m.answers);
     const answer = matchAnswer(row, taskId, pool, next ? next.at : null);
     if (answer) { used.add(answer.id); out.push({ kind: 'firstmate', row: answer }); }
   }
   return out;
+}
+
+// A note he sent from "Tell firstmate something" hangs off no message or item,
+// so it is a conversation of its own: listed in Messages, "awaiting firstmate"
+// until an answer is recorded against it. Only a note the server marked
+// `answerable` (sent once firstmate could record an answer to it) is listed -
+// an older one could never be answered, and would sit there awaiting forever.
+function noteThreads(saidRows) {
+  return (saidRows || []).filter(r => r.kind === 'note' && r.answerable && r.sid
+    && !r.deleted);
 }
 
 // The marker the item/pane shows while a reply is outstanding: "answered"
@@ -569,7 +606,8 @@ function saidDigest(rows) {
   // learns it - so it must be part of what "changed" means here, or the
   // received dot would sit stale until something else in the row changed too.
   return (rows || []).map(r => [r.sid || '', r.kind || '', r.outcome || '',
-                                r.detail || '', r.received ? '1' : '0']
+                                r.detail || '', r.received ? '1' : '0',
+                                r.deleted ? '1' : '0']
                                 .join('\u0001')).join('\u0002');
 }
 
@@ -609,4 +647,5 @@ if (typeof module === 'object' && module.exports)
                      isItemDeferred, looksLikeClarifyingReply,
                      waitingItems, waitingMessageRows, waitingCount,
                      looksLikeInfoOnly, isInfoOnlyMessage,
-                     saidTaskId, matchAnswer, threadRows, threadStatus };
+                     saidTaskId, matchAnswer, threadRows, threadStatus,
+                     recordedAnswers, answeredSend, noteThreads };

@@ -690,6 +690,24 @@ function threadBadgeHtml(status){
     ? '<span class="flag f-sent">answered</span>'
     : `<span class="flag f-sent">awaiting firstmate · ${esc(waitLabel(status.at))}</span>`;
 }
+// A note he sent from "Tell firstmate something" is its own conversation in
+// Messages (noteThreads, bin/command-center-state.js): his note, then every
+// answer firstmate recorded against it. Shaped like a message so grouping,
+// ordering and the project filter work unchanged; the project is the first
+// answer's, since a note records none of its own.
+const noteKey = r => 'note/' + r.sid;
+function noteRows(){
+  return noteThreads(state.said).filter(r => !state.deleted.has(noteKey(r))).map(r => {
+    const answers = recordedAnswers(r, state.messages);
+    const at = Date.parse(r.at || '');
+    return { __note: r, answers, id: r.sid, at: r.at, text: r.text,
+      title: String(r.text || '').split('\n')[0].slice(0, 140) || '(empty note)',
+      since_epoch: isNaN(at) ? null : Math.floor(at / 1000), home: 'main',
+      project: (answers[0] || {}).project || null,
+      worktree: (answers[0] || {}).worktree || null, branch: (answers[0] || {}).branch || null };
+  });
+}
+const openedNote = () => noteRows().find(n => noteKey(n.__note) === state.open) || null;
 const projectOf = it => it.project || 'Not recorded';
 const homeOf = id => state.view.homes.find(h => h.id === id) || {id, name:id};
 const homeColour = id => HOME_COLOURS[
@@ -908,7 +926,7 @@ function renderProjectFilter(){
   const rows = state.tab === 'waiting' ? visible(true)
     : state.tab === 'hold' ? heldItemsList().concat(heldMessagesList())
     : state.tab === 'archived' ? visibleMessages(true).concat(archivedItemsList())
-    : visibleMessages(true);
+    : visibleMessages(true).concat(state.tab === 'messages' ? noteRows() : []);
   const counts = new Map();
   for (const r of rows) counts.set(projectOf(r), (counts.get(projectOf(r)) || 0) + 1);
   // The chosen project stays listed even while this tab has none of it, so
@@ -1150,7 +1168,7 @@ function renderList(){
   // the same window-based rule n-hold already uses.
   const unheldMsgs = (state.messages || []).filter(m => !isMsgHeld(m));
   const infoCount = unheldMsgs.filter(isInfoOnlyMessage).length;
-  $('#n-messages').textContent = unheldMsgs.length - infoCount;
+  $('#n-messages').textContent = unheldMsgs.length - infoCount + noteRows().length;
   $('#n-info').textContent = infoCount;
   $('#n-archived').textContent = state.archivedTotal
     + archivedItemsList().length;
@@ -1213,7 +1231,10 @@ function renderMessages(archived){
   const total = archived ? state.archivedTotal : state.total;
   const found = archived ? state.archivedFound : state.found;
   // Archived also carries the items he archived - see archivedRows.
-  const rows = archived ? archivedRows() : ordered(visibleMessages(), true);
+  // Messages also lists his own notes (noteRows) - a search reads the log
+  // server-side and never reaches them, so they are left out while one runs.
+  const rows = archived ? archivedRows() : ordered(visibleMessages().concat(
+    state.tab === 'messages' && !state.q.trim() ? noteRows().filter(inProject) : []), true);
   let note = state.msgError
     ? `<div class="archive-note" style="background:var(--warn-soft)"><b>What firstmate
        said to you could not be read.</b> ${esc(state.msgError)} This is not the whole
@@ -1249,7 +1270,7 @@ function renderMessages(archived){
     : (more ? `<button class="older" id="older">Showing
         ${held.length} of ${Math.max(total, held.length)} — load older messages</button>` : '');
   paintList(selectionBarHtml() + note
-    + rowsHtml(rows, archived ? archivedRowHtml : m => messageRow(m, 'list'),
+    + rowsHtml(rows, archived ? archivedRowHtml : m => m.__note ? noteRow(m) : messageRow(m, 'list'),
                empty, !archived, asked ? answered : '') + older);
 }
 
@@ -1311,6 +1332,7 @@ function deleteTargets(){
   const k = state.open;
   if (!k) return [];
   if (k.startsWith('msg/')) return findMessageById(k.slice(4)) ? [k] : [];
+  if (k.startsWith('note/')) return openedNote() ? [k] : [];
   return (state.view.items || []).some(i => itemKey(i) === k) ? [k] : [];
 }
 // No dialog: the first click arms Delete for exactly what it would delete
@@ -1339,10 +1361,10 @@ async function deleteKeys(keys){
   state.bulkBusy = true; renderList();
   let failed = 0;
   await Promise.all(keys.map(async key => {
-    const isMsg = key.startsWith('msg/');
+    const [target, parkKey] = key.startsWith('msg/') ? ['message', key.slice(4)]
+      : key.startsWith('note/') ? ['note', key.slice(5)] : ['item', key];
     try {
-      const {ok, data} = await post('/api/park', {target: isMsg ? 'message' : 'item',
-        key: isMsg ? key.slice(4) : key, state: 'deleted'});
+      const {ok, data} = await post('/api/park', {target, key: parkKey, state: 'deleted'});
       if (ok && data.ok) state.deleted.add(key); else failed++;
     } catch (e) { failed++; }
   }));
@@ -1601,6 +1623,52 @@ function messageRow(m, mode){
   </button></div>`;
 }
 
+function noteRow(n){
+  const key = noteKey(n.__note);
+  const status = threadStatus(threadEntries([n.__note]));
+  return `<div class="row"><button class="item ${state.seen[key] ? 'answered' : ''}"
+      data-key="${esc(key)}" aria-current="${state.open === key}">
+    <span class="item-top">
+      <span class="item-title">${esc(n.title)}</span>${threadBadgeHtml(status)}
+      <span class="age" title="from the time you sent it">${ageLabel(n)}</span>
+      ${recvDotHtml(n.__note)}
+    </span>
+    <span class="item-sub"><span class="kind k-decision">your note</span></span>
+  </button></div>`;
+}
+
+// One conversation entry, the same markup on every pane that shows a thread.
+const threadEntryHtml = e => e.kind === 'you' ? `<div class="msg you">
+      <div class="msg-who">You<span class="t">${esc(localTime(e.row.at))}</span>${recvDotHtml(e.row)}</div>
+      <div class="msg-text">${linked(e.row.text)}</div>
+      ${messageImagesHtml(e.row.images)}
+      <div class="proof">${wordOutcome(e.row)}</div>
+    </div>` : `<div class="msg them">
+      <div class="msg-who">Firstmate<span class="t">${esc(localTime(e.row.at))}</span></div>
+      <div class="msg-text">${para(e.row.text) || '<p class="quiet">No text recorded.</p>'}</div>
+    </div>`;
+
+// A note's own pane: his note, then every answer firstmate recorded against
+// it, or plainly nothing yet. It has no reply box of its own - each answer is
+// an ordinary message, opened from here and replied to there.
+function renderNotePane(n){
+  const entries = threadEntries([n.__note]);
+  const status = threadStatus(entries);
+  paintMain(noteKey(n.__note), `<div class="main-inner">
+    <div class="crumbs">
+      <span class="kind k-decision">you said</span>
+      <span class="sep">·</span><span>${esc(localTime(n.at))}</span>
+      <span class="sep">·</span>${threadBadgeHtml(status)}
+    </div>
+    <h2 class="subject">${esc(n.title)}</h2>
+    <div class="thread">${entries.map(threadEntryHtml).join('')}</div>
+    ${n.answers.length
+      ? n.answers.map(m => `<div class="reply-foot"><button class="defer" data-open="${
+          esc(msgKey(m))}">Open firstmate’s answer to reply to it</button></div>`).join('')
+      : '<p class="quiet">Firstmate has not recorded an answer to this yet.</p>'}
+  </div>`);
+}
+
 function trackHtml(m){
   const step = (cls, ic, label, when) =>
     `<span class="step ${cls}"><span class="ic">${ic}</span>${esc(label)}${
@@ -1670,15 +1738,10 @@ function renderMessagePane(m){
   // firstmate's own answer to it, before his next reply. A wrong thread is
   // worse than none, so an entry only ever appears here when threadRows
   // (bin/command-center-state.js) actually found it.
-  const thread = entries.map(e => e.kind === 'you' ? `<div class="msg you">
-      <div class="msg-who">You<span class="t">${esc(localTime(e.row.at))}</span>${recvDotHtml(e.row)}</div>
-      <div class="msg-text">${linked(e.row.text)}</div>
-      ${messageImagesHtml(e.row.images)}
-      <div class="proof">${wordOutcome(e.row)}</div>
-    </div>` : `<div class="msg them">
-      <div class="msg-who">Firstmate<span class="t">${esc(localTime(e.row.at))}</span></div>
-      <div class="msg-text">${para(e.row.text) || '<p class="quiet">No text recorded.</p>'}</div>
-    </div>`).join('');
+  const thread = entries.map(threadEntryHtml).join('');
+  // A message firstmate recorded as the answer to something he sent
+  // (answeredSend) shows that first: his query, then this answer.
+  const asked = answeredSend(m, state.said);
   paintMain(key, `<div class="main-inner">
     <div class="crumbs">
       <span class="kind k-decision">firstmate said</span>
@@ -1692,6 +1755,8 @@ function renderMessagePane(m){
       ${cell('Branch', m.branch, 'Not recorded')}
     </div>
     ${m.context_source ? `<div class="quiet">${esc(m.context_source)}</div>` : ''}
+    ${asked ? `<div class="thread"><h3>In answer to what you said</h3>${
+      threadEntryHtml({kind: 'you', row: asked})}</div>` : ''}
     <div class="msg them">
       <div class="msg-who">Firstmate<span class="t">${esc(localTime(m.at))}</span></div>
       <div class="msg-text">${para(m.text) || '<p class="quiet">No text recorded.</p>'}</div>
@@ -1741,6 +1806,10 @@ function renderMessagePane(m){
 }
 
 function renderMain(){
+  if (String(state.open || '').startsWith('note/')){
+    const n = openedNote();
+    if (n){ renderNotePane(n); return; }
+  }
   if (String(state.open || '').startsWith('msg/')){
     const m = openedMessage();
     if (m){ renderMessagePane(m); return; }
@@ -1783,15 +1852,7 @@ function renderMain(){
   const answeredHtml = answerEntries.length ? `<div class="thread"><h3>${
     answerEntries.some(e => e.kind === 'firstmate')
       ? 'What you answered — and firstmate’s reply' : 'What you answered'}</h3>${
-    answerEntries.map(e => e.kind === 'you' ? `<div class="msg you">
-        <div class="msg-who">You<span class="t">${esc(localTime(e.row.at))}</span>${recvDotHtml(e.row)}</div>
-        <div class="msg-text">${linked(e.row.text)}</div>
-        ${messageImagesHtml(e.row.images)}
-        <div class="proof">${wordOutcome(e.row)}</div>
-      </div>` : `<div class="msg them">
-        <div class="msg-who">Firstmate<span class="t">${esc(localTime(e.row.at))}</span></div>
-        <div class="msg-text">${para(e.row.text) || '<p class="quiet">No text recorded.</p>'}</div>
-      </div>`).join('')
+    answerEntries.map(threadEntryHtml).join('')
   }</div>` : '';
   const cell = (label, value, na) =>
     `<div><dt>${label}</dt><dd class="${value ? '' : 'na'}">${esc(value || na)}</dd></div>`;
@@ -2679,6 +2740,8 @@ document.addEventListener('click', async e => {
   if (e.target.id === 'bulk-hold'){ bulkHoldSelected(); return; }
   if (e.target.id === 'bulk-archive'){ await bulkArchiveSelected(); return; }
   if (e.target.id === 'bulk-clear'){ state.selected.clear(); renderList(); return; }
+  const openBtn = e.target.closest('[data-open]');
+  if (openBtn){ open(openBtn.dataset.open); return; }
   const row = e.target.closest('.item');
   if (row){
     const key = row.dataset.key;

@@ -13,6 +13,7 @@ const {
   heldWith, captureBand, saidDigest, mergeMessages,
   waitingCount,
   isInfoOnlyMessage, saidTaskId, matchAnswer, threadRows, threadStatus,
+  recordedAnswers, answeredSend, noteThreads,
 } = require(path.join(__dirname, '..', 'web', 'command-center-state.js'));
 
 // Quiet on success: tests/command-center.test.sh runs this and reports the
@@ -683,6 +684,47 @@ test('threadStatus reads answered once firstmate\'s answer is the last entry, aw
   const awaiting = [{ kind: 'you', row: { at: '10:00' } }];
   assert.deepStrictEqual(threadStatus(awaiting), { state: 'awaiting', at: '10:00' });
   assert.strictEqual(threadStatus([]), null);
+});
+
+// His report 2026-09-28: queries with "no response" that were in fact
+// answered elsewhere. An answer firstmate RECORDS against a send
+// (`answers` = that send's note_id) threads under exactly that send, every
+// one of them in order, and is never guessed onto another reply.
+test('a recorded answer threads under the send it names, never under another', () => {
+  const replies = [
+    { at: '2026-09-28T10:00:00Z', msg: 'm1', title: 'Blue or green?', text: 'Which?', note_id: 'n1' },
+    { at: '2026-09-28T10:20:00Z', msg: 'm1', title: 'Blue or green?', text: 'And the icon?', note_id: 'n2' },
+  ];
+  const messages = [
+    { id: 'm1', task: 'cc-live', at: '2026-09-28T09:00:00Z', title: 'Blue or green?' },
+    // Same task, inside reply 1's window: the guess would take it for reply 1.
+    { id: 'a2', task: 'cc-live', at: '2026-09-28T10:10:00Z', title: 'Icon', text: 'Round.', answers: 'n2' },
+    { id: 'a1', task: 'other', at: '2026-09-28T10:30:00Z', title: 'Colour', text: 'Blue.', answers: 'n1' },
+    { id: 'a1b', at: '2026-09-28T10:40:00Z', title: 'More', text: 'Also teal.', answers: 'n1' },
+  ];
+  const entries = threadRows(replies, messages);
+  assert.deepStrictEqual(entries.map(e => e.kind + ':' + (e.row.id || e.row.text)),
+    ['you:Which?', 'firstmate:a1', 'firstmate:a1b', 'you:And the icon?', 'firstmate:a2']);
+  assert.deepStrictEqual(recordedAnswers(replies[0], messages).map(m => m.id), ['a1', 'a1b']);
+  assert.strictEqual(answeredSend(messages[1], replies), replies[1]);
+  assert.strictEqual(answeredSend(messages[0], replies), null);
+});
+
+test('a send with no recorded answer reads awaiting, and old records thread as before', () => {
+  const note = { at: '2026-09-28T10:00:00Z', kind: 'note', text: 'Why no response?', note_id: 'n9' };
+  assert.deepStrictEqual(threadStatus(threadRows([note], [])), { state: 'awaiting', at: note.at });
+  // A send with no note_id (a failed delivery) is never matched to anything.
+  assert.deepStrictEqual(recordedAnswers({ at: note.at }, [{ id: 'x', answers: undefined }]), []);
+});
+
+test('only answerable, undeleted notes are their own conversations', () => {
+  const rows = [
+    { kind: 'note', sid: 'a', answerable: true },
+    { kind: 'note', sid: 'b' },                       // sent before answers existed
+    { kind: 'note', sid: 'c', answerable: true, deleted: true },
+    { kind: 'reply', sid: 'd', answerable: true },
+  ];
+  assert.deepStrictEqual(noteThreads(rows).map(r => r.sid), ['a']);
 });
 
 process.exit(failures ? 1 : 0);

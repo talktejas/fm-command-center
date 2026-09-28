@@ -867,6 +867,11 @@ def read_said(records, limit=LOG_LIMIT):
             row = dict(row, outcome="unknown", detail=RESTART_DETAIL)
         merged.append(row)
     merged = [_repair_unknown_outcome(records, r) for r in merged]
+    # A note he deleted from Messages (/api/park, target "note") is only
+    # flagged, never dropped: this is still his record of what he said.
+    deleted = {key for (target, key), state in read_parked(home).items()
+               if target == "note" and state == "deleted"}
+    merged = [dict(r, deleted=True) if r.get("sid") in deleted else r for r in merged]
     merged = [dict(r, received=bool(r.get("note_id")) and note_received(
                   resolve_send_home(records, r.get("home")), r.get("note_id")))
               for r in merged]
@@ -1824,7 +1829,9 @@ class Handler(BaseHTTPRequestHandler):
         homes = {records.home}
         if records.etag is not None:
             homes.update(h["path"] for h in records.view().get("homes", []))
-        return "|".join(inbox_fingerprint(h) for h in sorted(homes))
+        # parked.jsonl too: deleting a note (read_said's `deleted`) writes there.
+        return ("|".join(inbox_fingerprint(h) for h in sorted(homes))
+                + "|" + (log_etag(parked_log(records.home)) or "-"))
 
     def _body(self):
         """Read the declared body first, on every path including a refusal.
@@ -2124,9 +2131,10 @@ class Handler(BaseHTTPRequestHandler):
             self._json(200, {"ok": True, "archived": archived})
             return
         if path == "/api/park":
-            # Archive, Hold and Delete for a Waiting-on-you item, and Hold
+            # Archive, Hold and Delete for a Waiting-on-you item, Hold
             # and Delete for a message (its Archive stays on
-            # /api/archive above): one durable record instead of browser
+            # /api/archive above), and Delete for one of his own notes
+            # listed in Messages (target "note", keyed by its sid): one durable record instead of browser
             # storage, so it survives a refresh and reads the same from any
             # browser. No confirmation and no undo route beyond sending the
             # opposite state - the same one-click shape /api/archive already
@@ -2136,7 +2144,7 @@ class Handler(BaseHTTPRequestHandler):
             target = payload.get("target")
             key = payload.get("key")
             state = payload.get("state")
-            if target not in ("item", "message") \
+            if target not in ("item", "message", "note") \
                     or not isinstance(key, str) or not key or len(key) > 400 \
                     or state not in ("archived", "held", "deleted", "none"):
                 self._json(400, {"ok": False, "error": "unknown park request"})
@@ -2172,7 +2180,12 @@ class Handler(BaseHTTPRequestHandler):
                     outcome, route, detail, note_id = "unknown", "fm-inbox.sh note", str(exc), None
                 return {"outcome": outcome, "route": route, "detail": detail, "note_id": note_id}
 
-            entry = {"kind": "note", "home": "main", "text": text}
+            # answerable: firstmate can record an answer to this note
+            # (fm-captain-message.sh --answers <note_id>), so the page lists it
+            # as a conversation of its own - noteThreads in
+            # web/command-center-state.js. Notes sent before that existed lack
+            # the field and are listed nowhere, as before.
+            entry = {"kind": "note", "home": "main", "text": text, "answerable": True}
             if images:
                 entry["images"] = images
             sid, error = accept_said(self.records.home, entry, deliver_note)
