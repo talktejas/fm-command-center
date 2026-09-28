@@ -50,7 +50,7 @@
   /* Delete sits apart from Archive/Hold and turns red once armed - it needs a
      second click (armDelete) since he has no way back to a deleted row. */
   .gutter #gutter-delete{margin-top:14px}
-  .gutter #gutter-delete.armed,.selbar #bulk-delete.armed{background:var(--hot);border-color:var(--hot);color:#fff}
+  .gutter #gutter-delete.armed,.selbar #bulk-delete.armed,.reply-foot [data-delete-open].armed{background:var(--hot);border-color:var(--hot);color:#fff}
 
   /* ---------- left rail ---------- */
   .rail{border-right:1px solid var(--line);background:var(--panel);display:flex;flex-direction:column;overflow:hidden}
@@ -574,6 +574,35 @@ function load(key, fallback){
 function save(key, value){
   try { localStorage.setItem(key, JSON.stringify(value)); } catch (e) { /* not fatal */ }
 }
+
+// --- a deploy reaches the open tab ---------------------------------------------
+// The page never reloads on its own, so without this the tab he opened before a
+// deploy runs the old code for as long as it stays open - no-store on the page
+// changes nothing for a page that is never asked for again (his report
+// 2026-09-28: Archive/Hold on his notes "still" missing, an hour after the fix
+// shipped). The server stamps this page with its build (page_version,
+// command-center.py) and names the current one on every answer; when they
+// differ the page reloads itself, but never under his fingers: not while a box
+// has his focus in a visible tab, nor with a write still on its way. What he
+// was looking at comes back with it (cc.resume, read once below).
+const PAGE_VERSION = '__PAGE_VERSION__';
+let writing = 0;
+function reloadIfStale(res){
+  const v = res.headers.get('X-Page-Version');
+  if (!v || v === PAGE_VERSION) return;
+  const typing = !document.hidden && document.activeElement
+    && /^(INPUT|TEXTAREA|SELECT)$/.test(document.activeElement.tagName);
+  if (typing || writing || state.sending || state.bulkBusy) return;  // the next poll asks again
+  try {
+    sessionStorage.setItem('cc.resume', JSON.stringify({ tab: state.tab, open: state.open,
+      group: state.group, project: state.project, sfilter: state.sfilter }));
+  } catch (e) { /* he lands on the default view, on the new code */ }
+  location.reload();
+}
+try {
+  Object.assign(state, JSON.parse(sessionStorage.getItem('cc.resume')) || {});
+  sessionStorage.removeItem('cc.resume');
+} catch (e) { /* a fresh view */ }
 
 // --- honest time -------------------------------------------------------------
 // since_kind says which clock a row actually has. A row with none is never given
@@ -1188,6 +1217,12 @@ function renderGutter(){
   $('#gutter-delete').classList.toggle('armed', armed);
   $('#gutter-delete').title = armed ? `Click again to delete ${del.length === 1 ? 'it' : del.length}`
     : 'Delete for good';
+  const paneDel = $('#main [data-delete-open]');
+  if (paneDel){
+    const paneArmed = state.deleteArmed === state.open;
+    paneDel.classList.toggle('armed', paneArmed);
+    paneDel.textContent = paneArmed ? 'Click again to delete' : 'Delete';
+  }
 }
 
 // Forwards to whichever Archive/Hold button the open pane already has - one
@@ -1392,10 +1427,15 @@ function deleteTargets(){
 }
 // No dialog: the first click arms Delete for exactly what it would delete
 // (a changed selection is a different target, so it never inherits an arm),
-// and only a second click within a few seconds deletes.
+// and only a second click within a few seconds deletes. Every pane carries its
+// own Delete beside Archive and Hold (his ask 2026-09-28: "not on every
+// message"), for the one row that pane shows and never the selection; its
+// armed look is kept current by renderGutter, like the gutter's own.
+const deleteBtnHtml = () => state.deleteArmed === state.open
+  ? '<button class="defer armed" data-delete-open>Click again to delete</button>'
+  : '<button class="defer" data-delete-open>Delete</button>';
 let deleteArmTimer = null;
-async function armOrDelete(){
-  const keys = deleteTargets();
+async function armOrDelete(keys = deleteTargets()){
   if (!keys.length || state.bulkBusy) return;
   const sig = keys.join('|');
   clearTimeout(deleteArmTimer);
@@ -1823,6 +1863,7 @@ function renderNotePane(n){
       ${n.held
         ? `<button class="defer" data-unhold-note="${sid}">Back to list</button>`
         : `<button class="defer" data-hold-note="${sid}">Hold</button>`}
+      ${deleteBtnHtml()}
     </div>
   </div>`);
 }
@@ -1921,6 +1962,7 @@ function renderMessagePane(m){
       ${isMsgHeld(m)
         ? `<button class="defer" data-unhold-msg="${esc(m.id)}">Back to list</button>`
         : `<button class="defer" data-hold-msg="${esc(m.id)}">Hold</button>`}
+      ${deleteBtnHtml()}
     </div>
   </div>`);
   wireReplyBox(key);
@@ -1997,6 +2039,7 @@ function renderMain(){
       ${isItemHeld(it)
         ? `<button class="defer" data-unhold-item="${esc(itemKey(it))}">Back to list</button>`
         : `<button class="defer" data-hold-item="${esc(itemKey(it))}">Hold</button>`}
+      ${deleteBtnHtml()}
     </div>
   </div>`);
 
@@ -2206,6 +2249,7 @@ async function poll(){
   try {
     const res = await fetch('/api/items', {
       headers: state.etag ? {'If-None-Match': state.etag} : {} });
+    reloadIfStale(res);
     if (res.status === 503){
       commit({ kind:'unread',
                detail: (await res.json().catch(() => ({}))).error
@@ -2492,10 +2536,13 @@ function failedNote(key){
 }
 
 async function post(url, body){
-  const res = await fetch(url, {
-    method:'POST', headers:{'Content-Type':'application/json'},
-    body: JSON.stringify(body) });
-  return { ok: res.ok, data: await res.json().catch(() => ({})) };
+  writing++;
+  try {
+    const res = await fetch(url, {
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify(body) });
+    return { ok: res.ok, data: await res.json().catch(() => ({})) };
+  } finally { writing--; }
 }
 
 // --- pasted/dropped reply images ---------------------------------------------
@@ -2544,16 +2591,17 @@ async function uploadImage(key, file){
     return;
   }
   delete state.imageErr[key];
-  let res;
+  let res, data;
+  writing++;
   try {
     res = await fetch('/api/upload', {
       method: 'POST', headers: {'Content-Type': file.type}, body: file });
+    data = await res.json().catch(() => ({}));
   } catch (err) {
     state.imageErr[key] = 'The image could not be uploaded — try again.';
     renderAttachStrip(key);
     return;
-  }
-  const data = await res.json().catch(() => ({}));
+  } finally { writing--; }
   if (!res.ok || !data.ok){
     state.imageErr[key] = data.error || 'The image could not be uploaded.';
     renderAttachStrip(key);
@@ -2784,6 +2832,7 @@ document.addEventListener('click', async e => {
   if (e.target.id === 'gutter-archive'){ gutterArchive(); return; }
   if (e.target.id === 'gutter-hold'){ gutterHold(); return; }
   if (e.target.id === 'gutter-delete' || e.target.id === 'bulk-delete'){ await armOrDelete(); return; }
+  if (e.target.closest('[data-delete-open]')){ await armOrDelete([state.open]); return; }
   if (e.target.id === 'bulk-hold'){ bulkHoldSelected(); return; }
   if (e.target.id === 'bulk-archive'){ await bulkArchiveSelected(); return; }
   if (e.target.id === 'bulk-clear'){ state.selected.clear(); renderList(); return; }
@@ -2904,9 +2953,11 @@ $('#note-dlg').addEventListener('close', async function(){
 // The archived window is read once up front too, so a recorded answer to a
 // message he already archived can show that message (answerFor) without his
 // first opening Archived.
+$('#grouping').value = state.group;
+$('#statefilter').value = state.sfilter;
 Promise.all([loadSaid(), loadMessages(), loadWork(), loadArchivedMessages()]).then(([said]) => {
   reconcilePending(said.read);
-  renderList();
+  if (state.open) open(state.open); else renderList();
   return poll();
 });
 setInterval(poll, POLL_MS);

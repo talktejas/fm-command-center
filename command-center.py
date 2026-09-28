@@ -1339,22 +1339,24 @@ COMMAND_CENTER_SPLIT = "2026-09-21T09:30:00Z"
 def message_context(row, view, backlog_idx, project_aliases_map,
                      a_transcript_dir=None, transcript_cache=None, home=None,
                      brief_ids=frozenset()):
-    """(project, worktree, branch, source) to fill in beyond what the row
+    """(project, worktree, branch, source, ambiguous) to fill in beyond what the row
     already carries, or all-None when nothing more can be said honestly.
     The captain's own order of precedence: which worker/task the turn that
     said this was handling - its explicit task, or every id its transcript
     turn touched - mapped through that task's own record, is checked FIRST
     and is the only source used once it names anything at all. Only when
     that finds nothing does the message's own words get checked, against
-    every task id and every registered project's vocabulary. `project` may
-    name several projects, joined by " · ", when that tier's own evidence
-    names more than one; `worktree`/`branch` are only ever filled when
-    exactly one task resolves them. `source` names where a filled value
+    every task id and every registered project's vocabulary. `project` is
+    only ever ONE project - evidence naming several is left blank ("Not
+    recorded"), never shown as a list of every project that turned up (his
+    report 2026-09-28: a Koin message labelled "casamira · interact ·
+    interactp · jt2627s · koin"); `worktree`/`branch` are likewise only ever
+    filled when exactly one task resolves them. `source` names where a filled value
     came from, for a quiet note beside it - never set when nothing was
     actually filled."""
     have = {f: bool(row.get(f)) for f in ("project", "worktree", "branch")}
     if all(have.values()):
-        return None, None, None, None
+        return None, None, None, None, False
 
     haystack = (row.get("title") or "") + "\n" + (row.get("text") or "")
     known_ids = ({t for t in backlog_idx if len(t) > 2}
@@ -1418,21 +1420,24 @@ def message_context(row, view, backlog_idx, project_aliases_map,
         projects.discard("fm-command-center")
         projects.add("firstmate")
 
-    project = " · ".join(sorted(projects)) if projects else None
+    project = next(iter(projects)) if len(projects) == 1 else None
     source = "; ".join(sources) or None
 
     return (None if have["project"] else project,
             None if have["worktree"] else worktree,
             None if have["branch"] else branch,
-            source)
+            source, not have["project"] and len(projects) > 1)
 
 
 def enrich_message(row, view, backlog_idx, project_aliases_map,
                     a_transcript_dir=None, transcript_cache=None, home=None,
                     brief_ids=frozenset()):
-    project, worktree, branch, source = message_context(
+    project, worktree, branch, source, ambiguous = message_context(
         row, view, backlog_idx, project_aliases_map, a_transcript_dir, transcript_cache,
         home, brief_ids)
+    if ambiguous:
+        # Several projects, so none: fill_from_nearby_turn must not pick one either.
+        row = dict(row, project_ambiguous=True)
     if not (project or worktree or branch):
         return row
     out = dict(row)
@@ -1470,7 +1475,7 @@ def fill_from_nearby_turn(rows):
             by_session.setdefault(sess, []).append((t, r))
     out = []
     for r in rows:
-        if r.get("project"):
+        if r.get("project") or r.get("project_ambiguous"):
             out.append(r)
             continue
         sess, t = r.get("session"), _epoch(r.get("at"))
@@ -1504,7 +1509,11 @@ def load_message_context_cache(home):
             data = json.load(fh)
     except (OSError, json.JSONDecodeError):
         return {}
-    return data if isinstance(data, dict) else {}
+    # An older build cached several projects joined by " · " (message_context);
+    # dropping those makes each re-resolve once, to one project or none.
+    return {k: v for k, v in data.items()
+            if isinstance(v, dict) and " · " not in (v.get("project") or "")} \
+        if isinstance(data, dict) else {}
 
 
 def save_message_context_cache(home, cache):
@@ -1554,7 +1563,8 @@ def enrich_messages(rows, records):
             cache[row["id"]] = {"project": enriched.get("project"),
                                 "worktree": enriched.get("worktree"),
                                 "branch": enriched.get("branch"),
-                                "context_source": enriched.get("context_source")}
+                                "context_source": enriched.get("context_source"),
+                                "project_ambiguous": enriched.get("project_ambiguous")}
         save_message_context_cache(records.home, cache)
 
     def apply_cached(row):
@@ -1562,7 +1572,7 @@ def enrich_messages(rows, records):
         if not entry:
             return row
         out = dict(row)
-        for field in ("project", "worktree", "branch", "context_source"):
+        for field in ("project", "worktree", "branch", "context_source", "project_ambiguous"):
             if entry.get(field) and not out.get(field):
                 out[field] = entry[field]
         return out
@@ -2014,6 +2024,23 @@ def restore_answered(home):
                 archived_at[msg] = None
 
 
+def page_version():
+    """Names the page build on disk; it changes the moment a deploy lands.
+
+    The page is one long-lived tab that polls and never reloads, so no-store
+    alone never gets a deploy in front of him: the tab he opened this morning
+    runs this morning's code (his report 2026-09-28, Archive/Hold "still"
+    missing on his notes after the fix that added them had shipped). Every
+    answer carries this, and the page reloads itself when it differs from the
+    one it was served with (reloadIfStale, web/command-center.html).
+    """
+    try:
+        return "-".join("%x.%x" % (st.st_mtime_ns, st.st_size)
+                        for st in (os.stat(PAGE), os.stat(RULES)))
+    except OSError:
+        return ""
+
+
 class Handler(BaseHTTPRequestHandler):
     server_version = "firstmate-command-center"
     protocol_version = "HTTP/1.1"
@@ -2027,6 +2054,12 @@ class Handler(BaseHTTPRequestHandler):
         sys.stderr.write("%s %s\n" % (self.log_date_time_string(), fmt % args))
 
     # --- plumbing ------------------------------------------------------------
+    def end_headers(self):
+        version = page_version()
+        if version:
+            self.send_header("X-Page-Version", version)
+        super().end_headers()
+
     def _send(self, code, body, ctype="application/json; charset=utf-8", etag=None):
         self.send_response(code)
         self.send_header("Content-Type", ctype)
@@ -2219,9 +2252,12 @@ class Handler(BaseHTTPRequestHandler):
         if path in ("/", "/command-center-state.js"):
             src = PAGE if path == "/" else RULES
             ctype = ("text/html" if path == "/" else "text/javascript")
+            version = page_version()  # before the read: a deploy between reloads once more, never zero times
             try:
                 with open(src, "rb") as fh:
                     body = fh.read()
+                if src == PAGE:
+                    body = body.replace(b"__PAGE_VERSION__", version.encode())
             except OSError as exc:
                 self._send(500, f"cannot read {src}: {exc}".encode(),
                            "text/plain; charset=utf-8")

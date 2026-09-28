@@ -1495,9 +1495,10 @@ test_a_message_matched_to_a_registered_project_when_it_names_no_task() {
 # handling - found from its own transcript, not the message's words - is
 # checked first and used even where firstmate's own sweep left the row's task
 # blank (that turn touched two, so turn_task's single-match rule left it
-# null). Unlike a keyword match, several tasks found this way show ALL their
-# projects rather than staying blank.
-test_a_message_shows_every_project_a_turns_tool_calls_touched() {
+# null). Two tasks in two projects name no ONE project, so the row reads Not
+# recorded - never "alpha · beta" (his report 2026-09-28: a Koin message
+# labelled with five projects at once), even from a cache an older build wrote.
+test_a_turn_that_touched_two_projects_names_none_of_them() {
   local home cfg enc port body
   home="$TMP_ROOT/turn-projects"
   cfg="$TMP_ROOT/turn-projects-config"
@@ -1511,10 +1512,17 @@ test_a_message_shows_every_project_a_turns_tool_calls_touched() {
 EOF
   enc=$(python3 -c 'import re,sys; print(re.sub(r"[^A-Za-z0-9]","-",sys.argv[1]))' "$home")
   seed_turn_transcript "$cfg/projects/$enc/sess-t.jsonl"
-  jq -cn '{id:"m-two", req:"r-two", session:"sess-t", title:"Both landed",
-    text:"Both landed.", task:null, project:null, worktree:null, branch:null,
-    source:"transcript", at:"2026-09-21T00:00:00Z"}' \
-    > "$home/data/captain-messages.jsonl"
+  # An earlier turn of the same session, 5 minutes before, that named one
+  # project: an ambiguous row must not borrow it (fill_from_nearby_turn).
+  { jq -cn '{id:"m-early", session:"sess-t", title:"Started", text:"Started.",
+      project:"alpha", at:"2026-09-20T23:55:00Z"}'
+    jq -cn '{id:"m-two", req:"r-two", session:"sess-t", title:"Both landed",
+      text:"Both landed.", task:null, project:null, worktree:null, branch:null,
+      source:"transcript", at:"2026-09-21T00:00:00Z"}'
+  } > "$home/data/captain-messages.jsonl"
+  mkdir -p "$home/data/command-center"
+  printf '%s\n' '{"m-two":{"project":"alpha · beta","worktree":null,"branch":null,"context_source":"old build"}}' \
+    > "$home/data/command-center/message-context.json"
 
   CLAUDE_CONFIG_DIR="$cfg" start_server "$home" || fail "the server did not start"
   port=$SERVER_PORT
@@ -1522,11 +1530,11 @@ EOF
   body=$(curl -s -m 30 "http://127.0.0.1:$port/api/messages")
   stop_server
 
-  assert_equals "alpha · beta" "$(jq -r '.messages[0].project' <<<"$body")" \
-    "a turn whose tool calls touched two tasks did not show both their projects"
-  assert_equals "null" "$(jq -r '.messages[0].worktree' <<<"$body")" \
+  assert_equals "null" "$(jq -r '.messages[] | select(.id == "m-two") | .project' <<<"$body")" \
+    "a turn whose tool calls touched two projects was labelled with a list of them, or a neighbour's"
+  assert_equals "null" "$(jq -r '.messages[] | select(.id == "m-two") | .worktree' <<<"$body")" \
     "two touched tasks must not invent a single worktree"
-  pass "a message from a turn whose tool calls touched two tasks shows both their projects"
+  pass "a message from a turn that touched two projects names none of them"
 }
 
 # Real scale (a live service, ~200 messages in the window) turned the
@@ -3003,7 +3011,7 @@ test_replying_to_one_waiting_row_moves_nothing_else() {
   # handler and whatever send it calls, pressed on one item's pane and on one
   # message's pane.
   body=$(curl -s -m 30 "http://127.0.0.1:$port/")
-  printf '%s\n' "$body" | awk '/^async function (post|send[A-Za-z]*)\(/,/^}/;
+  printf '%s\n' "$body" | awk '/^async function (post|send[A-Za-z]*)\(/,/^}/; /^let writing =/;
     /^document.addEventListener\(.click./,/^}\);/' > "$TMP_ROOT/send.js"
   assert_contains "$(cat "$TMP_ROOT/send.js")" "e.target.id === 'send'" \
     "the served page carries no Send button handler to run"
@@ -3953,6 +3961,141 @@ test_an_oversize_or_wrong_type_image_is_refused_and_nothing_is_saved() {
   pass "an oversize or wrong-type image is refused with a clear message and nothing reaches disk"
 }
 
+# His report 2026-09-28, "i can't archive or hold messages which i directly
+# write": the fix had shipped, but the tab he opened before that deploy never
+# asked for the page again, so no-store on it changed nothing. The served page
+# names its own build and every answer names the current one; after a deploy
+# the page's own reloadIfStale reloads it - never while he is typing in a
+# visible tab, nor with a write in flight - and keeps what he was looking at.
+test_an_open_page_reloads_itself_when_a_deploy_lands() {
+  local home dep port v0 v1 etag out
+  home="$TMP_ROOT/deploy"
+  dep="$TMP_ROOT/deploy-bin"
+  seed_home "$home"
+  mkdir -p "$dep"
+  cp -r "$ROOT/command-center.py" "$ROOT/command-center-scan.sh" "$ROOT/command-center-work.sh" \
+    "$ROOT/web" "$dep/"
+  SERVER="$dep/command-center.py" start_server "$home" || fail "the server did not start"
+  port=$SERVER_PORT
+  page_version_header() {  # <curl args...>
+    curl -s -m 60 -D - -o /dev/null "$@" | tr -d '\r' | sed -n 's/^X-Page-Version: //Ip'
+  }
+  curl -s -m 30 "http://127.0.0.1:$port/" > "$TMP_ROOT/deploy-page.html"
+  v0=$(sed -n "s/^const PAGE_VERSION = '\(.*\)';$/\1/p" "$TMP_ROOT/deploy-page.html")
+  [ -n "$v0" ] && [ "$v0" != "__PAGE_VERSION__" ] || fail "the served page does not name the build it is"
+  wait_for "the items were never scanned" curl -sf -m 60 "http://127.0.0.1:$port/api/items"
+  etag=$(curl -s -m 60 -D - -o /dev/null "http://127.0.0.1:$port/api/items" | tr -d '\r' | sed -n 's/^ETag: //Ip')
+  assert_equals "$v0" "$(page_version_header -H "If-None-Match: $etag" "http://127.0.0.1:$port/api/items")" \
+    "an unchanged (304) poll - nearly every poll - did not name the current build"
+
+  printf '\n<!-- deployed -->\n' >> "$dep/web/command-center.html"
+  v1=$(page_version_header "http://127.0.0.1:$port/api/items")
+  stop_server
+  [ -n "$v1" ] && [ "$v1" != "$v0" ] || fail "a deploy left every poll naming the old build"
+
+  # The served page's own check, on the build it was served as.
+  awk '/^const PAGE_VERSION =/,/^}/' "$TMP_ROOT/deploy-page.html" > "$TMP_ROOT/reload.js"
+  out=$(node -e '
+    const vm = require("vm"), fs = require("fs");
+    const g = globalThis, out = [];
+    g.state = {tab: "archived", open: "note/abc", group: "branch", project: "demo", sfilter: ""};
+    g.stored = {};
+    g.sessionStorage = {setItem: (k, v) => { stored[k] = v; }};
+    g.reloads = 0;
+    g.location = {reload: () => { reloads++; }};
+    g.document = {hidden: false, activeElement: {tagName: "TEXTAREA"}};
+    g.res = v => ({headers: {get: () => v}});
+    g.out = out;
+    vm.runInThisContext(fs.readFileSync(process.argv[1], "utf8") + `
+      reloadIfStale(res(PAGE_VERSION)); out.push(reloads);   // same build
+      reloadIfStale(res("next")); out.push(reloads);         // typing, tab visible
+      document.activeElement = {tagName: "BODY"}; writing = 1;
+      reloadIfStale(res("next")); out.push(reloads);         // a write in flight
+      writing = 0;
+      reloadIfStale(res("next")); out.push(reloads);         // idle
+      document.activeElement = {tagName: "TEXTAREA"}; document.hidden = true;
+      reloadIfStale(res("next")); out.push(reloads);         // tab in the background
+    `);
+    process.stdout.write(out.join(",") + " " + stored["cc.resume"]);
+  ' "$TMP_ROOT/reload.js") || fail "the served page's reloadIfStale could not be run: $out"
+  assert_equals '0,0,0,1,2 {"tab":"archived","open":"note/abc","group":"branch","project":"demo","sfilter":""}' \
+    "$out" "a deploy did not reload the open page exactly when it was safe to, keeping his place"
+  pass "an open page reloads itself once a deploy lands, never under his fingers"
+}
+
+# His reports 2026-09-28: his own notes could not be archived or held, and
+# Delete sat only in the gutter, "not on every message". Every pane carries
+# Archive, Hold and Delete; the page's own served click handler is pressed
+# here against the real server, on his note's buttons and on each kind of
+# pane's own Delete, which only arms on the first click.
+test_every_pane_archives_holds_and_deletes_its_own_row() {
+  local home port body out sep
+  home="$TMP_ROOT/pane-actions"
+  seed_home "$home"
+  mkdir -p "$home/data/command-center"
+  for sep in n-arch n-hold n-del; do
+    jq -cn --arg s "$sep" '{kind:"note",home:"main",sid:$s,text:("note " + $s),answerable:true,
+      outcome:"sent",at:"2026-09-28T10:00:00Z"}'
+  done > "$home/data/command-center/said.jsonl"
+  printf '%s\n' '{"id":"m-del","at":"2026-09-28T09:00:00Z","title":"Deployed","text":"Deployed to staging."}' \
+    > "$home/data/captain-messages.jsonl"
+  start_server "$home" || fail "the server did not start"
+  port=$SERVER_PORT
+  wait_for "the fixture's hold was never scanned" \
+    bash -c "curl -s -m 60 'http://127.0.0.1:$port/api/items' | jq -e '.items[] | select(.id == \"cc-live\")'"
+  body=$(curl -s -m 30 "http://127.0.0.1:$port/")
+  for sep in renderNotePane renderMessagePane renderMain; do
+    assert_contains "$(printf '%s\n' "$body" | awk "/^function $sep\\(/,/^}/")" 'deleteBtnHtml()' \
+      "the $sep pane has no Delete of its own beside Archive and Hold"
+  done
+  printf '%s\n' "$body" | awk '
+    /^async function post\(/,/^}/; /^function park\(/,/^}/;
+    /^function setNoteArchived\(/,/^}/; /^function setNoteHeld\(/,/^}/;
+    /^const nowIso =/; /^const noteKey =/; /^const findNote =/; /^let writing =/;
+    /^let deleteArmTimer/; /^async function armOrDelete\(/,/^}/; /^async function deleteKeys\(/,/^}/;
+    /^function deleteTargets\(/,/^}/; /^document.addEventListener\(.click./,/^}\);/' > "$TMP_ROOT/pane.js"
+  out=$(node -e '
+    const fs = require("fs"), vm = require("vm");
+    const [code, base] = process.argv.slice(1);
+    const g = globalThis, f = fetch, noop = () => {};
+    g.fetch = (u, o) => f(base + u, o);
+    Object.assign(g, {render: noop, renderList: noop, applyArchiveOverride: noop, advanceTo: noop,
+      displayOrder: () => [], visibleMessages: () => [], visible: () => [], listedNotes: () => [],
+      msgKey: m => "msg/" + m.id, rowKey: k => k, itemKey: k => k, $: () => null});
+    let handler = null;
+    g.document = {addEventListener: (t, fn) => { if (t === "click") handler = fn; }};
+    vm.runInThisContext(fs.readFileSync(code, "utf8"));
+    const click = (open, sel, dataset) => { state.open = open;
+      return handler({target: {closest: s => s.split(",").map(x => x.trim()).includes(sel)
+        ? {dataset: dataset || {}} : null}}); };
+    (async () => {
+      g.state = {said: (await (await f(base + "/api/said")).json()).said, tab: "messages",
+                 selected: new Set(), deleted: new Set(), view: {items: []}, deleteArmed: null};
+      await click("note/n-arch", "[data-archive-note]", {archiveNote: "n-arch"});
+      await click("note/n-hold", "[data-hold-note]", {holdNote: "n-hold"});
+      const armed = [];
+      for (const key of ["note/n-del", "msg/m-del", "main/hold/cc-live/cc-live"]) {
+        await click(key, "[data-delete-open]");
+        armed.push(state.deleted.has(key) ? "deleted on one click" : state.deleteArmed);
+        await click(key, "[data-delete-open]");
+      }
+      await new Promise(r => setTimeout(r, 1000));   // park() does not wait for its answer
+      process.stdout.write(armed.join(","));
+      process.exit(0);
+    })().catch(e => { console.error(e.stack); process.exit(1); });
+  ' "$TMP_ROOT/pane.js" "http://127.0.0.1:$port" 2>&1) || fail "the page's own click handler could not be run: $out"
+  assert_equals "note/n-del,msg/m-del,main/hold/cc-live/cc-live" "$out" \
+    "a pane's Delete did not arm on its first click, for exactly its own row"
+  assert_equals '{"n-arch":[true,false,null],"n-del":[false,false,true],"n-hold":[false,true,null]}' \
+    "$(curl -s -m 30 "http://127.0.0.1:$port/api/said" | jq -cS '[.said[] | {(.sid): [.archived, .held, .deleted]}] | add')" \
+    "his own notes did not take Archive, Hold and Delete from their panes' own buttons"
+  assert_equals "0 0" "$(curl -s -m 30 "http://127.0.0.1:$port/api/messages" | jq '[.messages[] | select(.id == "m-del")] | length') $(
+    curl -s -m 60 "http://127.0.0.1:$port/api/items" | jq '[.items[] | select(.id == "cc-live")] | length')" \
+    "a message or item deleted from its own pane was still served"
+  stop_server
+  pass "every pane archives, holds and deletes its own row, his own notes included"
+}
+
 trap stop_server EXIT
 
 test_only_live_captain_holds_are_carded
@@ -3998,7 +4141,7 @@ test_a_taskless_message_is_matched_to_the_one_task_it_names
 test_a_message_naming_two_tasks_is_left_blank_rather_than_guessed
 test_a_message_for_a_task_whose_meta_is_gone_gets_its_backlog_repo
 test_a_message_matched_to_a_registered_project_when_it_names_no_task
-test_a_message_shows_every_project_a_turns_tool_calls_touched
+test_a_turn_that_touched_two_projects_names_none_of_them
 test_a_resolved_message_context_is_cached_and_never_rereads_its_transcript
 test_a_worker_evidenced_project_is_not_joined_by_a_keyword_guess
 test_a_task_with_no_backlog_line_resolves_through_its_own_brief
@@ -4060,3 +4203,5 @@ test_a_pasted_image_round_trips_into_the_delivered_note
 test_several_images_attach_to_one_answer
 test_uploaded_images_survive_a_restart
 test_an_oversize_or_wrong_type_image_is_refused_and_nothing_is_saved
+test_an_open_page_reloads_itself_when_a_deploy_lands
+test_every_pane_archives_holds_and_deletes_its_own_row
