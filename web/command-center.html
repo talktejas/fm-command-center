@@ -143,7 +143,7 @@
   .lamp.idle{background:var(--accent)}
   .lamp.unknown{background:#c3c9d2;box-shadow:inset 0 0 0 1.5px #aeb5bf;background:transparent}
   .lamp.dead{background:var(--hot)}
-  .lamp.none{background:var(--line)}
+  .lamp.none,.lamp.closed{background:var(--line)}
   .item-title{font-size:13.5px;font-weight:600;letter-spacing:-.005em;flex:1;
     overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
   .item.answered .item-title{font-weight:500}
@@ -474,6 +474,9 @@ const LISTEN = {
   unknown: { label:'Cannot tell',        say:'No trustworthy signal recently. Your answer is still saved, but nobody can promise it is being watched.' },
   dead:    { label:'Not running',        say:'Nobody is listening. Your answer is saved and firstmate picks it up — nothing is lost, but nothing happens until it does.' },
   none:    { label:'No worker',          say:'Nobody is working on this. It is a question held for you; firstmate acts on your answer.' },
+  // Served from bin/command-center.py's remember_waiting: the scan stopped
+  // listing it, and only his own Archive or Hold takes it off this list.
+  closed:  { label:'Closed on firstmate’s side', say:'Firstmate’s records no longer list this as open. It stays here until you archive or hold it, and an answer still reaches firstmate.' },
 };
 const HOME_COLOURS = ['#1f5fd0','#177245','#6b34b8','#b45309','#b3261e'];
 
@@ -1005,6 +1008,7 @@ function itemRow(it, mode){
   else if (isStuck(it))   flag = '<span class="flag f-stuck">stuck</span>';
   else if (isPending(it)) flag = '<span class="flag f-sent">sent</span>';
   else if (isDeferred(it)) flag = `<span class="flag f-sent">until ${esc(it.deferred_until)}</span>`;
+  else if (it.closed) flag = '<span class="flag f-sent">closed</span>';
   else {
     const answered = state.said.filter(r => r.item_key === itemKey(it)).slice().reverse();
     if (answered.length) flag = threadBadgeHtml(threadStatus(threadEntries(answered)));
@@ -1175,7 +1179,12 @@ function renderList(){
   const empty = state.q || state.sfilter ? 'Nothing matches.'
     : !state.scanned ? 'The records have not been read yet.'
     : 'Nothing is waiting on you.<br>Firstmate is getting on with it.';
-  paintList(rowsHtml(rows, it => it.__msg ? messageRow(it, 'list') : itemRow(it, 'list'), empty));
+  // loadMessages walks every unarchived message in before this list is built;
+  // until it has, a question further back could be missing, so it says so.
+  const partial = state.more ? `<div class="archive-note" style="background:var(--warn-soft)">
+    Older messages have not all been read yet, so a question further back may be
+    missing here — it is still in the log, and every poll tries again.</div>` : '';
+  paintList(partial + rowsHtml(rows, it => it.__msg ? messageRow(it, 'list') : itemRow(it, 'list'), empty));
 }
 
 // On hold is only ever his own parking - nothing here was ever sent to
@@ -1490,28 +1499,32 @@ async function sendWorkAnswer(id, text){
 }
 
 // The rest of the log, a window at a time, oldest end of what is loaded first.
-async function loadOlder(){
-  const archived = state.tab === 'archived';
+// Returns whether a window was read, so a caller can keep walking.
+async function fetchOlder(archived){
   const held = archived ? state.archivedMessages : state.messages;
   const oldest = held[held.length - 1];
-  if (!oldest) return;
+  if (!oldest) return false;
   try {
     const res = await fetch('/api/messages?before=' + encodeURIComponent(oldest.id)
       + (archived ? '&archived=1' : ''));
-    if (!res.ok) return;
+    if (!res.ok) return false;
     const body = await res.json();
     // This page was read from the oldest row the list holds, so it continues
     // that run rather than being merged against it.
     const have = new Set(held.map(m => m.id));
-    const next = held.concat((body.messages || []).map(shapeMessage).filter(m => !have.has(m.id)));
+    const added = (body.messages || []).map(shapeMessage).filter(m => !have.has(m.id));
+    const next = held.concat(added);
     if (archived) { state.archivedMessages = next; state.archivedMore = !!body.more; }
     else { state.messages = next; state.more = !!body.more; }
     if (typeof body.total === 'number') {
       if (archived) state.archivedTotal = body.total;
       else state.total = body.total;
     }
-    renderList();
-  } catch (e) { /* the list he has still stands */ }
+    return added.length > 0;
+  } catch (e) { return false; /* the list he has still stands */ }
+}
+async function loadOlder(){
+  if (await fetchOlder(state.tab === 'archived')) renderList();
 }
 
 // One list renderer for both, so the grouping, the flat views and the
@@ -2097,8 +2110,18 @@ async function loadMessages(){
     // window since it was read is still one of the things firstmate said.
     const fresh = (body.messages || []).map(shapeMessage);
     state.messages = mergeMessages(fresh, state.messages);
-    applyArchiveOverride();
     state.more = state.messages.length > fresh.length ? state.more : !!body.more;
+    // Waiting on you is built from these rows (waitingMessageRows), so the
+    // newest window alone would silently drop every question older than it
+    // (his report 2026-09-28: "they just disappeared"). Every unarchived
+    // message is walked in before anything renders, however many newer ones
+    // arrived or whatever mergeMessages had to drop; if a window cannot be
+    // read, state.more stays set and Waiting on you says it is incomplete.
+    // ponytail: pages the whole unarchived log (bounded by what he has not
+    // archived); move the question rule server-side if that ever runs to
+    // thousands.
+    while (state.more && await fetchOlder(false)) { /* next window */ }
+    applyArchiveOverride();
     state.total = typeof body.total === 'number' ? body.total : state.messages.length;
     state.archivedTotal = typeof body.archived_total === 'number'
       ? body.archived_total : state.archivedTotal;
@@ -2578,6 +2601,9 @@ document.addEventListener('click', async e => {
   const tab = e.target.closest('.tab');
   if (tab){
     state.tab = tab.dataset.tab;
+    // A selection is only ever acted on from the tab it was made on: left
+    // standing, the gutter's Archive/Hold would act on rows no longer shown.
+    state.selected.clear();
     if (state.tab === 'messages' || state.tab === 'info' || state.tab === 'archived') {
       searchMessages();
       if (state.tab === 'archived') await loadArchivedMessages();

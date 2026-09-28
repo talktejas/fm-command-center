@@ -239,6 +239,7 @@ class Records:
             self.error = f"scan produced unreadable output: {exc}"
             return
         self.error = None
+        data["items"] = remember_waiting(self.home, data.get("items", []))
         with self.lock:
             self.etag = etag
             self.body = dump(data)
@@ -273,7 +274,9 @@ class Records:
         mine = {h["id"] for h in view.get("homes", [])
                 if os.path.realpath(h["path"]) == os.path.realpath(self.home)}
         for it in view.get("items", []):
-            if it["id"] != task_id or it["home"] not in mine:
+            # A remembered item firstmate has closed is no longer a decision
+            # still waiting, whatever the page keeps showing.
+            if it["id"] != task_id or it["home"] not in mine or it.get("closed"):
                 continue
             if key:
                 if it["source"] == "status" and (it.get("key") or "") == key:
@@ -296,6 +299,68 @@ class Records:
 def item_key(item):
     """The identity the page uses too (itemKey in bin/command-center.html)."""
     return "/".join([item["home"], item["source"], item["id"], item.get("key") or ""])
+
+
+def waiting_ledger_path(home):
+    """Every Waiting-on-you item this page has ever shown, keyed by item_key."""
+    return os.path.join(home, "data", "command-center", "waiting.json")
+
+
+def remember_waiting(home, items):
+    """The scanned items plus every item ever shown that the scan has dropped.
+
+    The scan lists only decisions still OPEN in firstmate's own records, so
+    firstmate resolving a status decision or closing a captain hold - itself,
+    on his behalf, or from a note he sent - used to delete the row from
+    Waiting on you in front of him (his report 2026-09-28: "they just
+    disappeared"). Nothing leaves Waiting on you except his own Archive or
+    Hold (parked.jsonl), so an item the scan stops listing is served on from
+    this ledger with `closed` set, its last scanned text intact. It survives a
+    restart because it is on disk, and returns to live the moment the scan
+    lists it again.
+
+    A ledger that cannot be read is never overwritten: the live scan is
+    served alone that once rather than replacing his remembered queue.
+    """
+    # ponytail: one JSON file rewritten per scan change; entries are never
+    # pruned (an archived one can be restored), so split it per home or drop
+    # long-archived entries if it ever grows past a few MB.
+    path = waiting_ledger_path(home)
+    try:
+        with open(path, encoding="utf-8") as fh:
+            ledger = json.load(fh)
+    except FileNotFoundError:
+        ledger = {}
+    except (OSError, json.JSONDecodeError) as exc:
+        sys.stderr.write(f"command-center: could not read {path}: {exc}\n")
+        return items
+    before = json.dumps(ledger, sort_keys=True)
+    now = utc_now()
+    live = set()
+    for it in items:
+        key = item_key(it)
+        live.add(key)
+        ledger[key] = {"item": it,
+                       "first_seen": (ledger.get(key) or {}).get("first_seen", now)}
+    out = list(items)
+    for key, rec in ledger.items():
+        if key in live:
+            continue
+        rec.setdefault("closed_at", now)
+        # Nothing of the scan's live state is true of it any more: no worker
+        # is listening for it, and no steering record is in flight.
+        out.append(dict(rec["item"], closed=True, closed_at=rec["closed_at"],
+                        listen="closed", sent=[]))
+    if json.dumps(ledger, sort_keys=True) != before:
+        try:
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            tmp = f"{path}.{os.getpid()}.tmp"
+            with open(tmp, "w", encoding="utf-8") as fh:
+                json.dump(ledger, fh, ensure_ascii=False)
+            os.replace(tmp, path)
+        except OSError as exc:
+            sys.stderr.write(f"command-center: could not write {path}: {exc}\n")
+    return out
 
 
 class Work:
