@@ -1218,12 +1218,15 @@ test_a_url_becomes_a_real_link_on_every_surface_that_shows_free_text() {
     "a Waiting-on-you item's own question text does not link URLs"
   assert_contains "$body" 'linked(m.text)}</div>${trackHtml(m)}' \
     "what you sent to a worker does not link URLs"
-  # A threaded conversation's own "you" bubble (a message's and an item's own
-  # pane) reads its row as `e.row`, not `r`, once it interleaves firstmate's
-  # matched answer alongside it - same call, same linked(), different local
-  # name for the loop variable.
-  assert_equals "2" "$(grep -oE 'linked\(e\.row\.text\)' <<<"$body" | wc -l)" \
-    "his reply thread and a Waiting-on-you item's answered thread must each link URLs"
+  # A threaded conversation's own bubbles (a message's, an item's and a
+  # note's own pane) are all drawn by the one threadEntryHtml, which reads its
+  # row as `e.row`: his words through linked(), firstmate's through para().
+  assert_contains "$body" 'const threadEntryHtml = e =>' \
+    "the thread panes no longer share one entry renderer"
+  assert_equals "1" "$(grep -oE 'linked\(e\.row\.text\)' <<<"$body" | wc -l)" \
+    "his side of a thread must link URLs"
+  assert_equals "1" "$(grep -oE 'para\(e\.row\.text\)' <<<"$body" | wc -l)" \
+    "firstmate's side of a thread must link URLs"
   pass "a URL becomes a real link on every surface that shows free text"
 }
 
@@ -2596,6 +2599,57 @@ test_a_deleted_message_and_item_are_gone_from_every_list() {
   pass "a deleted message and item are gone from every list, across a restart"
 }
 
+# His report 2026-09-28: queries with "no response" - every one had been
+# answered, but as a new message somewhere else. A note sent from the page is
+# marked answerable, firstmate records its answer against the note's own inbox
+# id (`answers`, what fm-captain-message.sh --answers writes), the served page
+# rule threads the two together, and Delete only flags the note - his record of
+# what he said is never edited - while busting the said poll's 304.
+test_a_recorded_answer_threads_under_the_note_it_answers() {
+  local home port said note_id sid etag1 etag2 out
+  home="$TMP_ROOT/answers"
+  mkdir -p "$home/data" "$home/state"
+  start_server "$home" || fail "the server did not start"
+  port=$SERVER_PORT
+  curl -s -m 120 -o /dev/null "http://127.0.0.1:$port/api/items"
+  post "$port" /api/note '{"text":"Is the nightly build fixed yet?"}' >/dev/null
+  for _ in $(seq 1 30); do
+    said=$(curl -s -m 30 "http://127.0.0.1:$port/api/said")
+    note_id=$(jq -r '.said[0].note_id // empty' <<<"$said")
+    [ -n "$note_id" ] && break
+    sleep 1
+  done
+  [ -n "$note_id" ] || fail "the note was never queued: $said"
+  sid=$(jq -r '.said[0].sid' <<<"$said")
+  assert_equals true "$(jq -r '.said[0].answerable' <<<"$said")" "a new note was not marked answerable"
+  jq -cn --arg a "$note_id" '{id:"m-ans",at:"2099-01-01T00:00:00Z",title:"Nightly",
+    text:"Fixed.",task:null,project:null,worktree:null,branch:null,question:false,
+    question_key:null,answers:$a}' >> "$home/data/captain-messages.jsonl"
+  curl -s -m 30 "http://127.0.0.1:$port/api/messages" > "$home/messages.json"
+  curl -s -m 30 "http://127.0.0.1:$port/api/said" > "$home/said.json"
+  curl -s -m 30 "http://127.0.0.1:$port/command-center-state.js" > "$home/state.js"
+  out=$(node -e '
+    const [dir] = process.argv.slice(1);
+    const S = require(dir + "/state.js");
+    const msgs = require(dir + "/messages.json").messages.map(S.shapeMessage);
+    const said = require(dir + "/said.json").said;
+    const [note] = S.noteThreads(said);
+    const entries = S.threadRows([note], msgs);
+    console.log(entries.map(e => e.kind + ":" + e.row.text).join("|") + "|" + S.threadStatus(entries).state);
+  ' "$home")
+  assert_equals "you:Is the nightly build fixed yet?|firstmate:Fixed.|answered" "$out" \
+    "firstmate's recorded answer did not thread under the note it answers"
+  etag1=$(curl -s -m 30 -D - -o /dev/null "http://127.0.0.1:$port/api/said" | grep -i '^etag')
+  assert_contains "$(post "$port" /api/park "$(jq -cn --arg k "$sid" '{target:"note",key:$k,state:"deleted"}')")" \
+    '"ok":true' "a note could not be deleted through /api/park"
+  said=$(curl -s -m 30 "http://127.0.0.1:$port/api/said")
+  etag2=$(curl -s -m 30 -D - -o /dev/null "http://127.0.0.1:$port/api/said" | grep -i '^etag')
+  stop_server
+  assert_equals true "$(jq -r '.said[0].deleted' <<<"$said")" "a deleted note was not flagged deleted"
+  [ "$etag1" != "$etag2" ] || fail "deleting a note left the said poll answering 304"
+  pass "a recorded answer threads under the note it answers, and a note can be deleted"
+}
+
 # His report 2026-09-28: "I had 45 items waiting on you... they just
 # disappeared." The scan lists only decisions still OPEN in firstmate's
 # records, so firstmate closing a hold or writing `resolved` under a worker's
@@ -3671,6 +3725,7 @@ test_archived_messages_are_served_latest_archived_first
 test_a_held_message_leaves_the_messages_total_the_way_archiving_does
 test_park_makes_item_and_message_state_durable_across_a_restart
 test_a_deleted_message_and_item_are_gone_from_every_list
+test_a_recorded_answer_threads_under_the_note_it_answers
 test_park_refuses_an_unknown_target_or_state
 test_an_item_firstmate_closes_stays_waiting_until_he_parks_it
 test_an_old_question_is_still_waiting_after_many_newer_messages
