@@ -1820,6 +1820,10 @@ test_a_reply_takes_the_answer_route_when_the_task_is_still_waiting() {
     "a reply about a task called a decision-closing script instead of only the note route"
   assert_contains "$(cat "$home"/state/inbox/*.note 2>/dev/null)" 'Go blue.' \
     "his exact words never reached firstmate's own inbox"
+  assert_contains "$(cat "$home"/state/inbox/*.note 2>/dev/null)" "Reply to message $id" \
+    "a reply taking the answer route did not name the message it answers"
+  assert_contains "$(cat "$home"/state/inbox/*.note 2>/dev/null)" "task cc-live" \
+    "a reply did not name the work the message belongs to"
   pass "a reply about a task still waiting reaches firstmate's inbox as its answer"
 }
 
@@ -1844,7 +1848,12 @@ test_a_reply_with_nothing_waiting_is_queued_for_firstmate() {
     "a reply with nothing waiting on it did not reach firstmate as a note"
   assert_contains "$(cat "$home"/state/inbox/*.note 2>/dev/null)" 'Merge it.' \
     "his reply never reached firstmate's own inbox"
-  pass "a reply with nothing waiting on it is queued for firstmate"
+  # His report 2026-09-28: a reply that arrives as his bare words could be
+  # answering any open question - it must name the message it answers.
+  assert_contains "$(cat "$home"/state/inbox/*.note 2>/dev/null)" \
+    "Reply to message $id — \"PR is green\"" \
+    "the reply reached firstmate without naming the message it answers"
+  pass "a reply with nothing waiting on it is queued for firstmate, naming its message"
 }
 
 test_a_reply_to_a_message_this_home_never_recorded_is_refused() {
@@ -2405,6 +2414,38 @@ test_an_archived_message_leaves_messages_and_can_be_restored() {
   pass "archiving is durable beside the message and can be restored"
 }
 
+# His report 2026-09-28: "the sort order should have the latest archived item
+# on top" - Archived is ordered by when each message was archived (its archive
+# amendment's own `at`), never by when firstmate sent it, and an amendment
+# with no `at` falls back to the message's own time.
+test_archived_messages_are_served_latest_archived_first() {
+  local home port old new bare body log
+  home="$TMP_ROOT/archive-order"
+  seed_home "$home"
+  old=$(say "$home" "Old" "Sent first.") || fail "the recorder refused the message"
+  new=$(say "$home" "New" "Sent second.") || fail "the recorder refused the message"
+  bare=$(say "$home" "Bare" "Archived with no recorded time.") || fail "the recorder refused the message"
+  log="$home/data/captain-messages.jsonl"
+  jq -cn --arg m "$new" '{kind:"archive",of:$m,at:"2000-01-01T00:00:00Z"}' >>"$log"
+  jq -cn --arg m "$old" '{kind:"archive",of:$m,at:"2999-01-01T00:00:00Z"}' >>"$log"
+  jq -cn --arg m "$bare" '{kind:"archive",of:$m}' >>"$log"
+  start_server "$home" || fail "the server did not start"
+  port=$SERVER_PORT
+  body=$(curl -s -m 30 "http://127.0.0.1:$port/api/messages?archived=1")
+  assert_equals "$old $bare $new" "$(printf '%s' "$body" | jq -r '[.messages[].id] | join(" ")')" \
+    "Archived was not ordered latest archived first"
+  assert_equals 2999-01-01T00:00:00Z "$(printf '%s' "$body" | jq -r '.messages[0].archived_at')" \
+    "an archived message did not carry the time it was archived"
+  assert_equals "$(jq -r --arg m "$bare" 'select(.id == $m) | .at' "$log")" \
+    "$(printf '%s' "$body" | jq -r '.messages[1].archived_at')" \
+    "an archive with no recorded time did not fall back to the message's own time"
+  body=$(curl -s -m 30 "http://127.0.0.1:$port/api/messages?archived=1&before=$old")
+  assert_equals "$bare $new" "$(printf '%s' "$body" | jq -r '[.messages[].id] | join(" ")')" \
+    "walking back through Archived did not continue in archive order"
+  stop_server
+  pass "Archived is served latest archived first, by the archive record's own time"
+}
+
 # The captain's report 2026-09-24: "i have now 0 messages in command center
 # and it shows 28 why? is it showing on hold messages?" - a held message must
 # leave the Messages count exactly the way archiving already leaves it, or
@@ -2476,6 +2517,10 @@ test_park_makes_item_and_message_state_durable_across_a_restart() {
     "$(curl -s -m 30 "http://127.0.0.1:$port/api/items" | jq -r --arg k "$item_key" \
       '[.items[] | select((.home+"/"+.source+"/"+.id+"/"+(.key // "")) == $k)][0].archived')" \
     "the item did not read back archived from /api/items"
+  assert_equals true \
+    "$(curl -s -m 30 "http://127.0.0.1:$port/api/items" | jq -r --arg k "$item_key" \
+      '[.items[] | select((.home+"/"+.source+"/"+.id+"/"+(.key // "")) == $k)][0].archived_at | test("^[0-9]{4}-")')" \
+    "an archived item did not carry the time it was archived, which Archived orders by"
   assert_equals true \
     "$(curl -s -m 30 "http://127.0.0.1:$port/api/messages?id=$id" | jq -r '.messages[0].held')" \
     "the message did not read back held from /api/messages"
@@ -3497,6 +3542,7 @@ test_a_reply_that_is_not_a_question_is_sent_even_with_no_scan
 test_every_captured_message_is_reachable_without_serving_them_all
 test_a_message_far_behind_the_window_is_served_by_id
 test_an_archived_message_leaves_messages_and_can_be_restored
+test_archived_messages_are_served_latest_archived_first
 test_a_held_message_leaves_the_messages_total_the_way_archiving_does
 test_park_makes_item_and_message_state_durable_across_a_restart
 test_a_deleted_message_and_item_are_gone_from_every_list

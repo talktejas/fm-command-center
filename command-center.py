@@ -495,11 +495,12 @@ def record_parked(home, target, key, state):
     return None
 
 
-def read_parked(home):
-    """{(target, key): "archived"|"held"|"deleted"} for every row still parked - a row
+def read_parked_rows(home):
+    """{(target, key): amendment} for every row still parked ("archived",
+    "held" or "deleted") - a row
     whose latest amendment is "none" is left out entirely, the same as one
     never parked at all. Newest first, so the first amendment seen per pair
-    is the one that stands.
+    is the one that stands; its `at` is when it was archived or held.
     """
     rows, _error, _dropped = read_log(parked_log(home), limit=200000)
     seen = set()
@@ -510,8 +511,24 @@ def read_parked(home):
             continue
         seen.add(pair)
         if row.get("state") in ("archived", "held", "deleted"):
-            parked[pair] = row["state"]
+            parked[pair] = row
     return parked
+
+
+def read_parked(home):
+    """{(target, key): "archived"|"held"|"deleted"} - read_parked_rows' states alone."""
+    return {pair: row["state"] for pair, row in read_parked_rows(home).items()}
+
+
+def parked_fields(parked, pair):
+    """The archived/held/archived_at fields a parked row carries - archived_at
+    only when archived, so the Archived tab can put the latest on top."""
+    row = parked.get(pair) or {}
+    fields = {"archived": row.get("state") == "archived",
+              "held": row.get("state") == "held"}
+    if fields["archived"]:
+        fields["archived_at"] = row.get("at")
+    return fields
 
 
 # Appends to said.jsonl come from request threads and delivery threads alike;
@@ -1484,6 +1501,11 @@ def read_messages(home, limit=MESSAGE_WINDOW, before=None, query=None, archived=
     A log that is not there yet is honestly empty; one that cannot be READ is a
     different state, and reporting it as empty would tell the captain firstmate
     never said anything to him.
+
+    The archived list is ordered by when each message was archived, latest
+    first - the `at` of its standing archive amendment, falling back to the
+    message's own time for an amendment that never recorded one - so it has
+    to read every archived row before it can cut a window.
     """
     needle = query.strip().lower() if query else None
     replies = replies_by_message(home) if needle else {}
@@ -1502,21 +1524,25 @@ def read_messages(home, limit=MESSAGE_WINDOW, before=None, query=None, archived=
                 except json.JSONDecodeError:
                     continue
                 if row.get("kind") in ("archive", "unarchive") and row.get("of"):
-                    archive_state.setdefault(row["of"], row["kind"] == "archive")
+                    archive_state.setdefault(row["of"], row)
                     continue
                 if not row.get("id") or "text" not in row:
                     continue
-                if skipping:
+                if skipping and not archived:
                     if mark in raw and row.get("id") == before:
                         skipping = False
                     continue
-                if bool(archive_state.get(row["id"])) != archived:
+                amendment = archive_state.get(row["id"]) or {}
+                if (amendment.get("kind") == "archive") != archived:
                     continue
                 if held.get(("message", row["id"])) == "deleted":
                     continue
+                if archived:
+                    # Every archived row first; sorted and windowed below.
+                    row = dict(row, archived_at=amendment.get("at") or row.get("at"))
                 if needle and not matches(row, needle, replies):
                     continue
-                if len(rows) == limit:
+                if not archived and len(rows) == limit:
                     return rows, True, None
                 rows.append(dict(row, archived=archived,
                                   held=held.get(("message", row["id"])) == "held"))
@@ -1524,6 +1550,12 @@ def read_messages(home, limit=MESSAGE_WINDOW, before=None, query=None, archived=
         return [], False, None
     except OSError as exc:
         return [], False, f"the record could not be read: {exc}"
+    if archived:
+        rows.sort(key=lambda r: r.get("archived_at") or "", reverse=True)
+        if before:
+            ids = [r["id"] for r in rows]
+            rows = rows[ids.index(before) + 1:] if before in ids else []
+        return rows[:limit], len(rows) > limit, None
     return rows, False, None
 
 
@@ -1616,6 +1648,22 @@ def deliver_to_inbox(main_home_path, item, text):
     except Exception as exc:  # noqa: BLE001 - a failed wake must never look like a lost answer
         outcome, route, detail, note_id = "unknown", "fm-inbox.sh note", str(exc), None
     return ("sent" if outcome == "sent" else "failed"), route, detail, note_id
+
+
+def reply_body(message, text):
+    """His reply as firstmate receives it: headed by the message it answers -
+    its id, its title and the work it belongs to - never his bare words
+    (his report 2026-09-28: "why the fuck u dont give me context"). Without
+    this a reply reads back as a loose note that could answer any of a dozen
+    open questions. A field the message never recorded is left out, never
+    guessed.
+    """
+    work = " · ".join(f"{label} {message[k]}" for label, k in
+                      (("task", "task"), ("project", "project"),
+                       ("worktree", "worktree"), ("branch", "branch"))
+                      if message.get(k))
+    return (f"Reply to message {message['id']} — \"{message.get('title') or '(no title)'}\""
+            + (f" ({work})" if work else "") + f":\n{text}")
 
 
 def record_archive(home, msg_id, archived):
@@ -1888,14 +1936,12 @@ class Handler(BaseHTTPRequestHandler):
                 return
             view = json.loads(body)
             view["error"] = self.records.error
-            parked = read_parked(self.records.home)
+            parked = read_parked_rows(self.records.home)
             # A deleted item is gone from the view outright, not flagged.
             view["items"] = [it for it in view.get("items", [])
-                             if parked.get(("item", item_key(it))) != "deleted"]
+                             if (parked.get(("item", item_key(it))) or {}).get("state") != "deleted"]
             for it in view["items"]:
-                key = item_key(it)
-                it["archived"] = parked.get(("item", key)) == "archived"
-                it["held"] = parked.get(("item", key)) == "held"
+                it.update(parked_fields(parked, ("item", item_key(it))))
             self._send(200, dump(view), etag=combined_etag)
             return
 
@@ -2118,8 +2164,14 @@ class Handler(BaseHTTPRequestHandler):
                 if unread:
                     return {"outcome": "failed", "route": "", "home": "main",
                             "detail": unread}
+                # Enriched here, behind the acceptance, so naming the work the
+                # message belongs to never slows the click.
+                try:
+                    context = enrich_messages([message], records)[0]
+                except Exception:  # noqa: BLE001 - the recorded fields still name it
+                    context = message
+                body = append_image_markers(reply_body(context, text), records.home, images)
                 if item:
-                    body = append_image_markers(text, records.home, images)
                     outcome, route, detail, note_id = deliver_to_inbox(main_home_path, item, body)
                     if outcome == "sent":
                         records.invalidate()
@@ -2129,7 +2181,6 @@ class Handler(BaseHTTPRequestHandler):
                             "source": item["source"], "key": item.get("key"),
                             "item_key": item_key(item), "note_id": note_id,
                             "sent_count": len(item.get("sent") or [])}
-                body = append_image_markers(text, records.home, images)
                 try:
                     outcome, route, detail, note_id = send_note(records.home, body)
                 except subprocess.SubprocessError as exc:
