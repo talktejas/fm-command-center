@@ -489,30 +489,56 @@ function threadStatus(entries) {
 }
 
 // --- Messages vs Info -------------------------------------------------------------
-// His ask 2026-09-24: "add one more info tab so from messages split into two all
-// the messages like nothing new, we are progressing etc. etc. just put in info
-// tab" - pure progress/no-change chatter moves to Info; anything reporting a real
-// outcome, a landed change, a decision or a problem stays in Messages. Kept
-// deliberately conservative (checked AFTER looksLikeQuestion, never before): a
-// message that plainly asks him something is never info-only, whatever else it
-// says, and nothing not matched here defaults to Info - it defaults to Messages.
-const INFO_TERMINAL_PHRASES = [
-  'nothing new for the captain', 'nothing new', 'nothing needs you',
-  'nothing else needs you', 'nothing to report', 'still running', 'still going',
-  'routine progress',
-];
+// His ask 2026-09-24 split Messages into Messages and Info; his report
+// 2026-09-28 ("why the fuck this is coming in messages instead of info?",
+// "this response to what i said should also come in info") turned the default
+// round. Messages keeps only what matters: a finished piece of work, a real
+// outcome, a failure or blocker, or something asking him a question or a
+// decision. Everything else - an ack, "nothing new", "understood", "on it", a
+// plain response to what he said with no new result - is Info, and so is
+// anything these rules cannot place: burying a real outcome costs him more
+// than one more line in Info, but a Messages tab full of noise is useless.
+//
+// In order, first match wins:
+//   1. recorded as a question, or the text ends with "?"      -> Messages
+//   2. says outright there is nothing new for him             -> Info
+//   3. asks him to decide (looksLikeQuestion's phrases, or ASKS), not
+//      counting a sentence that only recaps what is already
+//      "waiting on your word"                                 -> Messages
+//   4. its lead reports an outcome or a failure (below)       -> Messages
+//   5. anything else                                          -> Info
+// Only the lead (NEWS_LEAD chars) is read for rule 4, so a long reply that
+// mentions "merged" deep in its reasoning is not mistaken for news.
+const NOTHING_NEW = /\bnothing (new|changed|for (you|the captain))\b|\bnothing else needs you\b|\bnothing needs you\b|\bnothing to report\b/;
+const NEWS_LEAD = 200;
+const RECAP = /[^.\n]*waiting on your[^.\n]*/gi;
+// Asks looksLikeQuestion does not know. Kept here, not added there, so this
+// changes only Messages vs Info and never what Waiting on you lists.
+const ASKS = ['pick a name', 'pick one', 'choose', 'say go'];
+const OUTCOME = new RegExp([
+  // finished / landed / live
+  '\\b(landed|merged|shipped|deployed)\\b',
+  '\\b(is|are|now|and) (live|fixed|done|finished|ready|back up|in place)\\b', '\\bready for your\\b',
+  '\\bis in[.!]', '\\bexists[.!]', '\\bnow (runs|works|threads|built)\\b',
+  '\\b(audit|research|review|investigation|answer) is (in|done)\\b',
+  // failed / broken / blocked
+  '\\b(failed|crashed)\\b', '\\b(is|are|was|were|been|got) (broken|blocked|stuck|lost|failing)\\b',
+  '\\b(is|went|was) down\\b', "\\b(not|isn't|aren't|still not) working\\b",
+].join('|'));
 function looksLikeInfoOnly(text) {
   const t = String(text || '').trim();
   if (!t) return false;
-  const low = t.toLowerCase().replace(/[.!]+$/, '');
-  if (/^(ack|acked|noted|ok|okay|got it)$/.test(low)) return true;
-  return INFO_TERMINAL_PHRASES.some(p => low === p || low.endsWith(' ' + p) || low.endsWith(': ' + p));
+  if (t.endsWith('?')) return false;
+  const low = t.toLowerCase();
+  if (NOTHING_NEW.test(low)) return true;
+  const asked = t.replace(RECAP, '');
+  if (looksLikeQuestion(asked) || ASKS.some(p => asked.toLowerCase().includes(p))) return false;
+  return !OUTCOME.test(low.slice(0, NEWS_LEAD));
 }
 function isInfoOnlyMessage(message) {
   if (!message) return false;
   if (message.question) return false;
-  if (looksLikeQuestion(message.text) || looksLikeQuestion(message.title)) return false;
-  return looksLikeInfoOnly(message.text) || looksLikeInfoOnly(message.title);
+  return looksLikeInfoOnly(message.text || message.title);
 }
 
 // --- exactly what Waiting on you counts and lists --------------------------------

@@ -401,8 +401,8 @@ test('a My words row resolves what it was replying to, or null for a plain note'
 // His ask 2026-09-24: "add one more info tab so from messages split into two
 // all the messages like nothing new, we are progressing etc. etc." - pure
 // progress/no-change chatter is Info; anything reporting a real outcome, a
-// landed change, a decision or a problem stays in Messages. Kept conservative:
-// a message that plainly asks him something is never info-only.
+// landed change, a decision or a problem stays in Messages, and a message that
+// plainly asks him something is never info-only.
 test('pure status chatter is info-only; anything with a decision or an outcome is not', () => {
   assert.strictEqual(isInfoOnlyMessage({ text: 'Nothing new for the captain.' }), true);
   assert.strictEqual(isInfoOnlyMessage({ text: "That's metals 08, paused for Codex quota. Nothing new for the captain." }), true);
@@ -415,7 +415,42 @@ test('pure status chatter is info-only; anything with a decision or an outcome i
   assert.strictEqual(isInfoOnlyMessage({ question: true, text: 'Nothing new for the captain.' }), false,
     'a message the recorder marked as a question is never info-only');
   assert.strictEqual(isInfoOnlyMessage({ text: 'The build failed on the integration branch.' }), false,
-    'an unrecognised message defaults to Messages, never to Info');
+    'a failure stays in Messages');
+});
+
+// His report 2026-09-28: "why the fuck this is coming in messages instead of
+// info?" / "this response to what i said should also come in info." - the
+// default turned round: Messages keeps an outcome, a failure or an ask, and
+// everything else, including a plain response to him, is Info. Cases below
+// are real lines from the log.
+test('acks, "on it" and plain responses are Info; outcomes, failures and asks stay in Messages', () => {
+  const info = [
+    'Captain, shipshape. The duplicate-question fix is built and is now going through its checks; it lands without troubling you.',
+    'Captain, understood on both counts. Encryption at rest: off. Four now waiting on your word.',
+    'Captain, on it — the gutter icons are dispatched, the names are being recorded.',
+    "Captain, you're right, and it changes. Koin will store 12.34 as 12.34. I'll bring the stack page back for your yes when it's done.",
+    'Already handled and deployed. Nothing new for the captain.',
+    'Captain, shipshape. Nothing new — the fleet is quiet and waiting on your three calls.',
+    'Captain, the investigation is now aimed at the right question: what code the running branch has lost.',
+  ];
+  const messages = [
+    'Captain, the double-tab bug is fixed and live. Refresh the command centre.',
+    'Captain, **pasting images into the command centre is live.**',
+    'Captain, the duplication audit is in. Your metals chain is clean.',
+    'Captain, Koin exists. Project koin, repo talktejas/koin.',
+    'Captain, the Koin technical stack is ready for your yes.',
+    "Captain, you're right, they're still not working: the links fix was written but never merged.",
+    "Captain, pick a name and I'll do the rest. 1. Kofa 2. Pursely",
+    'Captain, plan for Koin. Nothing created until you say go.',
+    'Captain, is this the right branch?',
+  ];
+  for (const text of info) assert.strictEqual(isInfoOnlyMessage({ text }), true, 'should be Info: ' + text);
+  for (const text of messages) assert.strictEqual(isInfoOnlyMessage({ text }), false, 'should be Messages: ' + text);
+  assert.strictEqual(isInfoOnlyMessage({ text: 'Captain, a worker is now looking into it.' }), true,
+    'a message no rule places defaults to Info');
+  const long = 'Captain, I checked it. ' + 'Here is the reasoning. '.repeat(12) + 'Everything merged into develop last week.';
+  assert.strictEqual(isInfoOnlyMessage({ text: long }), true,
+    'only the lead is read for news, so a word deep in the reasoning is not mistaken for it');
 });
 
 // --- two rows, one send --------------------------------------------------------

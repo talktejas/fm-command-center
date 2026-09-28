@@ -731,11 +731,11 @@ function visibleMessages(){
     : ((archived ? state.archivedFound : state.found) || {}).rows
       ? (archived ? state.archivedFound : state.found).rows.filter(m => !isMsgHeld(m))
       : [];
-  // Messages splits into two (his ask 2026-09-24): Info takes the pure
-  // progress/no-change chatter, Messages keeps everything else. Archived is
-  // not split - once archived, which of the two it came from no longer
-  // matters. isInfoOnlyMessage (bin/command-center-state.js) is deliberately
-  // conservative, so a message it cannot classify stays in Messages.
+  // Messages splits into two (his ask 2026-09-24): Messages keeps an outcome,
+  // a failure or an ask, Info takes everything else - and, since his report
+  // 2026-09-28, anything isInfoOnlyMessage (bin/command-center-state.js)
+  // cannot place. Archived is not split - once archived, which of the two it
+  // came from no longer matters.
   if (archived) return rows;
   return rows.filter(m => isInfoOnlyMessage(m) === (state.tab === 'info'));
 }
