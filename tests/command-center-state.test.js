@@ -397,22 +397,32 @@ test('pure status chatter is info-only; anything with a decision or an outcome i
     'a failure stays in Messages');
 });
 
-// His report 2026-09-28: "why the fuck this is coming in messages instead of
-// info?" / "this response to what i said should also come in info." - the
-// default turned round: Messages keeps an outcome, a failure or an ask, and
-// everything else, including a plain response to him, is Info. Cases below
-// are real lines from the log.
-test('acks, "on it" and plain responses are Info; outcomes, failures and asks stay in Messages', () => {
+// His report 2026-09-28: "why the fuck now important message which i need to
+// review is in info instead of fucking message" - firstmate's finding that the
+// cause of his vanishing items was established had been filed as Info. The
+// test is "would he want to know this": results, findings, failures, changes
+// and asks are Messages; only genuine noise is Info, and a message the rules
+// cannot place is Messages. Cases below are real lines from the log.
+test('only genuine noise is Info; any result, finding, failure, change or ask stays in Messages', () => {
   const info = [
-    'Captain, shipshape. The duplicate-question fix is built and is now going through its checks; it lands without troubling you.',
     'Captain, understood on both counts. Encryption at rest: off. Four now waiting on your word.',
-    'Captain, on it — the gutter icons are dispatched, the names are being recorded.',
-    "Captain, you're right, and it changes. Koin will store 12.34 as 12.34. I'll bring the stack page back for your yes when it's done.",
-    'Already handled and deployed. Nothing new for the captain.',
     'Captain, shipshape. Nothing new — the fleet is quiet and waiting on your three calls.',
-    'Captain, the investigation is now aimed at the right question: what code the running branch has lost.',
+    'Captain, a worker is now looking into it.',
+    'Checks still running, none failing. Nothing new for the captain.',
+    'Captain, shipshape. Same held wait — nothing stuck, nothing new.',
+    'Routine progress. Both are validating. Nothing new for the captain.',
+    "That's a leftover alert from the Codex worker I just stopped on purpose. Nothing new for the captain.",
+    'Captain, on it — the gutter icons are dispatched, the names are being recorded.',
+    '*(No message — nothing for you.)*',
   ];
   const messages = [
+    'Captain, the cause of the vanishing items is established — project fm-command-center, repo talktejas/fm-command-center, branch main: 1. **Firstmate closing a decision dropped your items.**',
+    'Captain, three command center problems, all found and now being fixed in one worker: 1. **Slow and unresponsive:** loading the message list takes 108 seconds.',
+    'Captain, I checked `develop` itself, including its history. Facts: 1. On `develop` today, the Diamonds section has exactly two screens.',
+    'Captain, Codex is on hold. Nothing runs on it now, and nothing new will be sent to it until you say otherwise. 1. **Stopped:** the old parked firstmate fix.',
+    'Captain, shipshape. The consignor-statement worker finished and is parked on its pull request.',
+    "Captain, you're right, and it changes. Koin will store 12.34 as 12.34. I'll bring the stack page back for your yes when it's done.",
+    'Already handled and deployed. Nothing new for the captain.',
     'Captain, the double-tab bug is fixed and live. Refresh the command centre.',
     'Captain, **pasting images into the command centre is live.**',
     'Captain, the duplication audit is in. Your metals chain is clean.',
@@ -425,11 +435,11 @@ test('acks, "on it" and plain responses are Info; outcomes, failures and asks st
   ];
   for (const text of info) assert.strictEqual(isInfoOnlyMessage({ text }), true, 'should be Info: ' + text);
   for (const text of messages) assert.strictEqual(isInfoOnlyMessage({ text }), false, 'should be Messages: ' + text);
-  assert.strictEqual(isInfoOnlyMessage({ text: 'Captain, a worker is now looking into it.' }), true,
-    'a message no rule places defaults to Info');
-  const long = 'Captain, I checked it. ' + 'Here is the reasoning. '.repeat(12) + 'Everything merged into develop last week.';
-  assert.strictEqual(isInfoOnlyMessage({ text: long }), true,
-    'only the lead is read for news, so a word deep in the reasoning is not mistaken for it');
+  assert.strictEqual(isInfoOnlyMessage({ text: 'Captain, here is how the sort works now.' }), false,
+    'a message no rule places defaults to Messages');
+  const long = 'Captain, I checked it. ' + 'Here is the reasoning. '.repeat(12) + 'The real cause was the window.';
+  assert.strictEqual(isInfoOnlyMessage({ text: long }), false,
+    'a finding anywhere in the text keeps it in Messages, not only in the lead');
 });
 
 // --- two rows, one send --------------------------------------------------------

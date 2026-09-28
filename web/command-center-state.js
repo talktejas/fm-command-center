@@ -475,51 +475,67 @@ function threadStatus(entries) {
 }
 
 // --- Messages vs Info -------------------------------------------------------------
-// His ask 2026-09-24 split Messages into Messages and Info; his report
-// 2026-09-28 ("why the fuck this is coming in messages instead of info?",
-// "this response to what i said should also come in info") turned the default
-// round. Messages keeps only what matters: a finished piece of work, a real
-// outcome, a failure or blocker, or something asking him a question or a
-// decision. Everything else - an ack, "nothing new", "understood", "on it", a
-// plain response to what he said with no new result - is Info, and so is
-// anything these rules cannot place: burying a real outcome costs him more
-// than one more line in Info, but a Messages tab full of noise is useless.
+// His ask 2026-09-24 split Messages into Messages and Info. His report
+// 2026-09-28 ("why the fuck now important message which i need to review is in
+// info instead of fucking message" - firstmate's finding that the cause of his
+// vanishing items was established, filed as Info) set the test: not "does it
+// ask him something" but "would he want to know this". Messages holds any
+// finished work, any result/finding/cause, any failure or blocker, anything
+// asking him to review/approve/merge/decide, and anything that changed in
+// something he uses. Info holds only genuine noise - an ack, "nothing new",
+// "understood", "on it", "still running", progress with no result. A message
+// these rules cannot place goes to MESSAGES: burying a result he needed costs
+// far more than one extra line there.
 //
 // In order, first match wins:
 //   1. recorded as a question, or the text ends with "?"      -> Messages
-//   2. says outright there is nothing new for him             -> Info
-//   3. asks him to decide (looksLikeQuestion's phrases, or ASKS), not
+//   2. asks him to decide (looksLikeQuestion's phrases, or ASKS), not
 //      counting a sentence that only recaps what is already
 //      "waiting on your word"                                 -> Messages
-//   4. its lead reports an outcome or a failure (below)       -> Messages
-//   5. anything else                                          -> Info
-// Only the lead (NEWS_LEAD chars) is read for rule 4, so a long reply that
-// mentions "merged" deep in its reasoning is not mistaken for news.
-const NOTHING_NEW = /\bnothing (new|changed|for (you|the captain))\b|\bnothing else needs you\b|\bnothing needs you\b|\bnothing to report\b/;
-const NEWS_LEAD = 200;
+//   3. anywhere in it: an outcome, a finding, a failure, a
+//      change, or a review/merge ask (SIGNAL below)           -> Messages
+//   4. says there is nothing new, or reads as an ack or as
+//      progress with no result (NOISE below)                  -> Info
+//   5. anything else                                          -> Messages
 const RECAP = /[^.\n]*waiting on your[^.\n]*/gi;
 // Asks looksLikeQuestion does not know. Kept here, not added there, so this
 // changes only Messages vs Info and never what Waiting on you lists.
 const ASKS = ['pick a name', 'pick one', 'choose', 'say go'];
-const OUTCOME = new RegExp([
-  // finished / landed / live
-  '\\b(landed|merged|shipped|deployed)\\b',
-  '\\b(is|are|now|and) (live|fixed|done|finished|ready|back up|in place)\\b', '\\bready for your\\b',
-  '\\bis in[.!]', '\\bexists[.!]', '\\bnow (runs|works|threads|built)\\b',
+const SIGNAL = new RegExp([
+  // finished / landed / live / changed
+  '\\b(landed|merged|shipped|deployed|released|finished)\\b',
+  '\\b(is|are|now|and|been) (live|fixed|done|finished|ready|built|back up|in place)\\b', '\\bready for your\\b',
+  '\\bis in[.!]', '\\bexists[.!]', '\\bnow (runs|works|threads|shows|opens|reads|keeps|goes)\\b',
+  '\\b(changed|reload|refresh)\\b', '/pull/\\d',
+  // a result: finding, cause, conclusion
+  '\\b(root )?cause[sd]?\\b', '\\b(established|found|confirmed|verified|reproduced|measured|diagnosed)\\b',
+  '\\bturns out\\b', '\\bthe (reason|result|finding|evidence|answer|conclusion)\\b',
   '\\b(audit|research|review|investigation|answer) is (in|done)\\b',
   // failed / broken / blocked
-  '\\b(failed|crashed)\\b', '\\b(is|are|was|were|been|got) (broken|blocked|stuck|lost|failing)\\b',
+  '\\b(failed|failing|failures?|crashed|broken|blocked|blocker|stuck|lost|regression)\\b',
   '\\b(is|went|was) down\\b', "\\b(not|isn't|aren't|still not) working\\b",
+  // asks him to review / approve / merge
+  '\\b(your|for) (review|approval|merge|yes|go-ahead)\\b', '\\bapprov(e|ed|al)\\b',
+].join('|'));
+// "nothing stuck", "none failing": a signal word it says did NOT happen.
+const NEGATED = /\b(nothing|none|no|not|never) (stuck|changed|failing|failed|broken|blocked|lost)\b/g;
+const NOISE = new RegExp([
+  '\\bnothing (new|changed|for (you|the captain))\\b(?! will)', '\\bnothing (else )?needs you\\b', '\\bnothing to report\\b',
+  '^(captain, )?(ack|noted|understood|aye|got it|will do|roger|shipshape|agreed|expected|already handled|on it)\\b',
+  '\\broutine progress\\b', '\\bin progress\\b', '\\bdispatched\\b',
+  '\\bstill (running|validating|working|building|going)\\b',
+  '\\b(is|are) (now )?(running|validating|working on|building|looking into)\\b',
+  '\\bgoing through its checks\\b', '\\bleftover alert\\b', '\\bnothing to do\\b', '\\bno message\\b',
 ].join('|'));
 function looksLikeInfoOnly(text) {
   const t = String(text || '').trim();
   if (!t) return false;
   if (t.endsWith('?')) return false;
-  const low = t.toLowerCase();
-  if (NOTHING_NEW.test(low)) return true;
   const asked = t.replace(RECAP, '');
   if (looksLikeQuestion(asked) || ASKS.some(p => asked.toLowerCase().includes(p))) return false;
-  return !OUTCOME.test(low.slice(0, NEWS_LEAD));
+  const low = asked.toLowerCase();
+  if (SIGNAL.test(low.replace(NEGATED, ''))) return false;
+  return NOISE.test(low);
 }
 function isInfoOnlyMessage(message) {
   if (!message) return false;

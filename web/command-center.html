@@ -738,10 +738,10 @@ function visibleMessages(allProjects){
     : ((archived ? state.archivedFound : state.found) || {}).rows
       ? (archived ? state.archivedFound : state.found).rows.filter(m => !isMsgHeld(m))
       : [];
-  // Messages splits into two (his ask 2026-09-24): Messages keeps an outcome,
-  // a failure or an ask, Info takes everything else - and, since his report
-  // 2026-09-28, anything isInfoOnlyMessage (bin/command-center-state.js)
-  // cannot place. Archived is not split - once archived, which of the two it
+  // Messages splits into two (his ask 2026-09-24): Info takes only genuine
+  // noise, Messages everything else - since his report 2026-09-28, anything
+  // isInfoOnlyMessage (web/command-center-state.js) cannot place stays in
+  // Messages. Archived is not split - once archived, which of the two it
   // came from no longer matters.
   const tabRows = archived ? rows : rows.filter(m => isInfoOnlyMessage(m) === (state.tab === 'info'));
   return allProjects ? tabRows : tabRows.filter(inProject);
