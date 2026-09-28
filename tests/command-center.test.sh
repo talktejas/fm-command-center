@@ -2462,6 +2462,46 @@ test_an_archived_message_leaves_messages_and_can_be_restored() {
   pass "archiving is durable beside the message and can be restored"
 }
 
+# His ruling 2026-09-28 ("i think u unarchive that and continue the thread"):
+# an answer recorded after he archived the message it answers brings that
+# message back to Messages; one he archived after the answer stays archived,
+# and archiving the restored one again sticks.
+test_an_answer_to_an_archived_message_unarchives_it() {
+  local home port early late body log said
+  home="$TMP_ROOT/archive-answer"
+  seed_home "$home"
+  early=$(say "$home" "Heads up" "Answers now thread.") || fail "the recorder refused the message"
+  late=$(say "$home" "Read already" "Answered before he archived it.") || fail "the recorder refused the message"
+  log="$home/data/captain-messages.jsonl"
+  said="$home/data/command-center/said.jsonl"
+  mkdir -p "$(dirname "$said")"
+  jq -cn --arg m "$early" '{kind:"note",sid:"s1",msg:$m,text:"what if i archived it?",at:"2026-09-28T10:05:00Z"}' >>"$said"
+  jq -cn '{kind:"outcome",of:"s1",note_id:"n1",outcome:"sent",at:"2026-09-28T10:05:01Z"}' >>"$said"
+  jq -cn --arg m "$late" '{kind:"note",sid:"s2",msg:$m,note_id:"n2",outcome:"sent",text:"and this?",at:"2026-09-28T10:05:00Z"}' >>"$said"
+  jq -cn --arg m "$early" '{kind:"archive",of:$m,at:"2026-09-28T10:06:00Z"}' >>"$log"
+  jq -cn '{id:"a1",at:"2026-09-28T10:10:00Z",title:"Comes back",text:"It comes back.",answers:"n1"}' >>"$log"
+  jq -cn '{id:"a2",at:"2026-09-28T10:11:00Z",title:"Stays",text:"Read before archiving.",answers:"n2"}' >>"$log"
+  jq -cn --arg m "$late" '{kind:"archive",of:$m,at:"2026-09-28T10:20:00Z"}' >>"$log"
+  start_server "$home" || fail "the server did not start"
+  port=$SERVER_PORT
+  body=$(curl -s -m 30 "http://127.0.0.1:$port/api/messages")
+  assert_equals "$early" "$(printf '%s' "$body" | jq -r --arg m "$early" '.messages[] | select(.id == $m) | .id')" \
+    "an answer to an archived message did not bring it back to Messages"
+  assert_equals true "$(printf '%s' "$body" | jq --arg m "$early" '[.messages[] | select(.id == $m)][0].restored_at != null')" \
+    "the restored message did not say it was restored"
+  assert_equals "" "$(printf '%s' "$body" | jq -r --arg m "$late" '.messages[] | select(.id == $m) | .id')" \
+    "a message he archived after its answer came back anyway"
+  assert_equals a1 "$(jq -r 'select(.kind == "unarchive") | .answer' "$log")" \
+    "the restore was not an ordinary unarchive amendment naming its answer"
+  body=$(post "$port" /api/archive "$(jq -cn --arg m "$early" '{msg:$m,archived:true}')")
+  assert_contains "$body" '"ok":true' "archiving the restored message was not accepted"
+  curl -s -m 30 "http://127.0.0.1:$port/api/messages" >/dev/null
+  assert_equals "" "$(curl -s -m 30 "http://127.0.0.1:$port/api/messages" | jq -r --arg m "$early" '.messages[] | select(.id == $m) | .id')" \
+    "archiving the restored message again did not stick"
+  stop_server
+  pass "an answer to an archived message unarchives it, once"
+}
+
 # His report 2026-09-28: "the sort order should have the latest archived item
 # on top" - Archived is ordered by when each message was archived (its archive
 # amendment's own `at`), never by when firstmate sent it, and an amendment
@@ -3909,6 +3949,7 @@ test_a_reply_that_is_not_a_question_is_sent_even_with_no_scan
 test_every_captured_message_is_reachable_without_serving_them_all
 test_a_message_far_behind_the_window_is_served_by_id
 test_an_archived_message_leaves_messages_and_can_be_restored
+test_an_answer_to_an_archived_message_unarchives_it
 test_archived_messages_are_served_latest_archived_first
 test_a_held_message_leaves_the_messages_total_the_way_archiving_does
 test_park_makes_item_and_message_state_durable_across_a_restart
