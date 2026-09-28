@@ -99,13 +99,9 @@
   .groupbar select{flex:1;border:1px solid var(--line);border-radius:6px;padding:4px 7px;
     font-size:12.5px;background:#fcfdfe;color:var(--ink)}
 
-  .homes{display:flex;flex-wrap:wrap;gap:5px}
-  .chip{border:1px solid var(--line);background:transparent;border-radius:20px;padding:2.5px 9px;
-    font-size:12px;color:var(--dim);cursor:pointer;display:flex;align-items:center;gap:6px}
-  .chip:hover{border-color:#c8cfd9}
-  .chip[aria-pressed="true"]{background:var(--accent-soft);border-color:#bcd3f6;color:var(--accent)}
-  .chip .dot{width:7px;height:7px;border-radius:50%}
-  .chip .n{font-variant-numeric:tabular-nums;opacity:.7}
+  /* A class's own display must never beat the hidden attribute: the old home
+     chips' display:flex kept them on screen on every tab they did nothing on. */
+  [hidden]{display:none !important}
 
   .list{overflow-y:auto;flex:1;padding:4px 0 30px}
   .grp{position:sticky;top:0;background:linear-gradient(#fff 76%,rgba(255,255,255,0));
@@ -389,16 +385,24 @@
           <!-- Approved proposal section 6 names flat as its own selector entry. -->
           <option value="none">Nothing — one flat list</option>
         </select>
-        <!-- Approved proposal section 4: a state filter, so things are findable without scrolling. -->
-        <select id="statefilter" title="Filter by state">
-          <option value="">Waiting now</option>
-          <option value="stuck">Stuck</option>
-          <option value="sent">Sent, not acted on</option>
-          <option value="dead">Nobody listening</option>
-          <option value="deferred">Deferred</option>
+      </div>
+      <div class="groupbar">
+        <label for="projectfilter">Project</label>
+        <select id="projectfilter"></select>
+      </div>
+      <!-- Approved proposal section 4: a state filter, so things are findable
+           without scrolling. It narrows by facts only a Waiting-on-you item
+           has, so it is shown on that tab alone. -->
+      <div class="groupbar" id="statebar" hidden>
+        <label for="statefilter">Show</label>
+        <select id="statefilter">
+          <option value="">Everything waiting</option>
+          <option value="stuck">Only stuck workers</option>
+          <option value="sent">Only answers sent, not acted on</option>
+          <option value="dead">Only where nobody is listening</option>
+          <option value="deferred">Only deferred</option>
         </select>
       </div>
-      <div class="homes" id="homes"></div>
     </div>
     <div class="list" id="list"></div>
     <div class="rail-foot">
@@ -516,7 +520,7 @@ const para = t => linked(t).split(/\n{2,}/)
   .map(x => `<p>${x.replace(/\n/g, '<br>')}</p>`).join('');
 
 const state = {
-  tab:'messages', group:'project', sfilter:'', q:'', homes:new Set(),
+  tab:'messages', group:'project', sfilter:'', q:'', project:'',
   open:null, view:{homes:[],items:[]}, said:[], messages:[], archivedMessages:[], msgError:null,
   saidDropped:0, msgEtag:null, saidEtag:null,
   // The page holds the newest window of the log; the rest is one click away
@@ -698,10 +702,10 @@ function openedMessage(){
     || (state.openMsg && msgKey(state.openMsg) === state.open ? state.openMsg : null);
 }
 
-function visibleMessages(){
-  // The home chips and the state filter both name facts only a scanned ITEM
-  // has, so neither is applied here rather than quietly hiding messages by a
-  // rule that cannot be true of them. Until the server has answered what he is
+function visibleMessages(allProjects){
+  // The state filter names facts only a scanned ITEM has, so it is not
+  // applied here rather than quietly hiding messages by a rule that cannot be
+  // true of them; the project filter is (inProject) - a message has one too. Until the server has answered what he is
   // typing now, its last answer stays on screen under its own query.
   const archived = state.tab === 'archived';
   const rows = !state.q.trim()
@@ -714,8 +718,8 @@ function visibleMessages(){
   // not split - once archived, which of the two it came from no longer
   // matters. isInfoOnlyMessage (bin/command-center-state.js) is deliberately
   // conservative, so a message it cannot classify stays in Messages.
-  if (archived) return rows;
-  return rows.filter(m => isInfoOnlyMessage(m) === (state.tab === 'info'));
+  const tabRows = archived ? rows : rows.filter(m => isInfoOnlyMessage(m) === (state.tab === 'info'));
+  return allProjects ? tabRows : tabRows.filter(inProject);
 }
 
 let SEARCH_SEQ = 0, SEARCH_TIMER = null;
@@ -794,13 +798,13 @@ function waitingMessages(){
     .filter(m => !q || haystack(m).includes(q));
 }
 
-function visible(){
+function visible(allProjects){
   const q = state.q.trim().toLowerCase();
   const items = (state.view.items || []).filter(it =>
     !isItemArchived(it) && !isItemHeld(it) &&
-    (!state.homes.size || state.homes.has(it.home)) &&
     passesState(it) && (!q || haystack(it).includes(q)));
-  return items.concat(waitingMessages());
+  const rows = items.concat(waitingMessages());
+  return allProjects ? rows : rows.filter(inProject);
 }
 const archivedItemsList = () => (state.view.items || []).filter(isItemArchived);
 const heldItemsList = () => (state.view.items || []).filter(isItemHeld);
@@ -875,12 +879,31 @@ function displayOrder(rows, newestDefault, isMessage, keyFn){
 }
 
 // --- render ------------------------------------------------------------------
-function renderHomes(){
-  $('#homes').innerHTML = (state.view.homes || []).map(h => {
-    const n = (state.view.items || []).filter(i => i.home === h.id && !isDeferred(i)).length;
-    return `<button class="chip" data-home="${esc(h.id)}" aria-pressed="${state.homes.has(h.id)}">
-      <span class="dot" style="background:${homeColour(h.id)}"></span>${esc(h.name)}<span class="n">${n}</span></button>`;
-  }).join('');
+// His ask 2026-09-28: one project dropdown instead of the home chips (which
+// listed firstmate homes, not projects, and only ever narrowed Waiting on
+// you). It lists every project the current tab's rows carry, with its count,
+// and narrows every list tab to exactly that one; Work has no rows to narrow.
+const inProject = r => !state.project || projectOf(r) === state.project;
+function renderProjectFilter(){
+  const rows = state.tab === 'waiting' ? visible(true)
+    : state.tab === 'hold' ? heldItemsList().concat(heldMessagesList())
+    : state.tab === 'archived' ? visibleMessages(true).concat(archivedItemsList())
+    : visibleMessages(true);
+  const counts = new Map();
+  for (const r of rows) counts.set(projectOf(r), (counts.get(projectOf(r)) || 0) + 1);
+  // The chosen project stays listed even while this tab has none of it, so
+  // the dropdown never silently shows a choice he did not make.
+  if (state.project && !counts.has(state.project)) counts.set(state.project, 0);
+  const names = [...counts.keys()].sort((a, b) =>
+    (a === 'Not recorded') - (b === 'Not recorded') || a.localeCompare(b));
+  const sel = $('#projectfilter');
+  const html = `<option value="">All projects (${rows.length})</option>` + names.map(n =>
+    `<option value="${esc(n)}">${esc(n)} (${counts.get(n)})</option>`).join('');
+  // Rebuilt only on a real change: a 3-second poll must not close the
+  // dropdown out from under him while he is choosing.
+  if (sel.dataset.html !== html){ sel.innerHTML = html; sel.dataset.html = html; }
+  sel.value = state.project;
+  sel.disabled = state.tab === 'work';
 }
 
 // STANDING RULE for every notice slot on this page: two independent persistent
@@ -1051,7 +1074,7 @@ function wordOutcome(r){
 let listPainted = null;
 function paintList(html){
   const pane = $('#list');
-  const sig = [state.tab, state.group, state.sfilter, state.q].join('\u0000');
+  const sig = [state.tab, state.group, state.sfilter, state.project, state.q].join('\u0000');
   const same = sig === listPainted;
   const where = pane.scrollTop;
   pane.innerHTML = html;
@@ -1124,10 +1147,8 @@ function renderList(){
   document.querySelectorAll('.tab').forEach(t =>
     t.setAttribute('aria-selected', String(t.dataset.tab === state.tab)));
   $('#clr').hidden = !state.q;
-  // Both of these narrow by facts only a scanned item has.
-  $('#statefilter').disabled = state.tab !== 'waiting';
-  $('#homes').hidden = state.tab !== 'waiting';
-  renderHomes(); renderWatcher();
+  $('#statebar').hidden = state.tab !== 'waiting';
+  renderProjectFilter(); renderWatcher();
   if (state.tab === 'messages' || state.tab === 'info'){ renderMessages(); return; }
   if (state.tab === 'archived'){ renderArchived(); return; }
   if (state.tab === 'hold'){ renderHold(); return; }
@@ -1144,7 +1165,7 @@ function renderList(){
 // (durable, server-side) and Waiting-on-you items (parked.jsonl).
 function renderArchived(){
   renderMessages(true);
-  const items = ordered(archivedItemsList());
+  const items = ordered(archivedItemsList().filter(inProject));
   let extra = '';
   if (items.length) extra += `<div class="worksection"><h3>Waiting-on-you items
     <span class="n">${items.length}</span></h3>${items.map(it => itemRow(it, 'archived')).join('')}</div>`;
@@ -1154,8 +1175,8 @@ function renderArchived(){
 // On hold is only ever his own parking - nothing here was ever sent to
 // firstmate, and nothing here is server-durable, unlike Archived's messages.
 function renderHold(){
-  const items = ordered(heldItemsList());
-  const msgs = ordered(heldMessagesList(), true);
+  const items = ordered(heldItemsList().filter(inProject));
+  const msgs = ordered(heldMessagesList().filter(inProject), true);
   const sections = [
     ['Messages', msgs, m => messageRow(m, 'held')],
     ['Waiting-on-you items', items, it => itemRow(it, 'held')],
@@ -2552,12 +2573,6 @@ document.addEventListener('click', async e => {
     if (state.tab === 'work' && !state.workRead) await loadWork();
     renderList(); return;
   }
-  const chip = e.target.closest('.chip');
-  if (chip){
-    const id = chip.dataset.home;
-    state.homes.has(id) ? state.homes.delete(id) : state.homes.add(id);
-    renderList(); return;
-  }
   const wsend = e.target.closest('[data-work-send]');
   if (wsend){
     const id = wsend.dataset.workSend;
@@ -2673,6 +2688,7 @@ document.addEventListener('click', async e => {
 
 $('#grouping').addEventListener('change', e => { state.group = e.target.value; renderList(); });
 $('#statefilter').addEventListener('change', e => { state.sfilter = e.target.value; renderList(); });
+$('#projectfilter').addEventListener('change', e => { state.project = e.target.value; renderList(); });
 // Only the Messages list is answered by the server; the other two tabs filter
 // what the page already holds, so typing there asks the log for nothing.
 $('#q').addEventListener('input', e => {

@@ -1291,6 +1291,65 @@ test_the_gutter_finds_every_pane_archive_and_hold_button() {
   pass "the gutter finds every pane's Archive and Hold button"
 }
 
+# His report 2026-09-28: shift-click did not select the run in between, and
+# he wants junk deleted with no single mis-click able to wipe a selection.
+# Runs the served page's own toggleMessageSelection and Delete arming in node
+# over a stubbed list (no browser in this suite): a plain click's row is the
+# anchor, shift selects the run to it, ctrl/cmd toggles one row, and Delete
+# only fires on a second click at the same target.
+test_selection_follows_the_ordinary_convention_and_delete_needs_two_clicks() {
+  local home port body
+  home="$TMP_ROOT/select"
+  seed_home "$home"
+  start_server "$home" || fail "the server did not start"
+  port=$SERVER_PORT
+  body=$(curl -s -m 30 "http://127.0.0.1:$port/")
+  stop_server
+  printf '%s\n' "$body" | sed -n '/^let selectAnchor = null;/,/^async function deleteKeys(/p' \
+    | sed '$d' > "$TMP_ROOT/select.js"
+  assert_contains "$(cat "$TMP_ROOT/select.js")" "function armOrDelete(" \
+    "the served page carries no selection/Delete code at all"
+  node -e '
+    const assert = require("assert");
+    const keys = ["msg/a", "msg/b", "msg/c", "msg/d", "msg/e"];
+    const state = { selected: new Set(), open: null, deleteArmed: null, bulkBusy: false, view: {} };
+    const $ = () => ({ querySelectorAll: () => keys.map(key => ({ dataset: { key } })) });
+    const renderList = () => {};
+    const findMessageById = id => ({ id });
+    const itemKey = () => "";
+    let deleted = null;
+    const deleteKeys = async k => { deleted = k; };
+    eval(require("fs").readFileSync(process.argv[1], "utf8").replace("let selectAnchor", "var selectAnchor"));
+    const sel = () => [...state.selected].sort().join(",");
+    // A plain click opens b and makes it the anchor (the row handler does that).
+    state.open = "msg/b"; selectAnchor = "msg/b";
+    toggleMessageSelection("msg/d", { shiftKey: true });
+    assert.strictEqual(sel(), "msg/b,msg/c,msg/d", "shift-click did not select the run from the anchor");
+    toggleMessageSelection("msg/a", { shiftKey: true });
+    assert.strictEqual(sel(), "msg/a,msg/b", "a second shift-click did not re-run from the same anchor");
+    toggleMessageSelection("msg/e", { ctrlKey: true });
+    assert.strictEqual(sel(), "msg/a,msg/b,msg/e", "ctrl-click disturbed the rest of the selection");
+    toggleMessageSelection("msg/a", { metaKey: true });
+    assert.strictEqual(sel(), "msg/b,msg/e", "cmd-click did not drop just that row");
+    // Ctrl-click with nothing selected keeps the open row selected too.
+    state.selected.clear(); state.open = "msg/c";
+    toggleMessageSelection("msg/e", { ctrlKey: true });
+    assert.strictEqual(sel(), "msg/c,msg/e", "the open row did not count as selected");
+    (async () => {
+      await armOrDelete();
+      assert.strictEqual(deleted, null, "one click on Delete deleted the selection");
+      state.selected.add("msg/a");
+      await armOrDelete();
+      assert.strictEqual(deleted, null, "an arm for one selection carried over to a changed one");
+      await armOrDelete();
+      assert.deepStrictEqual(deleted, ["msg/a", "msg/c", "msg/e"], "a second click did not delete");
+      process.exit(0);
+    })().catch(e => { console.error(e.message); process.exit(1); });
+  ' "$TMP_ROOT/select.js" 2>"$TMP_ROOT/select.err" \
+    || fail "$(cat "$TMP_ROOT/select.err")"
+  pass "selection follows the ordinary convention and Delete needs a second click"
+}
+
 # The page's decision rules live in web/command-center-state.js because they are
 # what got the rules wrong twice; these execute that file itself.
 test_the_pages_decision_rules_hold() {
@@ -3402,6 +3461,7 @@ test_the_server_serves_the_pages_decision_rules
 test_a_url_becomes_a_real_link_on_every_surface_that_shows_free_text
 test_clicking_a_linked_url_never_also_triggers_a_delegated_row_action
 test_the_gutter_finds_every_pane_archive_and_hold_button
+test_selection_follows_the_ordinary_convention_and_delete_needs_two_clicks
 test_a_message_names_the_project_the_worktree_and_the_branch
 test_a_taskless_message_is_matched_to_the_one_task_it_names
 test_a_message_naming_two_tasks_is_left_blank_rather_than_guessed
