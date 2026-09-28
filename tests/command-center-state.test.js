@@ -6,14 +6,14 @@
 const assert = require('assert');
 const path = require('path');
 const {
-  pollFacts, tense, transportFailure, verdictFor, releaseVerdicts, itemKey,
+  knownValue, pollFacts, tense, transportFailure, verdictFor, releaseVerdicts, itemKey,
   shapeMessage, orderRows, archivedEpoch, stableGroupOrder, looksLikeQuestion, messageNeedsReply,
   replyTarget, foldSaid, wordsAfter,
   listSignature, mayRelease, logRead, sendState, sendKeys, sameWords,
   heldWith, captureBand, saidDigest, mergeMessages,
   waitingCount, waitingMessageRows, inMessagesTab, onHisBoard,
   isInfoOnlyMessage, saidTaskId, matchAnswer, threadRows, threadStatus,
-  recordedAnswers, answeredSend, answerFor, foldAnswers, noteThreads,
+  recordedAnswers, answeredSend, answerFor, foldAnswers, noteThreads, noteMomentAnswer,
 } = require(path.join(__dirname, '..', 'web', 'command-center-state.js'));
 
 // Quiet on success: tests/command-center.test.sh runs this and reports the
@@ -184,6 +184,23 @@ test('a message is given the time and branch fields a row is grouped by', () => 
   assert.strictEqual(shapeMessage({ id: 'm', at: '' }).since_epoch, null,
     'a record with no usable time must not be given one');
   assert.strictEqual(shapeMessage({ id: 'm', at: '' }).branch_state, 'not-started');
+});
+
+// His ruling 2026-09-28: no label is never a reason to hide a message. Old
+// records carry no project at all; new ones may say "unknown" - both read as
+// one missing value, and a record with no title still has one to click.
+test('a message with nothing known about its work reads as not recorded', () => {
+  const old = shapeMessage({ id: 'o', at: '2026-09-01T10:00:00Z', text: 'Hi' });
+  const neu = shapeMessage({ id: 'n', at: '2026-09-28T10:00:00Z', text: 'Hi',
+    project: 'Unknown', worktree: '  ', branch: '(unknown)' });
+  for (const m of [old, neu]) {
+    assert.strictEqual(m.project, null);
+    assert.strictEqual(m.worktree, null);
+    assert.strictEqual(m.branch, null);
+  }
+  assert.strictEqual(knownValue(' jt2627s '), 'jt2627s');
+  assert.strictEqual(shapeMessage({ id: 'b', text: 'First line\nmore' }).title, 'First line');
+  assert.strictEqual(shapeMessage({ id: 'e' }).title, '(no title recorded)');
 });
 
 // He opens the page to see the LAST thing firstmate said, while the waiting
@@ -824,6 +841,32 @@ test('an answer continues the conversation it answers instead of a row of its ow
   // It threads under the original, archived itself or not.
   assert.deepStrictEqual(threadRows([send], [original, Object.assign({ archived: true }, answer)])
     .map(e => e.kind + ':' + (e.row.id || e.row.text)), ['you:' + send.text, 'firstmate:a1']);
+});
+
+
+// His report 2026-09-28: a note read "Firstmate has not recorded an answer"
+// while firstmate had answered it in ordinary conversation, which names no
+// note. The first thing said after it, before his next send, is its answer -
+// never an empty turn, a recorded answer to something else, or a reply about
+// the task of another send of his.
+test('a note is matched to what firstmate said next, and to nothing after his next send', () => {
+  const note = { kind: 'note', sid: 'n1', at: '2026-09-28T11:33:26Z', text: 'is flutter open source?' };
+  const said = [note];
+  const empty = shapeMessage({ id: 'e', at: '2026-09-28T11:33:40Z', title: '*(no message)*' });
+  const other = shapeMessage({ id: 'o', at: '2026-09-28T11:34:00Z', title: 'x', answers: 'someone-else' });
+  const reply = shapeMessage({ id: 'r', at: '2026-09-28T11:34:56Z', title: 'Captain, yes — Flutter is open source' });
+  assert.strictEqual(noteMomentAnswer(note, [reply, other, empty], said).id, 'r');
+  // His next send closes the window.
+  const later = { kind: 'note', sid: 'n2', at: '2026-09-28T11:34:30Z', text: 'and dart?' };
+  assert.strictEqual(noteMomentAnswer(note, [reply], [later, note]), null);
+  // Nothing inside the window at all.
+  const late = shapeMessage({ id: 'l', at: '2026-09-28T12:30:00Z', title: 'much later' });
+  assert.strictEqual(noteMomentAnswer(note, [late], said), null);
+  // A reply about the task of his other send just before is that send's answer.
+  const asked = shapeMessage({ id: 'q', at: '2026-09-28T11:30:00Z', title: 'Q', task: 'koin' });
+  const onTask = shapeMessage({ id: 't', at: '2026-09-28T11:34:00Z', title: 'about koin', task: 'koin' });
+  const replyToQ = { kind: 'reply', sid: 's0', msg: 'q', at: '2026-09-28T11:32:00Z', text: 'yes' };
+  assert.strictEqual(noteMomentAnswer(note, [asked, onTask, reply], [note, replyToQ]).id, 'r');
 });
 
 process.exit(failures ? 1 : 0);

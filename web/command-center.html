@@ -702,19 +702,53 @@ function threadBadgeHtml(status){
 // ordering and the project filter work unchanged; the project is the first
 // answer's, since a note records none of its own.
 const noteKey = r => 'note/' + r.sid;
+// Every note, whatever he has done with it; listedNotes/archivedNotes/heldNotes
+// below are the three tabs one can be in. His note is a record on his board
+// like any other (his report 2026-09-28): Archive, Hold and Delete, by his own
+// hand, in any state, through the same /api/park record an item's use.
+// Answers are looked up in every message the page holds, archived included -
+// an answer he archived is still an answer (noteAnswer below).
 function noteRows(){
   return noteThreads(state.said).filter(r => !state.deleted.has(noteKey(r))).map(r => {
-    const answers = recordedAnswers(r, state.messages);
+    const answers = recordedAnswers(r, heldMessages());
     const at = Date.parse(r.at || '');
     return { __note: r, answers, id: r.sid, at: r.at, text: r.text,
       title: String(r.text || '').split('\n')[0].slice(0, 140) || '(empty note)',
       since_epoch: isNaN(at) ? null : Math.floor(at / 1000), home: 'main',
+      archived: !!r.archived, archived_at: r.archived_at || null, held: !!r.held,
       project: (answers[0] || {}).project || null,
       worktree: (answers[0] || {}).worktree || null, branch: (answers[0] || {}).branch || null };
   });
 }
+const listedNotes = () => noteRows().filter(n => !n.archived && !n.held);
+const archivedNotes = () => noteRows().filter(n => n.archived && !n.held);
+const heldNotes = () => noteRows().filter(n => n.held);
 const openedNote = () => noteRows().find(n => noteKey(n.__note) === state.open) || null;
-const projectOf = it => it.project || 'Not recorded';
+const findNote = sid => state.said.find(r => r.kind === 'note' && r.sid === sid) || null;
+// The conversation a note opened: every answer recorded against it, else the
+// one matched by the moment (noteMomentAnswer, web/command-center-state.js),
+// marked as matched so it never reads as recorded.
+function noteEntries(n){
+  const entries = threadEntries([n.__note]);
+  if (entries.some(e => e.kind === 'firstmate')) return entries;
+  const m = noteMomentAnswer(n.__note, heldMessages(), state.said);
+  return m ? entries.concat([{ kind: 'firstmate', row: m, moment: true }]) : entries;
+}
+function setNoteArchived(r, archived){
+  r.archived = archived;
+  r.archived_at = archived ? nowIso() : null;
+  park('note', r.sid, archived ? 'archived' : 'none');
+}
+function setNoteHeld(r, held){
+  r.held = held;
+  park('note', r.sid, held ? 'held' : 'none');
+}
+// Every row belongs to exactly one project choice: a row with no project
+// (knownValue, web/command-center-state.js) is 'Not recorded', its own group
+// and its own filter choice - never a reason to leave it out (his ruling
+// 2026-09-28). Items are normalized here too, since they skip shapeMessage.
+const NO_PROJECT = 'Not recorded';
+const projectOf = it => knownValue(it.project) || NO_PROJECT;
 const homeOf = id => state.view.homes.find(h => h.id === id) || {id, name:id};
 const homeColour = id => HOME_COLOURS[
   Math.max(0, state.view.homes.findIndex(h => h.id === id)) % HOME_COLOURS.length];
@@ -859,9 +893,11 @@ function archivedRows(){
   const msgs = visibleMessages().map(m => Object.assign({__msg:true}, m));
   const items = archivedItemsList().filter(inProject)
     .filter(it => !q || haystack(it).includes(q));
-  return orderRows(msgs.concat(items), state.group, true, archivedEpoch);
+  const notes = archivedNotes().filter(inProject).filter(n => !q || haystack(n).includes(q));
+  return orderRows(msgs.concat(items, notes), state.group, true, archivedEpoch);
 }
-const archivedRowHtml = r => r.__msg ? messageRow(r, 'archived') : itemRow(r, 'archived');
+const archivedRowHtml = r => r.__note ? noteRow(r)
+  : r.__msg ? messageRow(r, 'archived') : itemRow(r, 'archived');
 const heldItemsList = () => boardItems().filter(isItemHeld);
 const heldMessagesList = () => state.messages.concat(state.archivedMessages)
   .filter((m, i, all) => all.findIndex(x => x.id === m.id) === i && isMsgHeld(m));
@@ -882,12 +918,13 @@ function groupOf(it, isMessage){
   // row is which.
   const msgish = isMessage || Boolean(it.__msg);
   const p = projectOf(it);
+  const worktree = knownValue(it.worktree), branch = knownValue(it.branch);
   if (state.group === 'project') return { key:p, g1:p, g2:undefined };
   if (state.group === 'worktree')
-    return { key:p+'\u0000'+(it.worktree||''), g1:p, g2:it.worktree, none:!it.worktree,
+    return { key:p+'\u0000'+(worktree||''), g1:p, g2:worktree, none:!worktree,
              noneLabel: msgish ? 'Not recorded' : 'Not started — no working copy yet' };
-  return { key:p+'\u0000'+(it.branch||it.branch_state), g1:p, g2:it.branch,
-           none:!it.branch,
+  return { key:p+'\u0000'+(branch||it.branch_state), g1:p, g2:branch,
+           none:!branch,
            noneLabel: msgish ? 'Not recorded'
              : it.branch_state === 'detached'
                ? 'Detached scratch copy — no branch'
@@ -941,16 +978,18 @@ function displayOrder(rows, newestDefault, isMessage, keyFn){
 const inProject = r => !state.project || projectOf(r) === state.project;
 function renderProjectFilter(){
   const rows = state.tab === 'waiting' ? visible(true)
-    : state.tab === 'hold' ? heldItemsList().concat(heldMessagesList())
-    : state.tab === 'archived' ? visibleMessages(true).concat(archivedItemsList())
-    : visibleMessages(true).concat(state.tab === 'messages' ? noteRows() : []);
+    : state.tab === 'hold' ? heldItemsList().concat(heldMessagesList(), heldNotes())
+    : state.tab === 'archived' ? visibleMessages(true).concat(archivedItemsList(), archivedNotes())
+    : visibleMessages(true).concat(state.tab === 'messages' ? listedNotes() : []);
   const counts = new Map();
   for (const r of rows) counts.set(projectOf(r), (counts.get(projectOf(r)) || 0) + 1);
   // The chosen project stays listed even while this tab has none of it, so
-  // the dropdown never silently shows a choice he did not make.
+  // the dropdown never silently shows a choice he did not make. 'Not recorded'
+  // is always listed, last, so rows with no project are always one choice away.
   if (state.project && !counts.has(state.project)) counts.set(state.project, 0);
+  if (!counts.has(NO_PROJECT)) counts.set(NO_PROJECT, 0);
   const names = [...counts.keys()].sort((a, b) =>
-    (a === 'Not recorded') - (b === 'Not recorded') || a.localeCompare(b));
+    (a === NO_PROJECT) - (b === NO_PROJECT) || a.localeCompare(b));
   const sel = $('#projectfilter');
   const html = `<option value="">All projects (${rows.length})</option>` + names.map(n =>
     `<option value="${esc(n)}">${esc(n)} (${counts.get(n)})</option>`).join('');
@@ -1156,13 +1195,13 @@ function renderGutter(){
 // actions when a multi-select is active. See CSS .gutter for why this exists.
 function gutterArchive(){
   if (state.selected.size){ bulkArchiveSelected(); return; }
-  const btn = $('#main [data-archive-item], #main [data-archive-msg]');
+  const btn = $('#main [data-archive-item], #main [data-archive-msg], #main [data-archive-note]');
   if (btn) btn.click();
 }
 function gutterHold(){
   if (state.selected.size){ bulkHoldSelected(); return; }
   const btn = $('#main [data-hold-item], #main [data-unhold-item], ' +
-    '#main [data-hold-msg], #main [data-unhold-msg]');
+    '#main [data-hold-msg], #main [data-unhold-msg], #main [data-hold-note], #main [data-unhold-note]');
   if (btn) btn.click();
 }
 
@@ -1183,11 +1222,12 @@ function renderList(){
   const unheldMsgs = foldAnswers(state.messages, state.said, heldMessages())
     .filter(m => inMessagesTab(m, state.said, state.view.items));
   const infoCount = unheldMsgs.filter(isInfoOnlyMessage).length;
-  $('#n-messages').textContent = unheldMsgs.length - infoCount + noteRows().length;
+  $('#n-messages').textContent = unheldMsgs.length - infoCount + listedNotes().length;
   $('#n-info').textContent = infoCount;
   $('#n-archived').textContent = state.archivedTotal
-    + archivedItemsList().length;
-  $('#n-hold').textContent = heldItemsList().length + heldMessagesList().length;
+    + archivedItemsList().length + archivedNotes().length;
+  $('#n-hold').textContent = heldItemsList().length + heldMessagesList().length
+    + heldNotes().length;
   // waitingCount (bin/command-center-state.js) is pure over the scanned items,
   // the messages and what he said - opening a row or typing into it touches
   // neither, so this cannot move on its own (see waitingMessages above).
@@ -1223,9 +1263,9 @@ function renderList(){
 // firstmate, and nothing here is server-durable, unlike Archived's messages.
 function renderHold(){
   const items = ordered(heldItemsList().filter(inProject));
-  const msgs = ordered(heldMessagesList().filter(inProject), true);
+  const msgs = ordered(heldMessagesList().concat(heldNotes()).filter(inProject), true);
   const sections = [
-    ['Messages', msgs, m => messageRow(m, 'held')],
+    ['Messages', msgs, m => m.__note ? noteRow(m) : messageRow(m, 'held')],
     ['Waiting-on-you items', items, it => itemRow(it, 'held')],
   ].filter(([, rows]) => rows.length);
   paintList(sections.length
@@ -1248,7 +1288,7 @@ function renderMessages(archived){
   // Messages also lists his own notes (noteRows) - a search reads the log
   // server-side and never reaches them, so they are left out while one runs.
   const rows = archived ? archivedRows() : ordered(visibleMessages().concat(
-    state.tab === 'messages' && !state.q.trim() ? noteRows().filter(inProject) : []), true);
+    state.tab === 'messages' && !state.q.trim() ? listedNotes().filter(inProject) : []), true);
   let note = state.msgError
     ? `<div class="archive-note" style="background:var(--warn-soft)"><b>What firstmate
        said to you could not be read.</b> ${esc(state.msgError)} This is not the whole
@@ -1315,11 +1355,12 @@ function selectionBarHtml(){
 // it. Not persisted: an anchor means nothing once the page reloads.
 let selectAnchor = null;
 function toggleMessageSelection(key, e){
-  if (!state.selected.size && state.open && state.open.startsWith('msg/')){
+  if (!state.selected.size && state.open && /^(msg|note)\//.test(state.open)){
     state.selected.add(state.open);
     selectAnchor = selectAnchor || state.open;
   }
-  const domKeys = [...$('#list').querySelectorAll('[data-key^="msg/"]')].map(el => el.dataset.key);
+  const domKeys = [...$('#list').querySelectorAll('[data-key^="msg/"], [data-key^="note/"]')]
+    .map(el => el.dataset.key);
   const i = domKeys.indexOf(selectAnchor), j = domKeys.indexOf(key);
   if (e.shiftKey && i >= 0 && j >= 0){
     const [lo, hi] = i < j ? [i, j] : [j, i];
@@ -1394,6 +1435,10 @@ async function deleteKeys(keys){
 }
 
 async function bulkArchiveSelected(){
+  for (const k of state.selected){
+    const r = k.startsWith('note/') && findNote(k.slice(5));
+    if (r && !r.archived) setNoteArchived(r, true);
+  }
   const ms = [...state.selected].filter(k => k.startsWith('msg/'))
     .map(k => findMessageById(k.slice(4))).filter(m => m && !m.archived);
   if (!ms.length){ state.selected.clear(); renderList(); return; }
@@ -1411,6 +1456,8 @@ async function bulkArchiveSelected(){
 
 function bulkHoldSelected(){
   for (const key of state.selected){
+    const r = key.startsWith('note/') && findNote(key.slice(5));
+    if (r && !r.held) setNoteHeld(r, true);
     if (!key.startsWith('msg/')) continue;
     const m = findMessageById(key.slice(4));
     if (m && !m.held) setMsgHeld(m, true);
@@ -1612,10 +1659,11 @@ function messageRow(m, mode){
   // A recorded answer listed on its own - only when the message it continues
   // is not held here (foldAnswers) - says what it answers (answerFor).
   const answer = answerFor(m, state.said, heldMessages());
+  // Said as not known, never as "none": a blank field is a gap in the record.
   const where = [
-    m.project || 'Not recorded',
-    m.worktree ? m.worktree.replace(/^.*\//, '') : 'no worktree',
-    m.branch || 'no branch',
+    m.project || 'project not recorded',
+    m.worktree ? m.worktree.replace(/^.*\//, '') : 'worktree not recorded',
+    m.branch || 'branch not recorded',
   ];
   // Seen means seen since the newest answer folded into it (answered_by), so a
   // conversation an answer just brought back reads unread again.
@@ -1631,8 +1679,8 @@ function messageRow(m, mode){
       <span class="age" title="from the time firstmate sent it">${ageLabel(m)}</span>
       ${recvDotHtml(latestReplyTo(m))}
     </span>
-    <span class="item-sub" title="${esc([m.project || 'Not recorded',
-        m.worktree || 'no worktree', m.branch || 'no branch'].join(' · '))}">
+    <span class="item-sub" title="${esc([m.project || 'project not recorded',
+        m.worktree || 'worktree not recorded', m.branch || 'branch not recorded'].join(' · '))}">
       ${where.map((w, i) => (i ? '<span class="sep">·</span>' : '') +
         `<span class="${i ? 'mono' : ''}">${esc(w)}</span>`).join('')}
     </span>
@@ -1643,8 +1691,9 @@ function messageRow(m, mode){
 
 function noteRow(n){
   const key = noteKey(n.__note);
-  const status = threadStatus(threadEntries([n.__note]));
-  return `<div class="row"><button class="item ${state.seen[key] ? 'answered' : ''}"
+  const status = threadStatus(noteEntries(n));
+  return `<div class="row"><button class="item ${state.seen[key] ? 'answered' : ''}${
+      state.selected.has(key) ? ' selected' : ''}"
       data-key="${esc(key)}" aria-current="${state.open === key}">
     <span class="item-top">
       <span class="item-title">${esc(n.title)}</span>${threadBadgeHtml(status)}
@@ -1740,11 +1789,17 @@ function wireReplyBox(key){
 }
 
 // A note's own pane: his note, then every answer firstmate recorded against
-// it, or plainly nothing yet. It has no reply box of its own - each answer is
-// an ordinary message, opened from here and replied to there.
+// it, else the one matched by the moment, or plainly that none was found -
+// never "not answered" as a claim, since an answer firstmate gave in ordinary
+// conversation names no note. It has no reply box of its own - each answer is
+// an ordinary message, opened from here and replied to there. Archive and
+// Hold sit where every other pane has them.
 function renderNotePane(n){
-  const entries = threadEntries([n.__note]);
+  const entries = noteEntries(n);
   const status = threadStatus(entries);
+  const answers = entries.filter(e => e.kind === 'firstmate').map(e => e.row);
+  const moment = entries.some(e => e.moment);
+  const sid = esc(n.__note.sid);
   paintMain(noteKey(n.__note), `<div class="main-inner">
     <div class="crumbs">
       <span class="kind k-decision">you said</span>
@@ -1753,10 +1808,22 @@ function renderNotePane(n){
     </div>
     <h2 class="subject">${esc(n.title)}</h2>
     <div class="thread">${entries.map(threadEntryHtml).join('')}</div>
-    ${n.answers.length
-      ? n.answers.map(m => `<div class="reply-foot"><button class="defer" data-open="${
+    ${moment ? `<p class="quiet">Matched by the moment: the first thing firstmate said
+      after this note, before you sent anything else. Firstmate did not record it as
+      the answer to this note.</p>` : ''}
+    ${answers.length
+      ? answers.map(m => `<div class="reply-foot"><button class="defer" data-open="${
           esc(msgKey(m))}">Open firstmate’s answer to reply to it</button></div>`).join('')
-      : '<p class="quiet">Firstmate has not recorded an answer to this yet.</p>'}
+      : `<p class="quiet">No answer to this has been found. Firstmate recorded none
+          against it, and nothing it said in the ${NOTE_MOMENT_MINUTES} minutes after it,
+          before your next message, is on this board.</p>`}
+    <div class="reply-foot">
+      <button class="defer" data-archive-note="${sid}">${
+        n.archived ? 'Restore to Messages' : 'Archive'}</button>
+      ${n.held
+        ? `<button class="defer" data-unhold-note="${sid}">Back to list</button>`
+        : `<button class="defer" data-hold-note="${sid}">Hold</button>`}
+    </div>
   </div>`);
 }
 
@@ -2669,6 +2736,22 @@ document.addEventListener('click', async e => {
     await archiveMessageById(archiveMsgBtn.dataset.archiveMsg, true);
     return;
   }
+  // His own note: the same one click, the same move to the next row.
+  const noteBtn = e.target.closest('[data-archive-note], [data-hold-note], [data-unhold-note]');
+  if (noteBtn){
+    const d = noteBtn.dataset;
+    const r = findNote(d.archiveNote || d.holdNote || d.unholdNote);
+    if (r){
+      const key = noteKey(r);
+      const keys = displayOrder(visibleMessages().concat(listedNotes()), true, true,
+        m => m.__note ? noteKey(m.__note) : msgKey(m));
+      const leaving = d.archiveNote ? !r.archived : !!d.holdNote;
+      if (d.archiveNote) setNoteArchived(r, !r.archived); else setNoteHeld(r, !!d.holdNote);
+      if (leaving && state.open === key && state.tab === 'messages') { advanceTo(keys, key); return; }
+    }
+    render();
+    return;
+  }
   // Hold is only ever his own parking: nothing here is sent to firstmate, and
   // nothing here is server-durable, so this only ever touches browser state -
   // the same one-click, advance-to-next shape as Archive.
@@ -2709,7 +2792,7 @@ document.addEventListener('click', async e => {
   const row = e.target.closest('.item');
   if (row){
     const key = row.dataset.key;
-    if (key && key.startsWith('msg/') && (e.shiftKey || e.ctrlKey || e.metaKey)){
+    if (key && /^(msg|note)\//.test(key) && (e.shiftKey || e.ctrlKey || e.metaKey)){
       toggleMessageSelection(key, e);
       return;
     }

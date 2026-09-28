@@ -865,9 +865,11 @@ def read_log(path, limit=500):
                     continue
                 lines += 1
                 try:
-                    rows.append(json.loads(line))
+                    row = json.loads(line)
                 except json.JSONDecodeError:
                     continue
+                if isinstance(row, dict):
+                    rows.append(row)
     except FileNotFoundError:
         return [], None, 0
     except OSError as exc:
@@ -1038,11 +1040,14 @@ def read_said(records, limit=LOG_LIMIT):
             row = dict(row, outcome="unknown", detail=RESTART_DETAIL)
         merged.append(row)
     merged = [_repair_unknown_outcome(records, r) for r in merged]
-    # A note he deleted from Messages (/api/park, target "note") is only
-    # flagged, never dropped: this is still his record of what he said.
-    deleted = {key for (target, key), state in read_parked(home).items()
-               if target == "note" and state == "deleted"}
+    # A note he deleted or archived from Messages (/api/park, target "note")
+    # is only flagged, never dropped: this is still his record of what he said.
+    parked = read_parked_rows(home)
+    deleted = {key for (target, key), row in parked.items()
+               if target == "note" and row.get("state") == "deleted"}
     merged = [dict(r, deleted=True) if r.get("sid") in deleted else r for r in merged]
+    merged = [dict(r, **parked_fields(parked, ("note", r["sid"])))
+              if r.get("kind") == "note" and r.get("sid") else r for r in merged]
     merged = [dict(r, received=bool(r.get("note_id")) and note_received(
                   resolve_send_home(records, r.get("home")), r.get("note_id")))
               for r in merged]
@@ -1568,6 +1573,31 @@ def enrich_messages(rows, records):
 
 MESSAGE_WINDOW = 200
 
+# A field a record says it does not know - left empty, or written out as
+# "unknown" once firstmate records unknown work rather than refusing it - is
+# the same fact as a field it never carried: missing. Normalized to None at
+# read time so enrichment still tries to find it, and the page groups every
+# such message in one "Not recorded" bucket instead of several.
+UNKNOWN_VALUES = {"", "unknown", "null", "none", "n/a", "not recorded"}
+CONTEXT_FIELDS = ("project", "worktree", "branch")
+
+
+def known_value(value):
+    """The value, or None when it names nothing."""
+    if value is None:
+        return None
+    text = str(value).strip()
+    return None if text.strip("()").strip().lower() in UNKNOWN_VALUES else text
+
+
+def is_message(row):
+    """Is this parsed line a message? Anything with an id that is not an
+    archive amendment. NO OTHER FIELD IS REQUIRED: a message missing its
+    text, title, project, worktree or branch is still shown, saying what is
+    not known (his ruling 2026-09-28) - no label is never a reason to drop one."""
+    return isinstance(row, dict) and bool(row.get("id")) \
+        and row.get("kind") not in ("archive", "unarchive")
+
 
 def messages_etag(home, capture):
     """What an unchanged /api/messages poll is allowed to skip re-reading.
@@ -1625,7 +1655,8 @@ def archived_messages(home):
                     row = json.loads(line)
                 except json.JSONDecodeError:
                     continue
-                if row.get("kind") in ("archive", "unarchive") and row.get("of"):
+                if isinstance(row, dict) and row.get("kind") in ("archive", "unarchive") \
+                        and row.get("of"):
                     states[row["of"]] = row["kind"] == "archive"
     except OSError:
         pass
@@ -1655,9 +1686,11 @@ def message_totals(home):
                     row = json.loads(line)
                 except json.JSONDecodeError:
                     continue
+                if not isinstance(row, dict):
+                    continue
                 if row.get("kind") in ("archive", "unarchive") and row.get("of"):
                     states[row["of"]] = row["kind"] == "archive"
-                elif row.get("id") and "text" in row:
+                elif is_message(row):
                     ids.append(row["id"])
     except OSError:
         pass
@@ -1764,11 +1797,14 @@ def read_messages(home, limit=MESSAGE_WINDOW, before=None, query=None, archived=
                     row = json.loads(raw)
                 except json.JSONDecodeError:
                     continue
+                if not isinstance(row, dict):
+                    continue
                 if row.get("kind") in ("archive", "unarchive") and row.get("of"):
                     archive_state.setdefault(row["of"], row)
                     continue
-                if not row.get("id") or "text" not in row:
+                if not is_message(row):
                     continue
+                row = dict(row, **{f: known_value(row.get(f)) for f in CONTEXT_FIELDS})
                 if skipping and not archived:
                     if mark in raw and row.get("id") == before:
                         skipping = False
@@ -1821,7 +1857,7 @@ def find_message(home, msg_id):
                     row = json.loads(raw)
                 except json.JSONDecodeError:
                     continue
-                if row.get("id") == msg_id:
+                if isinstance(row, dict) and row.get("id") == msg_id:
                     return row, None
     except FileNotFoundError:
         return None, None
@@ -1953,6 +1989,8 @@ def restore_answered(home):
                     try:
                         row = json.loads(line)
                     except json.JSONDecodeError:
+                        continue
+                    if not isinstance(row, dict):
                         continue
                     if row.get("kind") in ("archive", "unarchive") and row.get("of"):
                         archived_at[row["of"]] = row.get("at") if row["kind"] == "archive" else None
@@ -2358,7 +2396,7 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/api/park":
             # Archive, Hold and Delete for a Waiting-on-you item, Hold
             # and Delete for a message (its Archive stays on
-            # /api/archive above), and Delete for one of his own notes
+            # /api/archive above), and Archive and Delete for one of his own notes
             # listed in Messages (target "note", keyed by its sid): one durable record instead of browser
             # storage, so it survives a refresh and reads the same from any
             # browser. No confirmation and no undo route beyond sending the
