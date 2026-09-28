@@ -134,6 +134,45 @@ def images_dir(home):
     return os.path.join(home, "data", "command-center", "images")
 
 
+# Documents firstmate writes for him (a report.md, a page.html) live under its
+# own data directory. A file address to one is a dead end on this page - no
+# browser follows a link from an http page to a file on disk - so /doc/<path>
+# serves them read only, over the address he already has open. Document types
+# only: firstmate's own machine records there (.json/.jsonl, scripts, logs)
+# are not his to open. The page reads DOC_TYPES too, to link only these.
+DOC_TYPES = {
+    "md": "text/plain; charset=utf-8", "markdown": "text/plain; charset=utf-8",
+    "txt": "text/plain; charset=utf-8", "csv": "text/plain; charset=utf-8",
+    "html": "text/html; charset=utf-8", "htm": "text/html; charset=utf-8",
+    "pdf": "application/pdf", "svg": "image/svg+xml",
+    "png": "image/png", "jpg": "image/jpeg", "jpeg": "image/jpeg",
+    "gif": "image/gif", "webp": "image/webp",
+}
+
+
+def docs_dir(home):
+    return os.path.join(os.path.abspath(home), "data")
+
+
+def doc_file(home, rel):
+    """The file /doc/<rel> names, or None. Resolved with every symlink
+    followed, then required to still sit inside docs_dir: a "..", an encoded
+    one, an absolute path or a link pointing out of the directory all land
+    outside it and are refused. Nothing hidden, no directories, no other
+    type."""
+    rel = urllib.parse.unquote(rel)
+    if "\0" in rel:
+        return None
+    root = os.path.realpath(docs_dir(home))
+    path = os.path.realpath(os.path.join(root, rel))
+    if not path.startswith(root + os.sep) or not os.path.isfile(path):
+        return None
+    if any(part.startswith(".") for part in os.path.relpath(path, root).split(os.sep)):
+        return None
+    ext = os.path.splitext(path)[1][1:].lower()
+    return (path, DOC_TYPES[ext]) if ext in DOC_TYPES else None
+
+
 def append_image_markers(text, home, images):
     """The text firstmate actually receives: his words, then one
     "[image: <abs path>]" line per attached image, so firstmate can read them
@@ -2060,13 +2099,16 @@ class Handler(BaseHTTPRequestHandler):
             self.send_header("X-Page-Version", version)
         super().end_headers()
 
-    def _send(self, code, body, ctype="application/json; charset=utf-8", etag=None):
+    def _send(self, code, body, ctype="application/json; charset=utf-8", etag=None,
+              headers=()):
         self.send_response(code)
         self.send_header("Content-Type", ctype)
         self.send_header("Content-Length", str(len(body)))
         self.send_header("Cache-Control", "no-store")
         if etag:
             self.send_header("ETag", etag)
+        for name, value in headers:
+            self.send_header(name, value)
         self.end_headers()
         if self.command != "HEAD":
             self.wfile.write(body)
@@ -2152,6 +2194,11 @@ class Handler(BaseHTTPRequestHandler):
         except (json.JSONDecodeError, UnicodeDecodeError):
             return None
 
+    def _host_ok(self):
+        """Addressed to this server by name: a rebound hostname never is."""
+        port = self.server.server_address[1]
+        return self.headers.get("Host") in (f"127.0.0.1:{port}", f"localhost:{port}")
+
     def _local_request(self):
         """Hold the loopback trust boundary at the door.
 
@@ -2160,9 +2207,9 @@ class Handler(BaseHTTPRequestHandler):
         read here. Both arrive with a Host, Origin or Sec-Fetch-Site that is not
         this server's, so that is what is checked.
         """
-        port = self.server.server_address[1]
-        if self.headers.get("Host") not in (f"127.0.0.1:{port}", f"localhost:{port}"):
+        if not self._host_ok():
             return False
+        port = self.server.server_address[1]
         site = self.headers.get("Sec-Fetch-Site")
         if site is not None and site not in ("same-origin", "none"):
             return False
@@ -2243,9 +2290,41 @@ class Handler(BaseHTTPRequestHandler):
             return
         self._json(200, {"ok": True, "id": name})
 
+    def _serve_doc(self, rel):
+        # Only the Host is checked, not where the request came from: a
+        # document opens from a link inside another document too (a sandboxed
+        # page, so an opaque origin), and read only, with no CORS header, no
+        # other site can read what comes back - a rebound hostname could,
+        # which the Host check refuses.
+        if not self._host_ok():
+            self._send(403, b"not your server", "text/plain; charset=utf-8")
+            return
+        found = doc_file(self.records.home, rel)
+        if not found:
+            self._send(404, b"not found", "text/plain; charset=utf-8")
+            return
+        path, ctype = found
+        try:
+            with open(path, "rb") as fh:
+                body = fh.read()
+        except OSError:
+            self._send(404, b"not found", "text/plain; charset=utf-8")
+            return
+        headers = [("X-Content-Type-Options", "nosniff")]
+        if ctype.startswith(("text/html", "image/svg")):
+            # A worker-written page runs its own script, but in a sandbox with
+            # no origin of its own, so it can never call this page's /api.
+            headers.append(("Content-Security-Policy",
+                            "sandbox allow-scripts allow-popups "
+                            "allow-popups-to-escape-sandbox allow-forms allow-modals allow-downloads"))
+        self._send(200, body, ctype, headers=headers)
+
     # --- routes --------------------------------------------------------------
     def do_GET(self):
         path = self.path.split("?", 1)[0]
+        if path.startswith("/doc/"):
+            self._serve_doc(path[len("/doc/"):])
+            return
         if not self._local_request():
             self._send(403, b"not your server", "text/plain; charset=utf-8")
             return
@@ -2258,6 +2337,8 @@ class Handler(BaseHTTPRequestHandler):
                     body = fh.read()
                 if src == PAGE:
                     body = body.replace(b"__PAGE_VERSION__", version.encode())
+                    body = body.replace(b"'__DOCS__'", dump(
+                        {"root": docs_dir(self.records.home), "types": sorted(DOC_TYPES)}))
             except OSError as exc:
                 self._send(500, f"cannot read {src}: {exc}".encode(),
                            "text/plain; charset=utf-8")

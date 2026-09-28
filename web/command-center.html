@@ -502,15 +502,36 @@ const esc = s => String(s == null ? '' : s)
 // anchor - it never reinterprets anything he typed as markup. A sentence
 // character stuck right against the end of a URL (a period, a closing
 // bracket, ...) almost never belongs to it, so it is peeled back off the link.
-const LINK_RE = /(https?:\/\/[^\s<>"]+)/g;
+//
+// A file address is a dead end here (no browser follows one from an http
+// page), so one into firstmate's documents (DOCS, the server's docs_dir) -
+// bare, file:///..., or the file://wsl.localhost/<distro>/... form a Windows
+// browser was handed - links to the same file served at /doc/<path>. A file
+// address anywhere else stays plain text: a link that does nothing is worse.
+const DOCS = '__DOCS__';
+const reEsc = s => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+const LINK_RE = new RegExp('(https?://[^\\s<>"]+' + (DOCS.root
+  ? '|(?:file://(?:wsl\\.localhost|wsl\\$)/[^/\\s<>"]+|file://)?' + reEsc(DOCS.root) + '/[^\\s<>"]+'
+  : '') + ')', 'g');
 function linkify(escapedText){
   return String(escapedText || '').replace(LINK_RE, url => {
     let trail = '';
-    while (url && /[.,!?;:)\]}]/.test(url[url.length - 1])) {
-      trail = url[url.length - 1] + trail;
-      url = url.slice(0, -1);
+    for (;;) {
+      if (url.endsWith('&quot;')) { trail = '&quot;' + trail; url = url.slice(0, -6); }
+      else if (url && /[.,!?;:)\]}`*']/.test(url[url.length - 1])) {
+        trail = url[url.length - 1] + trail;
+        url = url.slice(0, -1);
+      } else break;
     }
-    return url ? `<a href="${url}" target="_blank" rel="noopener">${url}</a>${trail}` : trail;
+    if (!url) return trail;
+    let href = url;
+    if (!/^https?:/.test(url)) {
+      const rel = url.slice(url.indexOf(DOCS.root) + DOCS.root.length + 1);
+      const ext = (rel.match(/\.([A-Za-z0-9]+)$/) || [])[1];
+      if (!ext || !DOCS.types.includes(ext.toLowerCase())) return url + trail;
+      href = '/doc/' + encodeURI(rel).replace(/[?#]/g, encodeURIComponent);
+    }
+    return `<a href="${href}" target="_blank" rel="noopener">${url}</a>${trail}`;
   });
 }
 // Every place on this page that shows firstmate's or his own free text goes

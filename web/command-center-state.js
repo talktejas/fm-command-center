@@ -337,14 +337,23 @@ function replyTarget(message, items) {
 // decide/approve/choose without ever being recorded as one. Rather than
 // guessing at intent, this looks for a literal question or the same handful
 // of phrases firstmate itself uses to hand him a decision.
+//
+// His rule 2026-09-28: "Waiting on you is things u need input / decisions from
+// me." A message that only recalls an ask made elsewhere ("Nothing new. Still
+// waiting on your A, B or C") is not itself one - the message that asked is
+// what waits on him - so "waiting on your ..." counts unless the message says
+// it is still waiting or that nothing is new.
 const DECISION_PHRASES = ['reply 1 or 2', 'reply "', "reply '", 'say the word',
-  'your call', 'waiting on your', 'tell me', 'let me know'];
+  'your call', 'tell me', 'let me know'];
+const RECALLED_ASK = /\bstill waiting on your\b|\bnothing (new|changed)\b/;
 function looksLikeQuestion(text) {
   const t = String(text || '').trim();
   if (!t) return false;
   if (t.endsWith('?')) return true;
   const low = t.toLowerCase();
   return DECISION_PHRASES.some(p => low.includes(p))
+    || (low.includes('waiting on your') && !RECALLED_ASK.test(low))
+    || /\breply [a-d1-9]\b/.test(low)
     || /\bmerge\b[^.!]*\?/.test(low) || /\bshould i\b[^.!]*\?/.test(low);
 }
 
@@ -643,14 +652,20 @@ const NOISE = new RegExp([
   '\\b(is|are) (now )?(running|validating|working on|building|looking into)\\b',
   '\\bgoing through its checks\\b', '\\bleftover alert\\b', '\\bnothing to do\\b', '\\bno message\\b',
 ].join('|'));
+// Routine is short: an ack or a status line. Every message in the real log
+// longer than this that NOISE caught was an explanation, a finding or a plan
+// written back to him ("you're right, and here is why..."), never routine.
+const ROUTINE_MAX = 400;
 function looksLikeInfoOnly(text) {
   const t = String(text || '').trim();
   if (!t) return false;
   if (t.endsWith('?')) return false;
   const asked = t.replace(RECAP, '');
+  if (!/[a-z0-9]/i.test(asked)) return true;  // nothing but a recap of an ask made elsewhere
   if (looksLikeQuestion(asked) || ASKS.some(p => asked.toLowerCase().includes(p))) return false;
   const low = asked.toLowerCase();
   if (SIGNAL.test(low.replace(NEGATED, ''))) return false;
+  if (t.length > ROUTINE_MAX) return false;
   return NOISE.test(low);
 }
 function isInfoOnlyMessage(message) {

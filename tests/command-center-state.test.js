@@ -353,6 +353,26 @@ test('the same handful of phrases firstmate uses to hand him a decision are reco
   assert.strictEqual(looksLikeQuestion('Waiting on your go-ahead'), true);
 });
 
+// His rule 2026-09-28: "Waiting on you is things u need input / decisions from
+// me. messages are messages that i need to see / review. info is just ...
+// routine messages like nothing to review, its working etc."
+test('a message that only recalls an ask made elsewhere is not itself waiting on him', () => {
+  assert.strictEqual(looksLikeQuestion('Nothing new for you. Waiting on your A, B or C for the Koin build tools.'), false);
+  assert.strictEqual(looksLikeQuestion('Captain, the labels are fixed. Still waiting on your read of the feature list.'), false);
+  assert.strictEqual(looksLikeQuestion('Eight diamond items are built and waiting on your word, none merged.'), true,
+    'a first ask phrased as waiting on him still waits');
+  assert.strictEqual(looksLikeQuestion('Three ways to install it. Reply A, B or C.'), true);
+  assert.strictEqual(isInfoOnlyMessage({ text: '*(no message - still waiting on your A, B or C for the Koin build tools)*' }), true,
+    'a bare recall of an open ask is routine');
+});
+
+test('a long explanation written back to him is never routine, whatever quiet words it quotes', () => {
+  const long = 'Captain, that one is entirely me, not the page. I kept typing little placeholders - "nothing needing you", '
+    + '"no message" - and everything I type gets captured and becomes a row in your Messages. '.repeat(5);
+  assert.ok(long.length > 400);
+  assert.strictEqual(isInfoOnlyMessage({ text: long }), false);
+});
+
 test('a message needs a reply when recorded as a question or plainly asking one, until he replies', () => {
   const flagged = { id: 'm1', question: true, text: 'status update, nothing to decide' };
   const worded = { id: 'm2', question: false, text: 'Can I merge this branch?' };
