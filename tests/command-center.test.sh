@@ -2206,6 +2206,49 @@ test_the_ask_user_machine_line_is_stated_plainly_and_real_questions_are_not() {
   pass "the ask-user machine line is stated plainly and real questions are shown as written"
 }
 
+# His report 2026-09-28, "need fucking decision on what?": the ask-user row read
+# only "A worker on demo stopped and needs a decision from you." The server
+# reads the findings file the status line points at and serves the worker's
+# own question; with no file, the row says the question was never written down.
+# A remembered row (the scan no longer lists it) gets the same treatment.
+test_an_ask_user_row_carries_the_question_or_says_it_was_not_written() {
+  local home port items
+  home="$TMP_ROOT/askuser"
+  mkdir -p "$home/data/t-asks" "$home/state"
+  printf '# Backlog\n' > "$home/data/backlog.md"
+  printf 'id: review-1\nauthority: ask-user\ndescription: Adding it widens the scope. Should a one-line instruction go in AGENTS.md?\n' \
+    > "$home/data/t-asks/nm-1-findings.txt"
+  printf 'needs-decision [key=k-a]: [2026-09-28T09:00:57Z] ask-user findings=review-1 file=%s\n' \
+    "$home/data/t-asks/nm-1-findings.txt" > "$home/state/t-asks.status"
+  printf 'needs-decision [key=k-b]: ask-user findings=r-2 file=%s\n' \
+    "$home/data/t-gone/nm-2-findings.txt" > "$home/state/t-gone.status"
+  printf 'project=/home/captain/p/demo\nkind=ship\n' | tee "$home/state/t-asks.meta" > "$home/state/t-gone.meta"
+
+  start_server "$home" || fail "the server did not start"
+  port=$SERVER_PORT
+  items=$(curl -s -m 120 "http://127.0.0.1:$port/api/items")
+  assert_equals 'Should a one-line instruction go in AGENTS.md?' \
+    "$(jq -r '.items[] | select(.id == "t-asks") | .title' <<<"$items")" \
+    "the ask-user row did not carry the worker's own question"
+  assert_contains "$(jq -r '.items[] | select(.id == "t-asks") | .detail' <<<"$items")" \
+    'Adding it widens the scope.' "the findings were not served in full under the question"
+  assert_contains "$(jq -r '.items[] | select(.id == "t-gone") | .title' <<<"$items")" \
+    'the question itself was not written down' \
+    "a row with no findings file looked complete instead of saying so"
+  assert_equals 'false' "$(jq -r '.items[] | select(.id == "t-gone") | .question_recorded' <<<"$items")" \
+    "a row with no recorded question was not marked as such"
+
+  # Resolved: the scan drops it, the ledger serves the scan's old generic text.
+  printf 'resolved [key=k-a]: answered\n' >> "$home/state/t-asks.status"
+  wait_for "the resolved row was never served as closed" bash -c \
+    "curl -s -m 120 'http://127.0.0.1:$port/api/items' | jq -e '.items[] | select(.id == \"t-asks\" and .closed == true)' >/dev/null"
+  assert_equals 'Should a one-line instruction go in AGENTS.md?' \
+    "$(curl -s -m 120 "http://127.0.0.1:$port/api/items" | jq -r '.items[] | select(.id == "t-asks") | .title')" \
+    "a remembered ask-user row went back to the generic line"
+  stop_server
+  pass "an ask-user row carries the question, or says plainly it was not written down"
+}
+
 # fm-captain-hold.sh can be entirely gone from the firstmate checkout and an
 # item answer still lands: nothing on this send path calls it any more, only
 # fm-inbox.sh note.
@@ -3716,6 +3759,7 @@ test_the_click_returns_before_the_command_finishes
 test_a_failed_read_is_never_cached_as_the_state_of_the_log
 test_the_recorder_takes_a_body_that_looks_like_a_flag
 test_the_ask_user_machine_line_is_stated_plainly_and_real_questions_are_not
+test_an_ask_user_row_carries_the_question_or_says_it_was_not_written
 test_an_item_answer_never_needs_fm_captain_hold_at_all
 test_a_reply_that_is_not_a_question_is_sent_even_with_no_scan
 test_every_captured_message_is_reachable_without_serving_them_all

@@ -262,6 +262,7 @@ epoch_of() {  # <file>
 # rule 6): ids and a path, with the content deliberately left in the file
 # rather than the line. That is bookkeeping, not something firstmate said to
 # him, so such a row is stated plainly from what is known instead.
+# command-center.py's ask_user_question then swaps in the file's own question.
 #
 # EVERY OTHER NOTE IS THE WORKER'S OWN SENTENCE AND IS SHOWN AS WRITTEN. The
 # options he is being asked to choose between are the whole value of the row,

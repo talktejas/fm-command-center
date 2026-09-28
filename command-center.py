@@ -239,7 +239,9 @@ class Records:
             self.error = f"scan produced unreadable output: {exc}"
             return
         self.error = None
-        data["items"] = remember_waiting(self.home, data.get("items", []))
+        paths = {h["id"]: h["path"] for h in data.get("homes", [])}
+        data["items"] = [ask_user_question(it, paths.get(it.get("home")))
+                         for it in remember_waiting(self.home, data.get("items", []))]
         with self.lock:
             self.etag = etag
             self.body = dump(data)
@@ -361,6 +363,89 @@ def remember_waiting(home, items):
         except OSError as exc:
             sys.stderr.write(f"command-center: could not write {path}: {exc}\n")
     return out
+
+
+# --- the ask-user question behind a status decision
+#
+# A no-mistakes ask-user gate reports itself on a status line as
+# `ask-user findings=<ids> file=<path>` (firstmate's bin/fm-dod-lib.sh rule 6),
+# the question itself deliberately left in that file. The scan states such a
+# row as the bare "A worker on X stopped and needs a decision from you." - his
+# report 2026-09-28, "need fucking decision on what?". So the file is read here
+# and the item carries the worker's own words; where the file is gone or empty
+# the item says the question was never written down rather than looking whole.
+# Applied to every served item, remembered ones too (remember_waiting keeps the
+# scan's old text), so it lives here rather than in the scan.
+ASK_USER_LINE = re.compile(
+    r"\[key=(?P<key>[^\]]+)\].*\bask-user findings=(?P<ids>\S*) file=(?P<file>\S+)")
+GENERIC_ASK = re.compile(
+    r"^A worker(?: on (?P<project>.+?))? stopped and "
+    r"(?:needs a decision from you|cannot go on)\.$")
+
+
+def ask_user_question(item, home_path):
+    """The item, with a generic ask-user title replaced by what was recorded."""
+    m = GENERIC_ASK.match(item.get("title") or "")
+    if item.get("source") != "status" or not m or not home_path:
+        return item
+    who = f"A worker on {m.group('project')}" if m.group("project") else "A worker"
+    line = None
+    try:
+        with open(os.path.join(home_path, "state", f"{item['id']}.status"),
+                  encoding="utf-8", errors="replace") as fh:
+            for raw in fh:
+                hit = ASK_USER_LINE.search(raw)
+                if hit and hit.group("key") == item.get("key"):
+                    line = hit
+    except OSError:
+        pass
+    text, why = "", "firstmate's record for it names no findings file"
+    if line:
+        path = line.group("file")
+        # Only a file under this home's own data/, where rule 6 writes it: a
+        # status line is a worker's text and must not serve any file it names.
+        data = os.path.realpath(os.path.join(home_path, "data")) + os.sep
+        if not os.path.realpath(path).startswith(data):
+            why = f"the file it names ({path}) is outside this home's data folder"
+        else:
+            try:
+                with open(path, encoding="utf-8", errors="replace") as fh:
+                    text = fh.read(64 * 1024).strip()
+                why = f"the file it names ({path}) is empty"
+            except OSError:
+                why = f"the file it names ({path}) could not be read"
+    if not text:
+        return dict(item, question_recorded=False,
+                    title=f"{who} stopped for a decision, but the question itself "
+                          "was not written down.",
+                    detail=f"The question itself was not written down: {why}. "
+                           f"What is known is below - task {item['id']}, decision "
+                           f"{item.get('key')}, and the project, worktree and branch "
+                           "above. Ask firstmate what the worker wants decided.")
+    return dict(item, question_recorded=True,
+                title=ask_user_title(text) or f"{who} needs your decision on "
+                                              f"{line.group('ids') or 'a finding'}.",
+                detail=f"The worker's findings, verbatim ({line.group('file')}):\n\n{text}")
+
+
+def ask_user_title(text):
+    """The first question the findings ask, else the first finding's opening."""
+    # ponytail: sentence-splitting heuristic over the three findings layouts seen
+    # on disk (key: value, multi-line description:, and a CSV-ish row list).
+    lines = [re.sub(r'^(?:description:\s*|.*,ask-user,")', "", l.strip())
+             for l in text.splitlines()]
+    sentences = [s.strip().strip('"') for l in lines
+                 for s in re.split(r"(?<=[.!?])\s+", l) if s.strip()]
+    for s in sentences:
+        # A `?` inside code (`a ? b : c`) is not a question he is asked.
+        if (s.endswith("?") and len(s) >= 15 and s.count("`") % 2 == 0
+                and s.count("(") == s.count(")")):
+            return s
+    hit = re.search(r'(?:^description:[ \t]*\n?|,ask-user,")[ \t]*(\S[^\n]*)', text, re.M)
+    if hit:
+        first = re.split(r"(?<=\.)\s+", hit.group(1).strip().strip('"'))[0]
+        return first if len(first) <= 200 else first[:197] + "..."
+    return None
 
 
 class Work:
