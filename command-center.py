@@ -240,7 +240,8 @@ class Records:
             return
         self.error = None
         paths = {h["id"]: h["path"] for h in data.get("homes", [])}
-        data["items"] = [ask_user_question(it, paths.get(it.get("home")))
+        data["items"] = [closed_answer(ask_user_question(it, paths.get(it.get("home"))),
+                                       paths.get(it.get("home")))
                          for it in remember_waiting(self.home, data.get("items", []))]
         with self.lock:
             self.etag = etag
@@ -446,6 +447,91 @@ def ask_user_title(text):
         first = re.split(r"(?<=\.)\s+", hit.group(1).strip().strip('"'))[0]
         return first if len(first) <= 200 else first[:197] + "..."
     return None
+
+
+# --- what firstmate recorded when it closed a decision
+#
+# His report 2026-09-28: he was shown a decision firstmate had already answered
+# itself, and spent his attention on something settled. remember_waiting keeps a
+# closed item on screen until his own Archive, so it carries the answer that
+# closed it: a status decision's own `resolved [key=K]: ...` line, or the
+# resolution block fm-captain-hold.sh writes under a closed hold's backlog row
+# (docs/captain-hold-lifecycle.md in firstmate). Nothing is invented: one
+# closed with no recorded answer carries none, and the page says so.
+RESOLVED_LINE = re.compile(r"^resolved \[key=(?P<key>[^\]]+)\]:\s*(?:\[[^\]]*\]\s*)?(?P<text>.*)$")
+RESOLUTION_LABEL = re.compile(r"^\s*(Captain decision|Reconciliation evidence):\s*$")
+
+
+def _backlog_files(firstmate_root):
+    """The backlog and its done-archive, relative to a home (.tasks.toml)."""
+    rel = _tasks_toml_backlog_rel(firstmate_root)
+    if not rel:
+        return []
+    try:
+        with open(os.path.join(firstmate_root, ".tasks.toml"), encoding="utf-8") as fh:
+            m = re.search(r'^archive\s*=\s*"([^"]*)"', fh.read(), re.MULTILINE)
+    except OSError:
+        m = None
+    return [rel] + ([m.group(1)] if m and m.group(1) else [])
+
+
+def hold_resolution(task_id, paths):
+    """(label, text, path) of the last resolution block under this task's
+    backlog row, or None. A row is its `- [ ]`/`- [x]` line plus the indented
+    lines under it; the block's text is the paragraph after its label."""
+    head = re.compile(r"^- \[[ x]\] " + re.escape(task_id) + r" - ")
+    for path in paths:
+        try:
+            with open(path, encoding="utf-8", errors="replace") as fh:
+                lines = fh.read().splitlines()
+        except OSError:
+            continue
+        found = None
+        for i, line in enumerate(lines):
+            if not head.match(line):
+                continue
+            body = []
+            for raw in lines[i + 1:]:
+                if raw.strip() and not raw.startswith((" ", "\t")):
+                    break
+                body.append(raw)
+            for j, raw in enumerate(body):
+                label = RESOLUTION_LABEL.match(raw)
+                if not label:
+                    continue
+                para = []
+                for text in body[j + 1:]:
+                    if not text.strip():
+                        break
+                    para.append(text.strip())
+                if para:
+                    found = (label.group(1), "\n".join(para), path)
+        if found:
+            return found
+    return None
+
+
+def closed_answer(item, home_path):
+    """The item, with `answer` set to what firstmate recorded closing it."""
+    if not item.get("closed") or not home_path:
+        return item
+    if item.get("source") == "status":
+        path, text = os.path.join(home_path, "state", f"{item['id']}.status"), None
+        try:
+            with open(path, encoding="utf-8", errors="replace") as fh:
+                for raw in fh:
+                    m = RESOLVED_LINE.match(raw.rstrip("\n"))
+                    if m and m.group("key") == item.get("key") and m.group("text").strip():
+                        text = m.group("text").strip()   # the last one stands
+        except OSError:
+            pass
+        found = ("Resolved", text, path) if text else None
+    else:
+        found = hold_resolution(item["id"], [os.path.join(home_path, f)
+                                             for f in _backlog_files(FIRSTMATE_ROOT)])
+    if not found:
+        return item
+    return dict(item, answer={"label": found[0], "text": found[1], "from": found[2]})
 
 
 class Work:
