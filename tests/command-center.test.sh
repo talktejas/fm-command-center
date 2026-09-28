@@ -1161,8 +1161,7 @@ test_the_server_serves_the_pages_decision_rules() {
 # ACTUAL served page's own linkify/linked/para functions (extracted from the
 # live HTTP response, the same way the test above runs its served decision
 # rules), then checks every surface that shows free text - Messages, Waiting
-# on you (question text), My words (its list-row excerpt and its own reply
-# box), Info/Archived/On hold (the same message pane and list row every other
+# on you (question text), Info/Archived/On hold (the same message pane and list row every other
 # tab already shares), and a threaded firstmate answer - actually calls
 # linked() or para() on its text, not a bare esc(), by finding each call site
 # in the served bytes.
@@ -1213,10 +1212,6 @@ test_a_url_becomes_a_real_link_on_every_surface_that_shows_free_text() {
   # Each surface's own render call site - a regression that quietly reverts
   # one back to a bare esc() must fail here even though the helper above still
   # works everywhere else.
-  assert_contains "$body" 'linked(r.text)}</span>' \
-    "My words' own reply/note box does not link URLs"
-  assert_contains "$body" 'linked(original.text.slice(0, 160))' \
-    "My words' list-row excerpt (markup already allowed there) does not link URLs"
   assert_contains "$body" "para(m.text) || '<p class=\"quiet\">No text recorded.</p>'" \
     "a message's own pane (Messages/Info/Archived/On hold all open through it) does not link URLs"
   assert_contains "$body" 'const detail = para(it.detail)' \
@@ -1227,15 +1222,15 @@ test_a_url_becomes_a_real_link_on_every_surface_that_shows_free_text() {
   # pane) reads its row as `e.row`, not `r`, once it interleaves firstmate's
   # matched answer alongside it - same call, same linked(), different local
   # name for the loop variable.
-  assert_equals "4" "$(grep -oE 'linked\((r|e\.row)\.text\)' <<<"$body" | wc -l)" \
-    "his own reply/note box, his reply thread, a plain note's thread, and a Waiting-on-you item's answered thread must each link URLs"
+  assert_equals "2" "$(grep -oE 'linked\(e\.row\.text\)' <<<"$body" | wc -l)" \
+    "his reply thread and a Waiting-on-you item's answered thread must each link URLs"
   pass "a URL becomes a real link on every surface that shows free text"
 }
 
 # His report: "why every link i click fucking opens two tabs" - a linked URL
-# in My words' own row (word-text) sits inside that row's own <button
-# class="word">, which the document's single delegated click handler also
-# matches (`e.target.closest('.item, .word')`) to open the row. One real
+# in a row's own text sits inside that row's own <button>, which the
+# document's single delegated click handler also matches
+# (`e.target.closest('.item')`) to open the row. One real
 # click both followed the link AND opened the row - and opening the row
 # re-renders #list synchronously, replacing the very button/anchor still
 # mid-click, which drove the browser to fire a second navigation (reproduced
@@ -1259,7 +1254,7 @@ test_clicking_a_linked_url_never_also_triggers_a_delegated_row_action() {
   [ -n "$handler" ] || fail "the page's single delegated click handler is missing entirely"
   guard_at=$(printf '%s\n' "$body" | grep -n "e.target.closest('a\[href\]')" | head -1 | cut -d: -f1)
   [ -n "$guard_at" ] || fail "the click handler has no guard for a real link at all - every linked URL nested in a clickable row will double-open"
-  row_open_at=$(printf '%s\n' "$body" | grep -n "e.target.closest('.item, .word')" | head -1 | cut -d: -f1)
+  row_open_at=$(printf '%s\n' "$body" | grep -n "e.target.closest('.item')" | head -1 | cut -d: -f1)
   [ -n "$row_open_at" ] || fail "the row-open check this guard must precede is missing (did it move or get renamed?)"
   [ "$guard_at" -gt "$handler" ] || fail "the link guard is not even inside the click handler"
   [ "$guard_at" -lt "$row_open_at" ] || fail "the link guard runs AFTER the row-open check - a click on a linked URL inside a row's own button would still open the row and can still double-open the tab"
@@ -1288,12 +1283,71 @@ test_the_gutter_finds_every_pane_archive_and_hold_button() {
   [ -n "$gutter" ] || fail "the page has no gutterArchive/gutterHold at all"
   assert_contains "$body" 'data-archive-msg="${esc(m.id)}"' \
     "a message pane's Archive button carries no data-archive-msg, so the gutter's Archive cannot find it"
-  for attr in $(grep -oE 'data-(archive|hold|unhold)-(item|msg|word)="\$\{' <<<"$body" \
+  for attr in $(grep -oE 'data-(archive|hold|unhold)-(item|msg)="\$\{' <<<"$body" \
       | sed 's/="\${//' | sort -u); do
     assert_contains "$gutter" "#main [$attr]" \
       "a pane renders a $attr button the gutter's own selector never looks for"
   done
   pass "the gutter finds every pane's Archive and Hold button"
+}
+
+# His report 2026-09-28: shift-click did not select the run in between, and
+# he wants junk deleted with no single mis-click able to wipe a selection.
+# Runs the served page's own toggleMessageSelection and Delete arming in node
+# over a stubbed list (no browser in this suite): a plain click's row is the
+# anchor, shift selects the run to it, ctrl/cmd toggles one row, and Delete
+# only fires on a second click at the same target.
+test_selection_follows_the_ordinary_convention_and_delete_needs_two_clicks() {
+  local home port body
+  home="$TMP_ROOT/select"
+  seed_home "$home"
+  start_server "$home" || fail "the server did not start"
+  port=$SERVER_PORT
+  body=$(curl -s -m 30 "http://127.0.0.1:$port/")
+  stop_server
+  printf '%s\n' "$body" | sed -n '/^let selectAnchor = null;/,/^async function deleteKeys(/p' \
+    | sed '$d' > "$TMP_ROOT/select.js"
+  assert_contains "$(cat "$TMP_ROOT/select.js")" "function armOrDelete(" \
+    "the served page carries no selection/Delete code at all"
+  node -e '
+    const assert = require("assert");
+    const keys = ["msg/a", "msg/b", "msg/c", "msg/d", "msg/e"];
+    const state = { selected: new Set(), open: null, deleteArmed: null, bulkBusy: false, view: {} };
+    const $ = () => ({ querySelectorAll: () => keys.map(key => ({ dataset: { key } })) });
+    const renderList = () => {};
+    const findMessageById = id => ({ id });
+    const itemKey = () => "";
+    let deleted = null;
+    const deleteKeys = async k => { deleted = k; };
+    eval(require("fs").readFileSync(process.argv[1], "utf8").replace("let selectAnchor", "var selectAnchor"));
+    const sel = () => [...state.selected].sort().join(",");
+    // A plain click opens b and makes it the anchor (the row handler does that).
+    state.open = "msg/b"; selectAnchor = "msg/b";
+    toggleMessageSelection("msg/d", { shiftKey: true });
+    assert.strictEqual(sel(), "msg/b,msg/c,msg/d", "shift-click did not select the run from the anchor");
+    toggleMessageSelection("msg/a", { shiftKey: true });
+    assert.strictEqual(sel(), "msg/a,msg/b", "a second shift-click did not re-run from the same anchor");
+    toggleMessageSelection("msg/e", { ctrlKey: true });
+    assert.strictEqual(sel(), "msg/a,msg/b,msg/e", "ctrl-click disturbed the rest of the selection");
+    toggleMessageSelection("msg/a", { metaKey: true });
+    assert.strictEqual(sel(), "msg/b,msg/e", "cmd-click did not drop just that row");
+    // Ctrl-click with nothing selected keeps the open row selected too.
+    state.selected.clear(); state.open = "msg/c";
+    toggleMessageSelection("msg/e", { ctrlKey: true });
+    assert.strictEqual(sel(), "msg/c,msg/e", "the open row did not count as selected");
+    (async () => {
+      await armOrDelete();
+      assert.strictEqual(deleted, null, "one click on Delete deleted the selection");
+      state.selected.add("msg/a");
+      await armOrDelete();
+      assert.strictEqual(deleted, null, "an arm for one selection carried over to a changed one");
+      await armOrDelete();
+      assert.deepStrictEqual(deleted, ["msg/a", "msg/c", "msg/e"], "a second click did not delete");
+      process.exit(0);
+    })().catch(e => { console.error(e.message); process.exit(1); });
+  ' "$TMP_ROOT/select.js" 2>"$TMP_ROOT/select.err" \
+    || fail "$(cat "$TMP_ROOT/select.err")"
+  pass "selection follows the ordinary convention and Delete needs a second click"
 }
 
 # The page's decision rules live in web/command-center-state.js because they are
@@ -2291,7 +2345,7 @@ PYEOF
   pass "every captured message stays reachable without serving the whole log"
 }
 
-# He can click a reply he sent months ago on My words. The page holds a window;
+# A reply can name a message far behind the window. The page holds a window;
 # the log holds everything, so one message can be asked for by name.
 test_a_message_far_behind_the_window_is_served_by_id() {
   local home port body
@@ -2388,12 +2442,12 @@ test_a_held_message_leaves_the_messages_total_the_way_archiving_does() {
 }
 
 # Browser localStorage was fragile - gone in a private window, invisible from
-# another browser - so Archive and Hold for a Waiting-on-you item, a My words
-# conversation, and Hold for a message (its Archive already had a durable
-# record) all go through /api/park into the command center's own
+# another browser - so Archive and Hold for a Waiting-on-you item, and Hold
+# for a message (its Archive already had a durable record) all go through
+# /api/park into the command center's own
 # parked.jsonl. A restart must still read it back exactly, the same
 # durability promise /api/archive already keeps for a message.
-test_park_makes_item_word_and_message_state_durable_across_a_restart() {
+test_park_makes_item_and_message_state_durable_across_a_restart() {
   local home port result
   home="$TMP_ROOT/park"
   mkdir -p "$home/data" "$home/state"
@@ -2413,16 +2467,8 @@ test_park_makes_item_word_and_message_state_durable_across_a_restart() {
   curl -s -m 120 -o /dev/null "http://127.0.0.1:$port/api/items"
   local item_key="main/hold/cc-park/cc-park"
 
-  # A word conversation only exists in My words once something was actually
-  # said about it - a reply to this message is what puts it there.
-  result=$(post "$port" /api/reply "$(jq -cn --arg m "$id" '{msg:$m,text:"Noted."}')")
-  wait_outcome "$home" "$(jq -r .sid <<<"$result")" >/dev/null \
-    || fail "the reply this test parks never reached the record"
-
   result=$(post "$port" /api/park "$(jq -cn --arg k "$item_key" '{target:"item",key:$k,state:"archived"}')")
   assert_contains "$result" '"ok":true' "an item could not be archived through /api/park"
-  result=$(post "$port" /api/park "$(jq -cn --arg k "msg/$id" '{target:"word",key:$k,state:"held"}')")
-  assert_contains "$result" '"ok":true' "a My words conversation could not be held through /api/park"
   result=$(post "$port" /api/park "$(jq -cn --arg k "$id" '{target:"message",key:$k,state:"held"}')")
   assert_contains "$result" '"ok":true' "a message could not be held through /api/park"
 
@@ -2446,9 +2492,6 @@ test_park_makes_item_word_and_message_state_durable_across_a_restart() {
   assert_equals true \
     "$(curl -s -m 30 "http://127.0.0.1:$port/api/messages?id=$id" | jq -r '.messages[0].held')" \
     "the message's hold did not survive a restart"
-  wait_for "the My words conversation's hold did not survive a restart" \
-    bash -c "curl -s -m 30 'http://127.0.0.1:$port/api/said' \
-      | jq -e --arg m '$id' '[.said[] | select(.msg == \$m)][0].held == true' >/dev/null"
 
   # "none" clears it back to its ordinary list, on every target.
   result=$(post "$port" /api/park "$(jq -cn --arg k "$item_key" '{target:"item",key:$k,state:"none"}')")
@@ -2458,7 +2501,54 @@ test_park_makes_item_word_and_message_state_durable_across_a_restart() {
       '[.items[] | select((.home+"/"+.source+"/"+.id+"/"+(.key // "")) == $k)][0].archived')" \
     "\"none\" did not clear the item's archived state"
   stop_server
-  pass "Archive and Hold for an item, a My words conversation, and a message all survive a restart"
+  pass "Archive and Hold for an item and a message all survive a restart"
+}
+
+# His ask 2026-09-28: junk goes for good, not to Archived. Delete is the same
+# parked.jsonl record with state "deleted": the server leaves the row out of
+# every list and count, across a restart, and never touches firstmate's own
+# captain-messages.jsonl.
+test_a_deleted_message_and_item_are_gone_from_every_list() {
+  local home port id keep before after item_key="main/hold/cc-del/cc-del"
+  home="$TMP_ROOT/delete"
+  mkdir -p "$home/data" "$home/state"
+  FM_HOME="$home" FM_ROOT_OVERRIDE="$FIRSTMATE_ROOT" \
+    "$TASKS_AXI" add cc-del "Junk question" --kind captain --repo demo \
+    >/dev/null 2>"$TMP_ROOT/axi.err" \
+    || fail "tasks-axi could not add the fixture task, so this test never ran: $(cat "$TMP_ROOT/axi.err")"
+  FM_HOME="$home" FM_ROOT_OVERRIDE="$FIRSTMATE_ROOT" \
+    "$CAPTAIN_HOLD" hold cc-del --reason "Junk" \
+    >/dev/null 2>"$TMP_ROOT/axi.err" \
+    || fail "the fixture task could not be held for the captain: $(cat "$TMP_ROOT/axi.err")"
+  keep=$(say "$home" "Keep me" "A real update.") || fail "the recorder refused the message"
+  id=$(say "$home" "Junk" "Nothing worth keeping.") || fail "the recorder refused the message"
+  before=$(sha256sum "$home/data/captain-messages.jsonl")
+
+  start_server "$home" || fail "the server did not start"
+  port=$SERVER_PORT
+  curl -s -m 120 -o /dev/null "http://127.0.0.1:$port/api/items"
+  assert_contains "$(post "$port" /api/park "$(jq -cn --arg k "$id" '{target:"message",key:$k,state:"deleted"}')")" \
+    '"ok":true' "a message could not be deleted through /api/park"
+  assert_contains "$(post "$port" /api/park "$(jq -cn --arg k "$item_key" '{target:"item",key:$k,state:"deleted"}')")" \
+    '"ok":true' "an item could not be deleted through /api/park"
+  stop_server
+  start_server "$home" || fail "the server did not restart"
+  port=$SERVER_PORT
+  curl -s -m 120 -o /dev/null "http://127.0.0.1:$port/api/items"
+
+  after=$(curl -s -m 30 "http://127.0.0.1:$port/api/messages")
+  assert_equals "$keep" "$(jq -r '[.messages[].id] | join(",")' <<<"$after")" \
+    "a deleted message was still listed, or the one kept went with it"
+  assert_equals 1 "$(jq -r .total <<<"$after")" "a deleted message still counted in Messages"
+  assert_equals 0 "$(curl -s -m 30 "http://127.0.0.1:$port/api/messages?archived=1" | jq '.messages | length')" \
+    "a deleted message turned up under Archived"
+  assert_equals 0 "$(curl -s -m 30 "http://127.0.0.1:$port/api/items" | jq --arg k "$item_key" \
+      '[.items[] | select((.home+"/"+.source+"/"+.id+"/"+(.key // "")) == $k)] | length')" \
+    "a deleted item was still in Waiting on you"
+  stop_server
+  assert_equals "$before" "$(sha256sum "$home/data/captain-messages.jsonl")" \
+    "deleting wrote to firstmate's own message log"
+  pass "a deleted message and item are gone from every list, across a restart"
 }
 
 test_park_refuses_an_unknown_target_or_state() {
@@ -2469,8 +2559,11 @@ test_park_refuses_an_unknown_target_or_state() {
   port=$SERVER_PORT
   body=$(post "$port" /api/park '{"target":"worker","key":"x","state":"archived"}')
   assert_contains "$body" '"ok":false' "an unknown target was accepted"
-  body=$(post "$port" /api/park '{"target":"item","key":"x","state":"deleted"}')
+  body=$(post "$port" /api/park '{"target":"item","key":"x","state":"gone"}')
   assert_contains "$body" '"ok":false' "an unknown state was accepted"
+  # My words is gone (his ask 2026-09-28), and with it the "word" target.
+  body=$(post "$port" /api/park '{"target":"word","key":"x","state":"held"}')
+  assert_contains "$body" '"ok":false' "the retired My words target was still accepted"
   body=$(post "$port" /api/park '{"target":"item","key":"","state":"archived"}')
   assert_contains "$body" '"ok":false' "an empty key was accepted"
   stop_server
@@ -3368,6 +3461,7 @@ test_the_server_serves_the_pages_decision_rules
 test_a_url_becomes_a_real_link_on_every_surface_that_shows_free_text
 test_clicking_a_linked_url_never_also_triggers_a_delegated_row_action
 test_the_gutter_finds_every_pane_archive_and_hold_button
+test_selection_follows_the_ordinary_convention_and_delete_needs_two_clicks
 test_a_message_names_the_project_the_worktree_and_the_branch
 test_a_taskless_message_is_matched_to_the_one_task_it_names
 test_a_message_naming_two_tasks_is_left_blank_rather_than_guessed
@@ -3404,7 +3498,8 @@ test_every_captured_message_is_reachable_without_serving_them_all
 test_a_message_far_behind_the_window_is_served_by_id
 test_an_archived_message_leaves_messages_and_can_be_restored
 test_a_held_message_leaves_the_messages_total_the_way_archiving_does
-test_park_makes_item_word_and_message_state_durable_across_a_restart
+test_park_makes_item_and_message_state_durable_across_a_restart
+test_a_deleted_message_and_item_are_gone_from_every_list
 test_park_refuses_an_unknown_target_or_state
 test_a_reply_never_archives_its_message
 test_an_unchanged_message_poll_is_answered_without_the_log

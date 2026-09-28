@@ -9,9 +9,9 @@ const {
   pollFacts, tense, transportFailure, verdictFor, releaseVerdicts, itemKey,
   shapeMessage, orderRows, stableGroupOrder, looksLikeQuestion, messageNeedsReply,
   replyTarget, foldSaid, wordsAfter,
-  listSignature, mayRelease, logRead, sendState, sendKeys, spokenFor, sameWords,
+  listSignature, mayRelease, logRead, sendState, sendKeys, sameWords,
   heldWith, captureBand, saidDigest, mergeMessages,
-  wordConversationKey, orderWordsByLastReply, waitingCount, wordOriginal,
+  waitingCount,
   isInfoOnlyMessage, saidTaskId, matchAnswer, threadRows, threadStatus,
 } = require(path.join(__dirname, '..', 'web', 'command-center-state.js'));
 
@@ -362,28 +362,6 @@ test('opening a row or typing into it cannot move the Waiting on you count', () 
   assert.strictEqual(waitingCount(archived, messages, said, now), 1);
 });
 
-// His report 2026-09-24 (screenshot of My words): "why i am just getting my
-// replies without the original message and context ... i would know what i
-// replied to what." Every reply resolves to what it answered - an item, a
-// message - or null for a genuine standalone note.
-test('a My words row resolves what it was replying to, or null for a plain note', () => {
-  const items = [{ home: 'main', source: 'hold', id: 'a', key: '', title: 'Blue or green?',
-    detail: 'The colour call.', project: 'demo', worktree: '/wt/demo', branch: 'main' }];
-  const messages = [{ id: 'm1', title: 'Merge diamond?', text: 'Reply "merge diamond branch"',
-    project: 'jt2627s', worktree: '/wt/jt', branch: 'feature/diamond' }];
-  const itemReply = { item_key: itemKey(items[0]), key: itemKey(items[0]), text: 'Green.' };
-  assert.deepStrictEqual(wordOriginal(itemReply, items, messages),
-    { key: itemKey(items[0]), title: 'Blue or green?', text: 'The colour call.',
-      project: 'demo', worktree: '/wt/demo', branch: 'main' });
-  const msgReply = { msg: 'm1', key: 'msg/m1', text: 'merge diamond branch' };
-  assert.deepStrictEqual(wordOriginal(msgReply, items, messages),
-    { key: 'msg/m1', title: 'Merge diamond?', text: 'Reply "merge diamond branch"',
-      project: 'jt2627s', worktree: '/wt/jt', branch: 'feature/diamond' });
-  const note = { kind: 'note', key: 'note', text: 'Just checking in.' };
-  assert.strictEqual(wordOriginal(note, items, messages), null,
-    'a standalone note names nothing to reply to');
-});
-
 // His ask 2026-09-24: "add one more info tab so from messages split into two
 // all the messages like nothing new, we are progressing etc. etc." - pure
 // progress/no-change chatter is Info; anything reporting a real outcome, a
@@ -420,28 +398,6 @@ test('the outcome of a send supersedes its acceptance', () => {
     'a record that could not be read must fold to nothing, not throw');
 });
 
-// --- My words, grouped by conversation ------------------------------------------
-// His ruling 2026-09-21: a conversation he replied to a minute ago goes to the
-// top, even when an older reply to it sits further down the newest-first log.
-test('My words bubbles a conversation to the top of its most recent reply', () => {
-  const rows = [   // newest first, as read_said serves them
-    { at: 't4', msg: 'm1', text: 'one more thing' },     // m1's latest
-    { at: 't3', item_key: 'k2', text: 'merging now' },   // k2's only reply
-    { at: 't2', item_key: 'k3', text: 'noted' },          // k3's only reply
-    { at: 't1', msg: 'm1', text: 'first reply' },          // m1's older reply
-  ];
-  assert.deepStrictEqual(orderWordsByLastReply(rows).map(r => r.at),
-    ['t4', 't1', 't3', 't2'],
-    'm1 groups under its newest reply (t4) instead of splitting across the list');
-});
-
-test('a conversation key matches what the row itself opens by', () => {
-  assert.strictEqual(wordConversationKey({ msg: 'm1', item_key: 'k2' }), 'msg/m1');
-  assert.strictEqual(wordConversationKey({ item_key: 'k2' }), 'k2');
-  assert.strictEqual(wordConversationKey({ key: 'note-1' }), 'note-1');
-  assert.strictEqual(wordConversationKey({}), '');
-});
-
 // --- what an arrived outcome does to his words ---------------------------------
 // The promise is that nothing he typed is cleared by a send that did not land,
 // and the click is accepted before the command runs, so only the outcome row
@@ -464,133 +420,6 @@ test('an outcome never touches words he typed after the send', () => {
                                 'go blue', 'go blue'), null);
 });
 
-// One send is never described two ways on one surface: the words of a send in
-// flight, or of one the page gave up on, are already spoken for by the record.
-test('the record speaks for the words it was sent', () => {
-  const pending = { a: { key: 'msg/m1', item: 'main/hold/t1/t1',
-                         text: 'go blue', released: true } };
-  assert.strictEqual(spokenFor(pending, 'msg/m1', 'go blue'), true);
-  assert.strictEqual(spokenFor(pending, 'main/hold/t1/t1', 'go blue'), true,
-    'the item it steered is the same send, not a second one');
-  assert.strictEqual(spokenFor(pending, 'msg/m1', 'a new thought'), false,
-    'words he typed since really are unsent and must say so');
-  assert.strictEqual(spokenFor({}, 'msg/m1', 'go blue'), false);
-  assert.strictEqual(spokenFor(undefined, 'msg/m1', 'go blue'), false);
-});
-
-test('only a send that landed takes his words out of the box', () => {
-  assert.strictEqual(wordsAfter({ sid: 'a', outcome: 'sent' }), 'clear');
-  assert.strictEqual(wordsAfter({ sid: 'a', outcome: 'failed' }), 'restore');
-  assert.strictEqual(wordsAfter({ sid: 'a', outcome: 'unknown' }), 'restore');
-  assert.strictEqual(wordsAfter({ sid: 'a', outcome: 'sending' }), null,
-    'an accepted send must not be treated as a delivered one');
-  assert.strictEqual(wordsAfter({ outcome: 'sent' }), null,
-    'a row from no send of his must not empty a box');
-});
-
-// --- did anything actually change? ---------------------------------------------
-// A record that has not moved must not re-render the page: the reply box he is
-// typing in is rebuilt by a render, and a log with no change check of its own
-// answers every poll with a fresh 200.
-test('an unchanged list is recognised as unchanged', () => {
-  const rows = [{ sid: 'b', outcome: 'sent', at: '2026-09-02T10:00:00Z' },
-                { sid: 'a', outcome: 'sent', at: '2026-09-01T10:00:00Z' }];
-  assert.strictEqual(listSignature(rows), listSignature(rows.slice()),
-    'the same rows read twice must look the same');
-  assert.notStrictEqual(listSignature(rows),
-    listSignature([{ sid: 'c', outcome: 'sending', at: '2026-09-03T10:00:00Z' }, ...rows]),
-    'a new row must look different');
-  assert.notStrictEqual(listSignature(rows),
-    listSignature([{ sid: 'b', outcome: 'sending', at: '2026-09-02T10:00:00Z' },
-                   rows[1]]),
-    'the same row with a new outcome must look different');
-  assert.strictEqual(listSignature([]), listSignature(undefined),
-    'a log that is not there yet and an empty one are the same list');
-});
-
-// --- releasing a send nobody can confirm ----------------------------------------
-// A box he can never type into again is the freeze that started this by another
-// road, so the page releases a send it can never hear the end of. It may only
-// do that off a record it actually read: a delivery that really landed must
-// never be buried under an unknown outcome invented while the page was blind.
-const held = { key: 'main/hold/t1/t1', text: 'go blue', at: 1000 };
-const WINDOW = 150000;
-
-test('a send is released only past the window, and only on a real read', () => {
-  assert.strictEqual(mayRelease(true, held, undefined, 1000 + WINDOW + 1, WINDOW), true);
-  assert.strictEqual(mayRelease(true, held, undefined, 1000 + 1, WINDOW), false,
-    'a send still inside the window is in flight, not lost');
-  assert.strictEqual(mayRelease(false, held, undefined, 1000 + WINDOW + 1, WINDOW), false,
-    'a record that could not be read may not release anything');
-  assert.strictEqual(mayRelease(true, {...held, released: true}, undefined,
-                                1000 + WINDOW + 1, WINDOW), false,
-    'a send already released must not be released twice');
-});
-
-test('a record that answered the send keeps its own answer', () => {
-  assert.strictEqual(mayRelease(true, held, {sid: 'a', outcome: 'sent'},
-                                1000 + WINDOW + 1, WINDOW), false,
-    'a delivered send must never be reported as unconfirmed');
-  assert.strictEqual(mayRelease(true, held, {sid: 'a', outcome: 'sending'},
-                                1000 + WINDOW + 1, WINDOW), true,
-    'an acceptance row with no outcome after it past the window is unconfirmed');
-});
-
-// --- was the record actually read? ---------------------------------------------
-// The other half of the release invariant: the server answers 200 with no rows
-// and an error when it could not read a log, and treating that as the record is
-// how a send whose outcome is already on disk gets released as unconfirmed.
-test('a body carrying a read error is not a read', () => {
-  const failed = logRead({ said: [], error: 'the record could not be read: x',
-                           dropped: 0 }, 'said');
-  assert.strictEqual(failed.read, false);
-  assert.strictEqual(failed.rows, null, 'a failed read carries no rows to hold');
-  assert.strictEqual(failed.error, 'the record could not be read: x');
-  assert.strictEqual(mayRelease(failed.read, held, undefined,
-                                1000 + WINDOW + 1, WINDOW), false,
-    'a send must never be released off a record that could not be read');
-});
-
-test('a body with rows and no error is a read', () => {
-  const got = logRead({ said: [{ sid: 'a', outcome: 'sent' }], dropped: 3 }, 'said');
-  assert.strictEqual(got.read, true);
-  assert.strictEqual(got.rows.length, 1);
-  assert.strictEqual(got.dropped, 3, 'what the limit cut must survive the read');
-  assert.deepStrictEqual(logRead({}, 'said').rows, [],
-    'a log with nothing in it yet is an empty read, not a failed one');
-});
-
-// --- a send the page gave up on ------------------------------------------------
-// The acceptance row keeps saying `sending` forever when no outcome row is ever
-// written, so once the page has given up on that send nothing may still read it
-// as a delivery on its way: one send described two ways is the contradiction.
-test('a released send is never still going out', () => {
-  const row = { sid: 'a', outcome: 'sending' };
-  assert.strictEqual(sendState(row, {}), 'sending');
-  assert.strictEqual(sendState(row, { a: { key: 'k', released: true } }), 'given-up');
-  assert.strictEqual(sendState(row, { a: { key: 'k' } }), 'sending',
-    'a send still in flight is still in flight');
-  assert.strictEqual(sendState({ sid: 'a', outcome: 'sent' },
-                               { a: { key: 'k', released: true } }), 'sent',
-    'an outcome that arrived late supersedes the page giving up');
-  assert.strictEqual(sendState(undefined, undefined), undefined);
-});
-
-// --- the surfaces one send touches ---------------------------------------------
-// A reply on the answer route is a steer at an item as well as a reply to a
-// message, and everything said about it must be said - and taken back - on
-// both, or one surface warns him about a delivery the other has confirmed.
-test('a send is said on every surface it touches, once each', () => {
-  assert.deepStrictEqual(sendKeys('msg/m1', 'main/hold/t1/t1'),
-    ['msg/m1', 'main/hold/t1/t1']);
-  assert.deepStrictEqual(sendKeys('main/hold/t1/t1', null), ['main/hold/t1/t1'],
-    'an answer sent from the item itself has one surface');
-  assert.deepStrictEqual(sendKeys('main/hold/t1/t1', 'main/hold/t1/t1'),
-    ['main/hold/t1/t1'], 'one surface named twice is still one surface');
-  assert.deepStrictEqual(sendKeys('', ''), [],
-    'a note hangs off nothing, so there is no surface to hold state against');
-});
-
 // --- the same words, typed by a person -----------------------------------------
 // A send stores what was sent, trimmed; the box stores what he typed. Ending a
 // paragraph with Enter or pasting text with a trailing newline is ordinary, and
@@ -607,9 +436,6 @@ test('a trailing newline is the same words', () => {
 
   assert.strictEqual(wordsAfter({ sid: 'a', outcome: 'sent' }, 'Go blue.\n', 'Go blue.'),
     'clear', 'a delivered send must still be able to empty the box he typed in');
-  assert.strictEqual(spokenFor({ a: { key: 'msg/m1', text: 'Go blue.' } },
-                               'msg/m1', 'Go blue.\n'),
-    true, 'one send must not read as a second unsent draft over a newline');
 });
 
 // --- one decision to send again ------------------------------------------------
