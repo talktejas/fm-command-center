@@ -1745,7 +1745,7 @@ function renderMessagePane(m){
       </div>
     </div>
     <div class="reply-foot">
-      <button class="defer ${archiveRecvClass(latestReplyTo(m))}" id="archive" ${state.archiving === m.id ? 'disabled' : ''}>${
+      <button class="defer ${archiveRecvClass(latestReplyTo(m))}" data-archive-msg="${esc(m.id)}" ${state.archiving === m.id ? 'disabled' : ''}>${
         m.archived ? 'Restore to Messages' : state.archiving === m.id ? 'Archiving…' : 'Archive'}</button>
       ${isMsgHeld(m)
         ? `<button class="defer" data-unhold-msg="${esc(m.id)}">Back to list</button>`
@@ -1945,7 +1945,9 @@ function render(){
 function advanceTo(orderedKeys, removedKey){
   const i = orderedKeys.indexOf(removedKey);
   const rest = orderedKeys.filter(k => k !== removedKey);
-  if (!rest.length){ state.open = null; render(); return; }
+  // i < 0: the row was open from a different list than the one walked (e.g. a
+  // message held from Waiting on you) - close the pane rather than open rest[-1].
+  if (!rest.length || i < 0){ state.open = null; render(); return; }
   open(rest[Math.min(i, rest.length - 1)]);
 }
 
@@ -2729,10 +2731,6 @@ document.addEventListener('click', async e => {
   }
   if (e.target.id === 'send'){ await sendAnswer(); return; }
   if (e.target.id === 'sendreply'){ await sendReply(); return; }
-  if (e.target.id === 'archive'){
-    await archiveMessageById(openedMessage() && openedMessage().id, true);
-    return;
-  }
   if (e.target.id === 'defer'){ state.open = null; render(); return; }
   if (e.target.id === 'sendanyway'){
     // heldWith comes from bin/command-center-state.js: one deliberate decision

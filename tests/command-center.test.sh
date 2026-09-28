@@ -1268,6 +1268,34 @@ test_clicking_a_linked_url_never_also_triggers_a_delegated_row_action() {
   pass "clicking a linked URL never also triggers a delegated row action"
 }
 
+# His report: "icons for archive and hold on side menu are not working". The
+# gutter never acts on its own - gutterArchive/gutterHold click whichever
+# data-archive-*/data-hold-* button the open pane rendered - and a message
+# pane's Archive carried only id="archive", so the gutter's selector found
+# nothing on every message (Messages, Info, Archived, a Waiting-on-you
+# message). Pins that every Archive/Hold attribute a pane renders is one the
+# gutter's own selector names, with a message's Archive among them.
+test_the_gutter_finds_every_pane_archive_and_hold_button() {
+  local home port body gutter attr
+  home="$TMP_ROOT/gutter"
+  seed_home "$home"
+  start_server "$home" || fail "the server did not start"
+  port=$SERVER_PORT
+  body=$(curl -s -m 30 "http://127.0.0.1:$port/")
+  stop_server
+
+  gutter=$(printf '%s\n' "$body" | sed -n '/^function gutterArchive(){/,/^function renderList(){/p')
+  [ -n "$gutter" ] || fail "the page has no gutterArchive/gutterHold at all"
+  assert_contains "$body" 'data-archive-msg="${esc(m.id)}"' \
+    "a message pane's Archive button carries no data-archive-msg, so the gutter's Archive cannot find it"
+  for attr in $(grep -oE 'data-(archive|hold|unhold)-(item|msg|word)="\$\{' <<<"$body" \
+      | sed 's/="\${//' | sort -u); do
+    assert_contains "$gutter" "#main [$attr]" \
+      "a pane renders a $attr button the gutter's own selector never looks for"
+  done
+  pass "the gutter finds every pane's Archive and Hold button"
+}
+
 # The page's decision rules live in web/command-center-state.js because they are
 # what got the rules wrong twice; these execute that file itself.
 test_the_pages_decision_rules_hold() {
@@ -3339,6 +3367,7 @@ test_the_pages_decision_rules_hold
 test_the_server_serves_the_pages_decision_rules
 test_a_url_becomes_a_real_link_on_every_surface_that_shows_free_text
 test_clicking_a_linked_url_never_also_triggers_a_delegated_row_action
+test_the_gutter_finds_every_pane_archive_and_hold_button
 test_a_message_names_the_project_the_worktree_and_the_branch
 test_a_taskless_message_is_matched_to_the_one_task_it_names
 test_a_message_naming_two_tasks_is_left_blank_rather_than_guessed
