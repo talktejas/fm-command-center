@@ -2596,6 +2596,131 @@ test_a_deleted_message_and_item_are_gone_from_every_list() {
   pass "a deleted message and item are gone from every list, across a restart"
 }
 
+# His report 2026-09-28: "I had 45 items waiting on you... they just
+# disappeared." The scan lists only decisions still OPEN in firstmate's
+# records, so firstmate closing a hold or writing `resolved` under a worker's
+# decision used to delete the row from Waiting on you in front of him. Only his
+# own Archive or Hold may take one off: an item the scan drops is served on as
+# `closed`, across a restart, until he parks it.
+waiting_item() {  # <port> <item key> <jq expression over the item>
+  curl -s -m 60 "http://127.0.0.1:$1/api/items" \
+    | jq -r --arg k "$2" "[.items[] | select((.home+\"/\"+.source+\"/\"+.id+\"/\"+(.key // \"\")) == \$k)][0] | $3"
+}
+
+test_an_item_firstmate_closes_stays_waiting_until_he_parks_it() {
+  local home port
+  home="$TMP_ROOT/ledger"
+  seed_home "$home"
+  printf 'needs-decision [key=k-ask]: [2026-09-28T05:00:00Z] REST or RPC?\n' \
+    > "$home/state/t-ask.status"
+  start_server "$home" || fail "the server did not start"
+  port=$SERVER_PORT
+  assert_equals false "$(waiting_item "$port" main/hold/cc-live/cc-live '.closed // false')" \
+    "an open hold was served as closed"
+  assert_equals false "$(waiting_item "$port" main/status/t-ask/k-ask '.closed // false')" \
+    "an open status decision was served as closed"
+
+  # Firstmate answers the worker's decision itself, and a different hold, on
+  # its own side - neither touched by the captain.
+  printf 'resolved [key=k-ask]: firstmate: REST\n' >> "$home/state/t-ask.status"
+  sed -i 's/^- \[ \] cc-live /- [x] cc-live /' "$home/data/backlog.md"
+  wait_for "firstmate closing a hold was never picked up by the scan" \
+    bash -c "curl -s -m 60 'http://127.0.0.1:$port/api/items' | jq -e '.items[] | select(.id == \"cc-live\" and .closed == true)'"
+  assert_equals true "$(waiting_item "$port" main/status/t-ask/k-ask '.closed')" \
+    "a decision firstmate resolved itself left Waiting on you"
+  assert_contains "$(waiting_item "$port" main/hold/cc-live/cc-live '.detail')" 'Body first paragraph.' \
+    "a closed hold lost the text he needs to come back to"
+  assert_equals closed "$(waiting_item "$port" main/hold/cc-live/cc-live '.listen')" \
+    "a closed hold still claimed a live listener"
+  assert_equals false "$(waiting_item "$port" main/hold/cc-deferred/cc-deferred '.closed // false')" \
+    "firstmate closing one item disturbed another still open"
+
+  stop_server
+  start_server "$home" || fail "the server did not restart"
+  port=$SERVER_PORT
+  assert_equals true "$(waiting_item "$port" main/hold/cc-live/cc-live '.closed')" \
+    "a closed item did not survive a restart of the service"
+  # Still answerable: his words reach firstmate like any other answer.
+  assert_contains "$(post "$port" /api/answer '{"home":"main","id":"cc-live","source":"hold","key":"cc-live","text":"Green, still."}')" \
+    '"ok":true' "an answer to an item firstmate closed was refused"
+
+  # Only his own Archive takes it off - it is then archived, not gone.
+  post "$port" /api/park '{"target":"item","key":"main/hold/cc-live/cc-live","state":"archived"}' >/dev/null
+  assert_equals true "$(waiting_item "$port" main/hold/cc-live/cc-live '.archived')" \
+    "his Archive did not take a closed item off Waiting on you"
+  assert_equals true "$(waiting_item "$port" main/status/t-ask/k-ask '.closed')" \
+    "archiving one closed item took another with it"
+
+  # Reopened by firstmate, it is live again rather than closed.
+  sed -i 's/^- \[x\] cc-live /- [ ] cc-live /' "$home/data/backlog.md"
+  wait_for "a reopened hold was still served as closed" \
+    bash -c "curl -s -m 60 'http://127.0.0.1:$port/api/items' | jq -e '.items[] | select(.id == \"cc-live\" and (.closed // false) == false)'"
+  stop_server
+  pass "an item firstmate closes stays in Waiting on you, across a restart, until he parks it"
+}
+
+# The message half of Waiting on you is built in the page from the messages it
+# holds, and a poll only ships the newest window: a question behind it used to
+# be silently absent from Waiting on you, and more than a window arriving
+# between two polls made the page drop everything older it held. The page's
+# own loadMessages is run here, as served, against the real server.
+test_an_old_question_is_still_waiting_after_many_newer_messages() {
+  local home port body out
+  home="$TMP_ROOT/oldq"
+  seed_home "$home"
+  newer() {  # <from> <to> - append progress chatter to the log
+    python3 - "$home/data/captain-messages.jsonl" "$1" "$2" <<'PYEOF'
+import json, sys
+with open(sys.argv[1], "a", encoding="utf-8") as fh:
+    for i in range(int(sys.argv[2]), int(sys.argv[3])):
+        fh.write(json.dumps({"id": "n%03d" % i, "at": "2026-09-28T01:00:00Z",
+                             "title": "progress %d" % i, "text": "still running %d" % i}) + "\n")
+PYEOF
+  }
+  printf '%s\n' '{"id":"q-old","at":"2026-09-28T00:00:00Z","title":"Merge the diamond stack?","text":"Merge the diamond stack?"}' \
+    > "$home/data/captain-messages.jsonl"
+  newer 0 250
+  start_server "$home" || fail "the server did not start"
+  port=$SERVER_PORT
+  body=$(curl -s -m 30 "http://127.0.0.1:$port/")
+  printf '%s\n' "$body" | awk '/^async function fetchOlder\(/,/^}/' > "$TMP_ROOT/loadmsgs.js"
+  printf '%s\n' "$body" | awk '/^async function loadMessages\(/,/^}/' >> "$TMP_ROOT/loadmsgs.js"
+  assert_contains "$(cat "$TMP_ROOT/loadmsgs.js")" "function loadMessages(" \
+    "the served page carries no loadMessages to run"
+  # Two polls: the first on a log whose question is already behind the window,
+  # the second after 250 more arrive between polls - more than a whole window.
+  out=$(node -e '
+    const vm = require("vm"), fs = require("fs"), cp = require("child_process");
+    const [stateFile, code, base, log] = process.argv.slice(1);
+    Object.assign(globalThis, require(stateFile));
+    globalThis.state = {messages: [], archivedMessages: [], archiveOverride: {},
+                        more: false, total: 0, archivedTotal: 0, tab: "waiting"};
+    globalThis.applyArchiveOverride = () => {};
+    const f = fetch; globalThis.fetch = (u, o) => f(base + u, o);
+    vm.runInThisContext(fs.readFileSync(code, "utf8"));
+    const waiting = () => waitingMessageRows(state.messages, []).some(m => m.id === "q-old");
+    (async () => {
+      await loadMessages();
+      const first = waiting();
+      const lines = [];
+      for (let i = 250; i < 500; i++) lines.push(JSON.stringify({id: "n" + i,
+        at: "2026-09-28T02:00:00Z", title: "progress " + i, text: "still running " + i}));
+      fs.appendFileSync(log, lines.join("\n") + "\n");
+      await loadMessages();
+      process.stdout.write(JSON.stringify({first, second: waiting(), more: state.more}));
+    })();
+  ' "$ROOT/web/command-center-state.js" "$TMP_ROOT/loadmsgs.js" "http://127.0.0.1:$port" \
+    "$home/data/captain-messages.jsonl") || fail "the page's own loadMessages could not be run"
+  stop_server
+  assert_contains "$out" '"first":true' \
+    "a question behind the newest window was missing from Waiting on you"
+  assert_contains "$out" '"second":true' \
+    "250 newer messages arriving between two polls pushed an untouched question out of Waiting on you"
+  assert_contains "$out" '"more":false' \
+    "the page stopped walking the log with unarchived messages still unread"
+  pass "an untouched question stays waiting however many newer messages arrive"
+}
+
 test_park_refuses_an_unknown_target_or_state() {
   local home port body
   home="$TMP_ROOT/park-bad"
@@ -3547,6 +3672,8 @@ test_a_held_message_leaves_the_messages_total_the_way_archiving_does
 test_park_makes_item_and_message_state_durable_across_a_restart
 test_a_deleted_message_and_item_are_gone_from_every_list
 test_park_refuses_an_unknown_target_or_state
+test_an_item_firstmate_closes_stays_waiting_until_he_parks_it
+test_an_old_question_is_still_waiting_after_many_newer_messages
 test_a_reply_never_archives_its_message
 test_an_unchanged_message_poll_is_answered_without_the_log
 test_archive_click_stays_fast_under_a_concurrent_messages_poll
