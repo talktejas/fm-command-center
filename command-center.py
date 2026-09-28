@@ -463,22 +463,25 @@ def message_context_cache_path(home):
 
 
 def parked_log(home):
-    """Where Archive and Hold live for a Waiting-on-you item or a My words
-    conversation - browser localStorage was fragile (gone on a refresh in a
-    private window, invisible from another browser), so this is the
+    """Where Archive, Hold and Delete live for a Waiting-on-you item -
+    browser localStorage was fragile (gone on a refresh in a private window, invisible from another browser), so this is the
     command center's own durable record, the same promise said.jsonl already
     makes for what he typed. A message's own Archive stays on the log it
     already had (captain-messages.jsonl, record_archive) since that already
     works and is shared with Messages/Archived; only a message's Hold - which
-    never had a server record at all - lands here too, target "message".
+    never had a server record at all - and its Delete land here too,
+    target "message".
     """
     return os.path.join(home, "data", "command-center", "parked.jsonl")
 
 
 def record_parked(home, target, key, state):
-    """Append one parking amendment. `state` is "archived", "held" or "none"
-    (back to its ordinary list) - the latest amendment for a (target, key)
-    pair wins, read back by read_parked.
+    """Append one parking amendment. `state` is "archived", "held",
+    "deleted" (gone from every list for good - his junk, never shown again)
+    or "none" (back to its ordinary list) - the latest amendment for a
+    (target, key) pair wins, read back by read_parked. Like the rest of this
+    log, "deleted" only records what he removed from his view: nothing
+    firstmate wrote is ever edited or removed.
     """
     entry = {"kind": "park", "target": target, "of": key,
              "state": state, "at": utc_now()}
@@ -493,7 +496,8 @@ def record_parked(home, target, key, state):
 
 
 def read_parked_rows(home):
-    """{(target, key): amendment} for every row still parked - a row
+    """{(target, key): amendment} for every row still parked ("archived",
+    "held" or "deleted") - a row
     whose latest amendment is "none" is left out entirely, the same as one
     never parked at all. Newest first, so the first amendment seen per pair
     is the one that stands; its `at` is when it was archived or held.
@@ -506,13 +510,13 @@ def read_parked_rows(home):
         if pair in seen or not pair[1]:
             continue
         seen.add(pair)
-        if row.get("state") in ("archived", "held"):
+        if row.get("state") in ("archived", "held", "deleted"):
             parked[pair] = row
     return parked
 
 
 def read_parked(home):
-    """{(target, key): "archived"|"held"} - read_parked_rows' states alone."""
+    """{(target, key): "archived"|"held"|"deleted"} - read_parked_rows' states alone."""
     return {pair: row["state"] for pair, row in read_parked_rows(home).items()}
 
 
@@ -797,9 +801,6 @@ def read_said(records, limit=LOG_LIMIT):
         elif row.get("outcome") == "sending" and sid not in in_flight:
             row = dict(row, outcome="unknown", detail=RESTART_DETAIL)
         merged.append(row)
-    parked = read_parked_rows(home)
-    merged = [dict(r, **parked_fields(parked, ("word", word_conversation_key(r))))
-              for r in merged]
     merged = [_repair_unknown_outcome(records, r) for r in merged]
     merged = [dict(r, received=bool(r.get("note_id")) and note_received(
                   resolve_send_home(records, r.get("home")), r.get("note_id")))
@@ -820,17 +821,6 @@ def _repair_unknown_outcome(records, row):
     if not note_id:
         return row
     return dict(row, outcome="sent", note_id=note_id)
-
-
-def word_conversation_key(row):
-    """The same grouping key My words itself uses (wordConversationKey in
-    web/command-center-state.js): a message it replied to, or the item/note
-    key otherwise. Archive and Hold are per conversation, not per send, so
-    every row in one conversation shares one parked state.
-    """
-    if row.get("msg"):
-        return "msg/" + row["msg"]
-    return row.get("item_key") or row.get("key") or ""
 
 
 # --- message context enrichment ----------------------------------------------
@@ -1431,7 +1421,7 @@ def message_totals(home):
     except OSError:
         pass
     held = read_parked(home)
-    ids = [i for i in ids if held.get(("message", i)) != "held"]
+    ids = [i for i in ids if held.get(("message", i)) not in ("held", "deleted")]
     archived = sum(1 for i in ids if states.get(i))
     return len(ids) - archived, archived
 
@@ -1544,6 +1534,8 @@ def read_messages(home, limit=MESSAGE_WINDOW, before=None, query=None, archived=
                     continue
                 amendment = archive_state.get(row["id"]) or {}
                 if (amendment.get("kind") == "archive") != archived:
+                    continue
+                if held.get(("message", row["id"])) == "deleted":
                     continue
                 if archived:
                     # Every archived row first; sorted and windowed below.
@@ -1723,7 +1715,7 @@ class Handler(BaseHTTPRequestHandler):
     def _json(self, code, obj):
         self._send(code, dump(obj))
 
-    def _log_response(self, name, path, read, extra_path=None, extra_fingerprint=None):
+    def _log_response(self, name, path, read, extra_fingerprint=None):
         """Serve one log under a change check, but never cache a FAILED read.
 
         A read error carries no rows, and its (mtime, size) is the same one a
@@ -1736,11 +1728,6 @@ class Handler(BaseHTTPRequestHandler):
         differently from one a restart orphaned - so a tag issued before a
         restart must not answer 304 for a log that now reads differently.
 
-        `extra_path`: a second log this response's rows also depend on (said
-        rows carry Archive/Hold folded in from parked.jsonl) - its own stat
-        is folded into the tag too, so a park action busts a poll that would
-        otherwise answer 304 over the now-stale flag.
-
         `extra_fingerprint`: a callable for a fact this response depends on
         that lives outside any log this process writes (said rows also carry
         `received`, folded in from firstmate's own state/inbox/handled/ - see
@@ -1749,7 +1736,7 @@ class Handler(BaseHTTPRequestHandler):
         etag = log_etag(path)
         if etag:
             etag = hashlib.sha256(
-                (RUN + etag + (log_etag(extra_path) or "none" if extra_path else "")
+                (RUN + etag
                  + (extra_fingerprint() if extra_fingerprint else "")
                  ).encode()).hexdigest()[:32]
         if etag and self.headers.get("If-None-Match") == etag:
@@ -1950,7 +1937,10 @@ class Handler(BaseHTTPRequestHandler):
             view = json.loads(body)
             view["error"] = self.records.error
             parked = read_parked_rows(self.records.home)
-            for it in view.get("items", []):
+            # A deleted item is gone from the view outright, not flagged.
+            view["items"] = [it for it in view.get("items", [])
+                             if (parked.get(("item", item_key(it))) or {}).get("state") != "deleted"]
+            for it in view["items"]:
                 it.update(parked_fields(parked, ("item", item_key(it))))
             self._send(200, dump(view), etag=combined_etag)
             return
@@ -2016,7 +2006,6 @@ class Handler(BaseHTTPRequestHandler):
 
         if path == "/api/said":
             self._log_response("said", said_log(self.records.home), read_said,
-                               extra_path=parked_log(self.records.home),
                                extra_fingerprint=self._said_fingerprint)
             return
 
@@ -2070,19 +2059,21 @@ class Handler(BaseHTTPRequestHandler):
             self._json(200, {"ok": True, "archived": archived})
             return
         if path == "/api/park":
-            # Archive and Hold for a Waiting-on-you item or a My words
-            # conversation, and Hold for a message (its Archive stays on
+            # Archive, Hold and Delete for a Waiting-on-you item, and Hold
+            # and Delete for a message (its Archive stays on
             # /api/archive above): one durable record instead of browser
             # storage, so it survives a refresh and reads the same from any
             # browser. No confirmation and no undo route beyond sending the
             # opposite state - the same one-click shape /api/archive already
-            # has.
+            # has. Delete is the one exception to "no confirmation": the page
+            # asks for a second click before it sends "deleted" here, since
+            # he has no route back to a deleted row.
             target = payload.get("target")
             key = payload.get("key")
             state = payload.get("state")
-            if target not in ("item", "word", "message") \
+            if target not in ("item", "message") \
                     or not isinstance(key, str) or not key or len(key) > 400 \
-                    or state not in ("archived", "held", "none"):
+                    or state not in ("archived", "held", "deleted", "none"):
                 self._json(400, {"ok": False, "error": "unknown park request"})
                 return
             error = record_parked(self.records.home, target, key, state)

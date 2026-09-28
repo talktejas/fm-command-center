@@ -152,46 +152,6 @@ function stableGroupOrder(prevOrder, keys, infoOf) {
   return known.concat(fresh);
 }
 
-// --- My words, grouped by conversation -------------------------------------------
-// His ruling 2026-09-21: "sort things according to my last reply" - My words
-// groups by conversation (the same key its row already opens by: a message it
-// replied to, or the item/note key otherwise) and orders those groups by their
-// most recent reply, newest first.
-function wordConversationKey(r) {
-  return r.msg ? 'msg/' + r.msg : (r.item_key || r.key || '');
-}
-
-// What a My words row was actually replying to, so it never has to be opened
-// just to learn that (his report 2026-09-24: "why i am just getting my
-// replies without the original message and context ... i would know what i
-// replied to what"). null only for a genuine standalone note - nothing else
-// named it, so there is truly nothing to show.
-function wordOriginal(r, items, messages) {
-  const item = (items || []).find(it => itemKey(it) === (r.item_key || r.key));
-  if (item) return { key: itemKey(item), title: item.title, text: item.detail,
-    project: item.project, worktree: item.worktree, branch: item.branch };
-  const msgId = r.msg || (String(r.key || '').startsWith('msg/') ? r.key.slice(4) : null);
-  const msg = (messages || []).find(m => m.id === msgId || 'msg/' + m.id === r.key);
-  if (msg) return { key: 'msg/' + msg.id, title: msg.title, text: msg.text,
-    project: msg.project, worktree: msg.worktree, branch: msg.branch };
-  return null;
-}
-
-// `rows` arrives newest first (read_said), so the first row seen for a
-// conversation key is already its most recent reply: collecting keys in that
-// order and grouping every row under its key's first appearance needs no
-// separate sort by time at all.
-function orderWordsByLastReply(rows) {
-  const order = [];
-  const byKey = new Map();
-  for (const r of rows || []) {
-    const key = wordConversationKey(r);
-    if (!byKey.has(key)) { byKey.set(key, []); order.push(key); }
-    byKey.get(key).push(r);
-  }
-  return order.flatMap(key => byKey.get(key));
-}
-
 // --- two rows, one send ---------------------------------------------------------
 // The click may not wait on a shell command, so the server writes his words to
 // the durable record the moment it accepts them and writes the same record
@@ -322,17 +282,6 @@ function wordsAfter(row, inBox, sent) {
 // a box holding only whitespace holds nothing he typed.
 function sameWords(a, b) {
   return String(a == null ? '' : a).trim() === String(b == null ? '' : b).trim();
-}
-
-// --- whose words are in the box? ------------------------------------------------
-// A draft the record already speaks for: the words of a send in flight, or of
-// one the page gave up on. Only while the box still holds THOSE words - once he
-// has typed something else, what is in the box really is unsent and says so.
-// Without this the same send reads two ways at once on My words: the record's
-// row saying it may already have arrived, and a draft row saying "not sent".
-function spokenFor(pending, key, text) {
-  return Object.values(pending || {})
-    .some(p => (p.key === key || p.item === key) && sameWords(p.text, text));
 }
 
 // --- where a reply is about to go -----------------------------------------------
@@ -655,9 +604,8 @@ if (typeof module === 'object' && module.exports)
                      stableGroupOrder, looksLikeQuestion, messageNeedsReply,
                      replyTarget, foldSaid, wordsAfter,
                      listSignature, mayRelease, logRead,
-                     sendState, sendKeys, spokenFor, sameWords,
+                     sendState, sendKeys, sameWords,
                      heldWith, captureBand, saidDigest, mergeMessages,
-                     wordConversationKey, orderWordsByLastReply, wordOriginal,
                      isItemDeferred, looksLikeClarifyingReply,
                      waitingItems, waitingMessageRows, waitingCount,
                      looksLikeInfoOnly, isInfoOnlyMessage,
