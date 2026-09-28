@@ -463,14 +463,14 @@ def message_context_cache_path(home):
 
 
 def parked_log(home):
-    """Where Archive and Hold live for a Waiting-on-you item or a My words
-    conversation - browser localStorage was fragile (gone on a refresh in a
-    private window, invisible from another browser), so this is the
+    """Where Archive, Hold and Delete live for a Waiting-on-you item -
+    browser localStorage was fragile (gone on a refresh in a private window, invisible from another browser), so this is the
     command center's own durable record, the same promise said.jsonl already
     makes for what he typed. A message's own Archive stays on the log it
     already had (captain-messages.jsonl, record_archive) since that already
     works and is shared with Messages/Archived; only a message's Hold - which
-    never had a server record at all - lands here too, target "message".
+    never had a server record at all - and its Delete land here too,
+    target "message".
     """
     return os.path.join(home, "data", "command-center", "parked.jsonl")
 
@@ -784,10 +784,6 @@ def read_said(records, limit=LOG_LIMIT):
         elif row.get("outcome") == "sending" and sid not in in_flight:
             row = dict(row, outcome="unknown", detail=RESTART_DETAIL)
         merged.append(row)
-    parked = read_parked(home)
-    merged = [dict(r, archived=parked.get(("word", word_conversation_key(r))) == "archived",
-                   held=parked.get(("word", word_conversation_key(r))) == "held")
-              for r in merged]
     merged = [_repair_unknown_outcome(records, r) for r in merged]
     merged = [dict(r, received=bool(r.get("note_id")) and note_received(
                   resolve_send_home(records, r.get("home")), r.get("note_id")))
@@ -808,17 +804,6 @@ def _repair_unknown_outcome(records, row):
     if not note_id:
         return row
     return dict(row, outcome="sent", note_id=note_id)
-
-
-def word_conversation_key(row):
-    """The same grouping key My words itself uses (wordConversationKey in
-    web/command-center-state.js): a message it replied to, or the item/note
-    key otherwise. Archive and Hold are per conversation, not per send, so
-    every row in one conversation shares one parked state.
-    """
-    if row.get("msg"):
-        return "msg/" + row["msg"]
-    return row.get("item_key") or row.get("key") or ""
 
 
 # --- message context enrichment ----------------------------------------------
@@ -1682,7 +1667,7 @@ class Handler(BaseHTTPRequestHandler):
     def _json(self, code, obj):
         self._send(code, dump(obj))
 
-    def _log_response(self, name, path, read, extra_path=None, extra_fingerprint=None):
+    def _log_response(self, name, path, read, extra_fingerprint=None):
         """Serve one log under a change check, but never cache a FAILED read.
 
         A read error carries no rows, and its (mtime, size) is the same one a
@@ -1695,11 +1680,6 @@ class Handler(BaseHTTPRequestHandler):
         differently from one a restart orphaned - so a tag issued before a
         restart must not answer 304 for a log that now reads differently.
 
-        `extra_path`: a second log this response's rows also depend on (said
-        rows carry Archive/Hold folded in from parked.jsonl) - its own stat
-        is folded into the tag too, so a park action busts a poll that would
-        otherwise answer 304 over the now-stale flag.
-
         `extra_fingerprint`: a callable for a fact this response depends on
         that lives outside any log this process writes (said rows also carry
         `received`, folded in from firstmate's own state/inbox/handled/ - see
@@ -1708,7 +1688,7 @@ class Handler(BaseHTTPRequestHandler):
         etag = log_etag(path)
         if etag:
             etag = hashlib.sha256(
-                (RUN + etag + (log_etag(extra_path) or "none" if extra_path else "")
+                (RUN + etag
                  + (extra_fingerprint() if extra_fingerprint else "")
                  ).encode()).hexdigest()[:32]
         if etag and self.headers.get("If-None-Match") == etag:
@@ -1980,7 +1960,6 @@ class Handler(BaseHTTPRequestHandler):
 
         if path == "/api/said":
             self._log_response("said", said_log(self.records.home), read_said,
-                               extra_path=parked_log(self.records.home),
                                extra_fingerprint=self._said_fingerprint)
             return
 
@@ -2034,23 +2013,21 @@ class Handler(BaseHTTPRequestHandler):
             self._json(200, {"ok": True, "archived": archived})
             return
         if path == "/api/park":
-            # Archive and Hold for a Waiting-on-you item or a My words
-            # conversation, and Hold for a message (its Archive stays on
+            # Archive, Hold and Delete for a Waiting-on-you item, and Hold
+            # and Delete for a message (its Archive stays on
             # /api/archive above): one durable record instead of browser
             # storage, so it survives a refresh and reads the same from any
             # browser. No confirmation and no undo route beyond sending the
             # opposite state - the same one-click shape /api/archive already
             # has. Delete is the one exception to "no confirmation": the page
             # asks for a second click before it sends "deleted" here, since
-            # he has no route back to a deleted row. My words is his own
-            # record (said.jsonl's promise), so it is never deleted.
+            # he has no route back to a deleted row.
             target = payload.get("target")
             key = payload.get("key")
             state = payload.get("state")
-            if target not in ("item", "word", "message") \
+            if target not in ("item", "message") \
                     or not isinstance(key, str) or not key or len(key) > 400 \
-                    or state not in ("archived", "held", "deleted", "none") \
-                    or (state == "deleted" and target == "word"):
+                    or state not in ("archived", "held", "deleted", "none"):
                 self._json(400, {"ok": False, "error": "unknown park request"})
                 return
             error = record_parked(self.records.home, target, key, state)
