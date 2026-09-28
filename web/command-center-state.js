@@ -112,14 +112,23 @@ function shapeMessage(m) {
 // the messages lead with the last thing firstmate said. Latest and Oldest are
 // explicit choices and override both. A row with no usable time is never given
 // a position among the dated ones: it follows them, and the page says why.
-function orderRows(rows, group, newestDefault) {
+// `timeOf` is the time a list orders by - a row's own time unless the list
+// says otherwise (Archived orders by archivedEpoch below).
+function orderRows(rows, group, newestDefault, timeOf = r => r.since_epoch) {
   if (group === 'none') return rows;   // as read: the flat list claims no order
-  const dated = rows.filter(r => r.since_epoch);
-  const undated = rows.filter(r => !r.since_epoch);
+  const dated = rows.filter(r => timeOf(r));
+  const undated = rows.filter(r => !timeOf(r));
   const newest = group === 'latest' || (newestDefault && group !== 'oldest');
-  dated.sort((a, b) => newest ? b.since_epoch - a.since_epoch
-                              : a.since_epoch - b.since_epoch);
+  dated.sort((a, b) => newest ? timeOf(b) - timeOf(a) : timeOf(a) - timeOf(b));
   return dated.concat(undated);
+}
+
+// When a row was archived (his ask 2026-09-28: the latest archived on top),
+// from the archived_at the server reads off the archive record itself. A row
+// archived before that record was read back falls back to its own time.
+function archivedEpoch(r) {
+  const at = Math.floor(Date.parse(r.archived_at || '') / 1000);
+  return at || r.since_epoch || null;
 }
 
 // --- stable group order across polls --------------------------------------------
@@ -616,7 +625,7 @@ function itemKey(it) {
 
 if (typeof module === 'object' && module.exports)
   module.exports = { pollFacts, tense, transportFailure, verdictFor,
-                     releaseVerdicts, itemKey, shapeMessage, orderRows,
+                     releaseVerdicts, itemKey, shapeMessage, orderRows, archivedEpoch,
                      stableGroupOrder, looksLikeQuestion, messageNeedsReply,
                      replyTarget, foldSaid, wordsAfter,
                      listSignature, mayRelease, logRead,

@@ -7,7 +7,7 @@ const assert = require('assert');
 const path = require('path');
 const {
   pollFacts, tense, transportFailure, verdictFor, releaseVerdicts, itemKey,
-  shapeMessage, orderRows, stableGroupOrder, looksLikeQuestion, messageNeedsReply,
+  shapeMessage, orderRows, archivedEpoch, stableGroupOrder, looksLikeQuestion, messageNeedsReply,
   replyTarget, foldSaid, wordsAfter,
   listSignature, mayRelease, logRead, sendState, sendKeys, spokenFor, sameWords,
   heldWith, captureBand, saidDigest, mergeMessages,
@@ -206,6 +206,20 @@ test('a row with no usable time is never given a position among the dated', () =
                 msg('m2', '2026-09-02T10:00:00Z')];
   assert.strictEqual(ids(orderRows(rows, 'project', true)), 'm2,m1,mx');
   assert.strictEqual(ids(orderRows(rows, 'oldest', true)), 'm1,m2,mx');
+});
+
+// His report 2026-09-28: Archived puts the latest ARCHIVED row on top, not the
+// latest sent - archived_at when there is one, the row's own time otherwise.
+test('Archived orders by when a row was archived, falling back to its own time', () => {
+  const rows = [
+    Object.assign(msg('m1', '2026-09-01T10:00:00Z'), { archived_at: '2026-09-10T00:00:00Z' }),
+    Object.assign(msg('m2', '2026-09-03T10:00:00Z'), { archived_at: '2026-09-05T00:00:00Z' }),
+    msg('m3', '2026-09-07T10:00:00Z'),
+  ];
+  assert.strictEqual(ids(orderRows(rows, 'project', true, archivedEpoch)), 'm1,m3,m2');
+  assert.strictEqual(ids(orderRows(rows, 'oldest', true, archivedEpoch)), 'm2,m3,m1');
+  assert.strictEqual(ids(orderRows(rows, 'project', true)), 'm3,m2,m1',
+    'any other list still orders by the row\'s own time');
 });
 
 // His report 2026-09-24: a Group by list re-sorted itself under him while he

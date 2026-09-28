@@ -640,8 +640,12 @@ const isMsgHeld = m => !!m.held;
 function park(target, key, state_){
   post('/api/park', {target, key, state: state_}).catch(() => { /* next poll reconciles */ });
 }
+// Stamped here too, so a row he just archived is on top of Archived before
+// the next poll brings back the server's own archived_at.
+const nowIso = () => new Date().toISOString();
 function setItemArchived(it, archived){
   it.archived = archived;
+  it.archived_at = archived ? nowIso() : null;
   park('item', itemKey(it), archived ? 'archived' : 'none');
 }
 function setItemHeld(it, held){
@@ -650,7 +654,8 @@ function setItemHeld(it, held){
 }
 function setWordArchived(r, archived){
   const key = wordConversationKey(r);
-  for (const x of state.said) if (wordConversationKey(x) === key) x.archived = archived;
+  for (const x of state.said) if (wordConversationKey(x) === key)
+    Object.assign(x, {archived, archived_at: archived ? nowIso() : null});
   park('word', key, archived ? 'archived' : 'none');
 }
 function setWordHeld(r, held){
@@ -821,6 +826,28 @@ function visible(){
 }
 const archivedItemsList = () => (state.view.items || []).filter(isItemArchived);
 const archivedWordsList = () => state.said.filter(isWordArchived);
+// Archived is one list of every kind of row he can archive, drawn by the very
+// row builders the other tabs use (his report 2026-09-28: "archiving changes
+// where an item lives, never how it looks") and ordered by when each was
+// archived, latest first. Tagged copies, like visible()'s: __msg/__word tell
+// rowsHtml's row function and groupOf which builder a row belongs to, and a
+// My words row borrows the project/worktree/branch of what it replied to so
+// it groups with it.
+function archivedRows(){
+  const q = state.q.trim().toLowerCase();
+  const msgs = visibleMessages().map(m => Object.assign({__msg:true}, m));
+  const items = archivedItemsList().filter(it => !q || haystack(it).includes(q));
+  const words = archivedWordsList()
+    .filter(r => !q || String(r.text || '').toLowerCase().includes(q))
+    .map(r => {
+      const o = wordOriginalOf(r) || {};
+      return Object.assign({__word:true}, r, {project:o.project, worktree:o.worktree,
+        branch:o.branch, since_epoch: Math.floor(Date.parse(r.at || '') / 1000) || null});
+    });
+  return orderRows(msgs.concat(items, words), state.group, true, archivedEpoch);
+}
+const archivedRowHtml = r => r.__word ? wordRow(r, 'archived')
+  : r.__msg ? messageRow(r, 'archived') : itemRow(r, 'archived');
 const heldItemsList = () => (state.view.items || []).filter(isItemHeld);
 const heldWordsList = () => state.said.filter(isWordHeld);
 const heldMessagesList = () => state.messages.concat(state.archivedMessages)
@@ -840,7 +867,7 @@ function groupOf(it, isMessage){
   // messages needing a reply - see visible() below) tags each message row
   // with __msg itself, since one list-wide isMessage flag cannot say which
   // row is which.
-  const msgish = isMessage || Boolean(it.__msg);
+  const msgish = isMessage || Boolean(it.__msg || it.__word);
   const p = projectOf(it);
   if (state.group === 'project') return { key:p, g1:p, g2:undefined };
   if (state.group === 'worktree')
@@ -1061,7 +1088,7 @@ function wordOutcome(r){
   }
 }
 
-// One row builder for My words, shared with its Archived-tab section, so the
+// One row builder for My words, shared with the Archived tab, so the
 // two cannot drift into two different renderings of the same conversation.
 // wordOriginal (bin/command-center-state.js) resolves what he was replying to
 // (his report 2026-09-24: "why i am just getting my replies without the
@@ -1069,10 +1096,11 @@ function wordOutcome(r){
 // null only for a genuine standalone note. A message far enough behind the
 // window that the pure lookup misses it is still found via findMessageById,
 // which also checks the currently opened message and any search results.
+const wordOriginalOf = r => wordOriginal(r, state.view.items, state.messages)
+  || (r.msg && findMessageById(r.msg) ? wordOriginal(r, [], [findMessageById(r.msg)]) : null);
 function wordRow(r, mode){
   const draft = r.kind === 'draft';
-  const original = wordOriginal(r, state.view.items, state.messages)
-    || (r.msg && findMessageById(r.msg) ? wordOriginal(r, [], [findMessageById(r.msg)]) : null);
+  const original = wordOriginalOf(r);
   const where = original ? esc(original.title)
     : r.kind === 'note' ? 'Note to firstmate — not about one item'
     : esc(r.title || r.item || '—');
@@ -1259,7 +1287,7 @@ function renderList(){
   renderHomes(); renderWatcher();
   if (state.tab === 'words'){ renderWords(); return; }
   if (state.tab === 'messages' || state.tab === 'info'){ renderMessages(); return; }
-  if (state.tab === 'archived'){ renderArchived(); return; }
+  if (state.tab === 'archived'){ renderMessages(true); return; }
   if (state.tab === 'hold'){ renderHold(); return; }
   if (state.tab === 'work'){ renderWork(); return; }
 
@@ -1268,21 +1296,6 @@ function renderList(){
     : !state.scanned ? 'The records have not been read yet.'
     : 'Nothing is waiting on you.<br>Firstmate is getting on with it.';
   paintList(rowsHtml(rows, it => it.__msg ? messageRow(it, 'list') : itemRow(it, 'list'), empty));
-}
-
-// The Archived tab is every kind of row he can archive, together: messages
-// (durable, server-side), items and My words conversations (kept in the
-// browser - see state.archivedItems/archivedWords above).
-function renderArchived(){
-  renderMessages(true);
-  const items = ordered(archivedItemsList());
-  const words = archivedWordsList();
-  let extra = '';
-  if (items.length) extra += `<div class="worksection"><h3>Waiting-on-you items
-    <span class="n">${items.length}</span></h3>${items.map(it => itemRow(it, 'archived')).join('')}</div>`;
-  if (words.length) extra += `<div class="worksection"><h3>My words
-    <span class="n">${words.length}</span></h3>${words.map(r => wordRow(r, 'archived')).join('')}</div>`;
-  if (extra) $('#list').insertAdjacentHTML('beforeend', extra);
 }
 
 // On hold is only ever his own parking - nothing here was ever sent to
@@ -1312,7 +1325,8 @@ function renderMessages(archived){
   const more = archived ? state.archivedMore : state.more;
   const total = archived ? state.archivedTotal : state.total;
   const found = archived ? state.archivedFound : state.found;
-  const rows = ordered(visibleMessages(), true);
+  // Archived also carries the items and My words he archived - see archivedRows.
+  const rows = archived ? archivedRows() : ordered(visibleMessages(), true);
   let note = state.msgError
     ? `<div class="archive-note" style="background:var(--warn-soft)"><b>What firstmate
        said to you could not be read.</b> ${esc(state.msgError)} This is not the whole
@@ -1348,7 +1362,8 @@ function renderMessages(archived){
     : (more ? `<button class="older" id="older">Showing
         ${held.length} of ${Math.max(total, held.length)} — load older messages</button>` : '');
   paintList(selectionBarHtml() + note
-    + rowsHtml(rows, m => messageRow(m, archived ? 'archived' : 'list'), empty, true, asked ? answered : '') + older);
+    + rowsHtml(rows, archived ? archivedRowHtml : m => messageRow(m, 'list'),
+               empty, !archived, asked ? answered : '') + older);
 }
 
 // --- multi-select on the Messages list ---------------------------------------
@@ -1590,8 +1605,11 @@ function messageRow(m, mode){
   // decision this message is waiting on (his report 2026-09-24), so a message
   // still tagged __msg (still listed in Waiting on you) despite a reply says
   // what it is actually waiting on now, rather than the plain "replied" flag.
+  // Archived tags its messages too (archivedRows), so the tab is checked as
+  // well: an archived message looks exactly as it did in Messages.
   const latest = latestReplyTo(m);
-  const clarifying = m.__msg && latest && looksLikeClarifyingReply(latest.text);
+  const clarifying = m.__msg && state.tab === 'waiting' && latest
+    && looksLikeClarifyingReply(latest.text);
   // The thread marker: only worth computing once he has actually replied, and
   // only shown when neither of the two more specific badges above already
   // says something about the same reply.
@@ -1987,6 +2005,7 @@ async function fetchMessage(id){
 
 function moveArchived(m, archived){
   m.archived = archived;
+  m.archived_at = archived ? nowIso() : null;
   state.archiveOverride[m.id] = archived;
   state.messages = state.messages.filter(x => x.id !== m.id);
   state.archivedMessages = state.archivedMessages.filter(x => x.id !== m.id);
