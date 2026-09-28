@@ -1288,7 +1288,7 @@ test_the_gutter_finds_every_pane_archive_and_hold_button() {
   [ -n "$gutter" ] || fail "the page has no gutterArchive/gutterHold at all"
   assert_contains "$body" 'data-archive-msg="${esc(m.id)}"' \
     "a message pane's Archive button carries no data-archive-msg, so the gutter's Archive cannot find it"
-  for attr in $(grep -oE 'data-(archive|hold|unhold)-(item|msg)="\$\{' <<<"$body" \
+  for attr in $(grep -oE 'data-(archive|hold|unhold)-(item|msg|note)="\$\{' <<<"$body" \
       | sed 's/="\${//' | sort -u); do
     assert_contains "$gutter" "#main [$attr]" \
       "a pane renders a $attr button the gutter's own selector never looks for"
@@ -2570,6 +2570,76 @@ test_a_held_message_leaves_the_messages_total_the_way_archiving_does() {
   pass "a held message leaves the Messages and Archived totals exactly as archiving does"
 }
 
+# His ruling 2026-09-28: "if u cant find project, worktree and branch that
+# doesn't mean u fucking dont have to show me the message". A record with no
+# project, one firstmate wrote out as "unknown" (what its recorder does now
+# instead of refusing), one with no text at all, and a junk line beside them:
+# every real message is served and counted, the unknown one read as missing so
+# enrichment still tries, and the junk line costs nothing.
+test_a_message_with_nothing_known_about_its_work_is_still_served() {
+  local home port body
+  home="$TMP_ROOT/unlabelled"
+  seed_home "$home"
+  {
+    printf '%s\n' '{"id":"old","at":"2026-09-20T10:00:00Z","title":"Written before","text":"No project field at all."}'
+    printf '%s\n' '{"id":"new","at":"2026-09-28T10:00:00Z","title":"Written after","text":"Work unknown.","project":"unknown","worktree":" ","branch":"(unknown)"}'
+    printf '%s\n' '{"id":"bare","at":"2026-09-28T11:00:00Z","title":"No text recorded"}'
+    printf '%s\n' '["not","a","record"]'
+  } > "$home/data/captain-messages.jsonl"
+  start_server "$home" || fail "the server did not start"
+  port=$SERVER_PORT
+  body=$(curl -s -m 30 "http://127.0.0.1:$port/api/messages")
+  stop_server
+  assert_equals "bare new old" "$(printf '%s' "$body" | jq -r '[.messages[].id] | join(" ")')" \
+    "a message with no project, an unknown one or no text was dropped"
+  assert_equals 3 "$(printf '%s' "$body" | jq -r .total)" \
+    "the Messages count left out a message with nothing known about its work"
+  assert_equals "null null null" "$(printf '%s' "$body" \
+    | jq -r '.messages[] | select(.id == "new") | "\(.project) \(.worktree) \(.branch)"')" \
+    "a field recorded as unknown was served as if it named something"
+  pass "a message with nothing known about its work is still served and counted"
+}
+
+# The same ruling, on the page: a row with no project is one explicit
+# "Not recorded" choice in the Project dropdown, always listed, and "All
+# projects" counts and shows every row. Runs the served projectOf, inProject
+# and renderProjectFilter in node over stubbed rows (no browser in this suite).
+test_the_project_filter_never_hides_a_row_with_no_project() {
+  local home port body
+  home="$TMP_ROOT/unlabelled-filter"
+  seed_home "$home"
+  start_server "$home" || fail "the server did not start"
+  port=$SERVER_PORT
+  body=$(curl -s -m 30 "http://127.0.0.1:$port/")
+  stop_server
+  { printf '%s\n' "$body" | sed -n '/^const NO_PROJECT = /,/^const projectOf = /p'
+    printf '%s\n' "$body" | sed -n '/^const inProject = /,/^}$/p'; } > "$TMP_ROOT/filter.js"
+  assert_contains "$(cat "$TMP_ROOT/filter.js")" "function renderProjectFilter(" \
+    "the served page carries no project filter code at all"
+  node -e '
+    const assert = require("assert");
+    const { knownValue } = require(process.argv[2]);
+    const rows = [{ project: "koin" }, { project: null }, { project: "unknown" }, {}];
+    const state = { project: "", tab: "messages" };
+    const sel = { dataset: {} };
+    const $ = () => sel, esc = s => String(s), listedNotes = () => [];
+    const visibleMessages = () => rows;
+    eval(require("fs").readFileSync(process.argv[1], "utf8").replace(/^const /gm, "var "));
+    assert.strictEqual(rows.filter(inProject).length, 4, "All projects left a row out");
+    renderProjectFilter();
+    assert.ok(sel.innerHTML.includes("All projects (4)"), "All projects did not count every row");
+    assert.ok(sel.innerHTML.includes(">Not recorded (3)<"), "rows with no project have no choice of their own: " + sel.innerHTML);
+    state.project = "Not recorded";
+    assert.strictEqual(rows.filter(inProject).length, 3, "Not recorded did not reach every unlabelled row");
+    rows.splice(1);
+    state.project = "";
+    renderProjectFilter();
+    assert.ok(sel.innerHTML.includes(">Not recorded (0)<"), "Not recorded is not always listed");
+  ' "$TMP_ROOT/filter.js" "$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/web/command-center-state.js" \
+    2>"$TMP_ROOT/filter.err" || fail "$(cat "$TMP_ROOT/filter.err")"
+  pass "the project filter never hides a row with no project"
+}
+
 # Browser localStorage was fragile - gone in a private window, invisible from
 # another browser - so Archive and Hold for a Waiting-on-you item, and Hold
 # for a message (its Archive already had a durable record) all go through
@@ -2724,6 +2794,16 @@ test_a_recorded_answer_threads_under_the_note_it_answers() {
   ' "$home")
   assert_equals "you:Is the nightly build fixed yet?|firstmate:Fixed.|answered" "$out" \
     "firstmate's recorded answer did not thread under the note it answers"
+  # His own note is archivable and holdable by his own hand, answered or not
+  # (his report 2026-09-28): the park record reads back on the note itself.
+  local st
+  for st in archived held none; do
+    assert_contains "$(post "$port" /api/park "$(jq -cn --arg k "$sid" --arg s "$st" '{target:"note",key:$k,state:$s}')")" \
+      '"ok":true' "a note could not be set $st through /api/park"
+    said=$(curl -s -m 30 "http://127.0.0.1:$port/api/said")
+    assert_equals "$([ "$st" = archived ] && echo true || echo false) $([ "$st" = held ] && echo true || echo false)" \
+      "$(jq -r '"\(.said[0].archived) \(.said[0].held)"' <<<"$said")" "a note set $st did not read back $st"
+  done
   etag1=$(curl -s -m 30 -D - -o /dev/null "http://127.0.0.1:$port/api/said" | grep -i '^etag')
   assert_contains "$(post "$port" /api/park "$(jq -cn --arg k "$sid" '{target:"note",key:$k,state:"deleted"}')")" \
     '"ok":true' "a note could not be deleted through /api/park"
@@ -2732,7 +2812,7 @@ test_a_recorded_answer_threads_under_the_note_it_answers() {
   stop_server
   assert_equals true "$(jq -r '.said[0].deleted' <<<"$said")" "a deleted note was not flagged deleted"
   [ "$etag1" != "$etag2" ] || fail "deleting a note left the said poll answering 304"
-  pass "a recorded answer threads under the note it answers, and a note can be deleted"
+  pass "a recorded answer threads under the note it answers, and a note can be archived, held and deleted"
 }
 
 # His report 2026-09-28: "I had 45 items waiting on you... they just
@@ -3952,6 +4032,8 @@ test_an_archived_message_leaves_messages_and_can_be_restored
 test_an_answer_to_an_archived_message_unarchives_it
 test_archived_messages_are_served_latest_archived_first
 test_a_held_message_leaves_the_messages_total_the_way_archiving_does
+test_a_message_with_nothing_known_about_its_work_is_still_served
+test_the_project_filter_never_hides_a_row_with_no_project
 test_park_makes_item_and_message_state_durable_across_a_restart
 test_a_deleted_message_and_item_are_gone_from_every_list
 test_a_recorded_answer_threads_under_the_note_it_answers

@@ -98,12 +98,30 @@ function releaseVerdicts(verdicts, view) {
 // A recorded message (bin/fm-captain-message.sh) is given the same time and
 // branch fields a scanned item has, so one grouping and one ordering serve both
 // lists rather than two that can drift apart.
+// A field the record says it does not know - empty, or written out as
+// "unknown" - is the same as one it never carried (known_value in
+// command-center.py): null, so every list shows it as "Not recorded" in one
+// place. No field is ever a reason to leave a row out (his ruling 2026-09-28:
+// "if u cant find... u should still show me the message").
+const UNKNOWN_VALUES = new Set(['', 'unknown', 'null', 'none', 'n/a', 'not recorded']);
+function knownValue(v) {
+  if (v == null) return null;
+  const t = String(v).trim();
+  return UNKNOWN_VALUES.has(t.replace(/^\(+|\)+$/g, '').trim().toLowerCase()) ? null : t;
+}
+
 function shapeMessage(m) {
   const at = Date.parse(m.at || '');
+  const project = knownValue(m.project), worktree = knownValue(m.worktree),
+        branch = knownValue(m.branch);
   return Object.assign({}, m, {
+    project, worktree, branch,
+    // A row with no title of its own still needs something to click.
+    title: knownValue(m.title) || String(m.text || '').trim().split('\n')[0].slice(0, 140)
+      || '(no title recorded)',
     since_epoch: isNaN(at) ? null : Math.floor(at / 1000),
     since_kind: isNaN(at) ? 'none' : 'created',
-    branch_state: m.branch ? 'branch' : 'not-started',
+    branch_state: branch ? 'branch' : 'not-started',
   });
 }
 
@@ -522,6 +540,34 @@ function threadRows(repliesOldestFirst, messages) {
   return out;
 }
 
+// A note answered in ordinary conversation names no note - only an answer
+// recorded with --answers does - so without this a note read "unanswered"
+// while its answer sat on the same board (his report 2026-09-28). A note is
+// about no task, so the moment is all there is to match on: the first thing
+// firstmate said after it, within NOTE_MOMENT_MINUTES and before his next send
+// of any kind, that is not a recorded answer to something else, not an empty
+// turn, and not about the task of another send of his still in that window.
+// The page marks the match as matched, never as recorded.
+const NOTE_MOMENT_MINUTES = 15;
+function noteMomentAnswer(note, messages, saidRows) {
+  const at = Date.parse((note || {}).at || '');
+  if (isNaN(at)) return null;
+  const sends = (saidRows || []).filter(r => r !== note && r.sid !== note.sid);
+  const next = sends.map(r => Date.parse(r.at || ''))
+    .filter(t => !isNaN(t) && t > at).reduce((a, b) => Math.min(a, b), Infinity);
+  const until = Math.min(at + NOTE_MOMENT_MINUTES * 60000, next);
+  const since = at - NOTE_MOMENT_MINUTES * 60000;
+  const otherTasks = new Set(sends.filter(r => {
+    const t = Date.parse(r.at || '');
+    return !isNaN(t) && t >= since && t < at;
+  }).map(r => saidTaskId(r, messages)).filter(Boolean));
+  return (messages || []).filter(m => {
+    const t = Date.parse(m.at || '');
+    return m && m.id && !isNaN(t) && t > at && t < until && !m.answers
+      && !/^\*\(no message/.test(String(m.title || '')) && !otherTasks.has(m.task);
+  }).sort((a, b) => Date.parse(a.at) - Date.parse(b.at))[0] || null;
+}
+
 // A note he sent from "Tell firstmate something" hangs off no message or item,
 // so it is a conversation of its own: listed in Messages, "awaiting firstmate"
 // until an answer is recorded against it. Only a note the server marked
@@ -727,7 +773,7 @@ function itemKey(it) {
 }
 
 if (typeof module === 'object' && module.exports)
-  module.exports = { pollFacts, tense, transportFailure, verdictFor,
+  module.exports = { knownValue, pollFacts, tense, transportFailure, verdictFor,
                      releaseVerdicts, itemKey, shapeMessage, orderRows, archivedEpoch,
                      stableGroupOrder, looksLikeQuestion, messageNeedsReply,
                      replyTarget, foldSaid, wordsAfter,
@@ -738,4 +784,5 @@ if (typeof module === 'object' && module.exports)
                      waitingItems, waitingMessageRows, waitingCount,
                      looksLikeInfoOnly, isInfoOnlyMessage,
                      saidTaskId, matchAnswer, threadRows, threadStatus,
-                     recordedAnswers, answeredSend, answerFor, foldAnswers, noteThreads };
+                     recordedAnswers, answeredSend, answerFor, foldAnswers, noteThreads,
+                     noteMomentAnswer, NOTE_MOMENT_MINUTES };
