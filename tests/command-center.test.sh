@@ -1165,6 +1165,67 @@ test_the_server_serves_the_pages_decision_rules() {
 # tab already shares), and a threaded firstmate answer - actually calls
 # linked() or para() on its text, not a bare esc(), by finding each call site
 # in the served bytes.
+# The tab order is his ruling (2026-10-05): Action first, then Info, Ignore,
+# PRs, Work, Archived, Hold. The stored keys behind them are unchanged.
+test_the_tabs_are_served_in_the_captains_order() {
+  local home port body order
+  home="$TMP_ROOT/tab-order"
+  seed_home "$home"
+  start_server "$home" || fail "the server did not start"
+  port=$SERVER_PORT
+  body=$(curl -s -m 30 "http://127.0.0.1:$port/")
+  order=$(printf '%s' "$body" | grep -o 'class="tab" role="tab" data-tab="[a-z]*"' \
+    | sed 's/.*data-tab="\([a-z]*\)"/\1/' | tr '\n' ' ')
+  stop_server
+  assert_equals "waiting messages info prs work archived hold " "$order" \
+    "the tabs are not served in the order he asked for"
+  pass "the tabs are served as Action, Info, Ignore, PRs, Work, Archived, Hold"
+}
+
+# His report 2026-10-05: a message with a Markdown table showed the raw pipes.
+# The proof is message m20261005T152443Z-25057 from the real log; its table is
+# copied here so the test does not depend on the live log.
+test_a_markdown_table_in_a_message_renders_as_a_table() {
+  local home port body out
+  home="$TMP_ROOT/md-table"
+  seed_home "$home"
+  start_server "$home" || fail "the server did not start"
+  port=$SERVER_PORT
+  body=$(curl -s -m 30 "http://127.0.0.1:$port/")
+  stop_server
+  printf '%s\n' "$body" \
+    | sed -n '/^const esc = s =>/,/^const state = {/p' | sed '$d' \
+    > "$TMP_ROOT/md-table-helpers.js"
+  printf '%s\n' 'module.exports = { para };' >> "$TMP_ROOT/md-table-helpers.js"
+  out=$(node -e '
+    const { para } = require(process.argv[1]);
+    const text = [
+      "Captain, here it is.",
+      "",
+      "| Tab | Rule | Messages that go there |",
+      "|---|---|---|",
+      "| **Action** | You have to do something | A pick I need from you |",
+      "| **Info** | Important, read once | Work finished and landed |",
+      "",
+      "Tie-breakers below.",
+    ].join("\n");
+    const html = para(text);
+    const hostile = para("| a | b |\n|---|---|\n| <script>x</script> | [t](javascript:1) |");
+    process.stdout.write(JSON.stringify({
+      table: html.indexOf("<div class=\"msg-table\"><table>") !== -1,
+      headers: (html.match(/<th>/g) || []).length,
+      rows: (html.match(/<tr>/g) || []).length,
+      bold: html.indexOf("<td><b>Action</b></td>") !== -1,
+      noPipes: html.indexOf("|---") === -1,
+      trailingProse: html.indexOf("<p>Tie-breakers below.</p>") !== -1,
+      escaped: hostile.indexOf("<script>") === -1 && hostile.indexOf("&lt;script&gt;") !== -1,
+    }));
+  ' "$TMP_ROOT/md-table-helpers.js") || fail "the served para() could not be run"
+  assert_equals '{"table":true,"headers":3,"rows":3,"bold":true,"noPipes":true,"trailingProse":true,"escaped":true}' "$out" \
+    "a Markdown table in a message did not render as a real table, or raw HTML got through"
+  pass "a Markdown table in a message renders as a table, with its text still escaped"
+}
+
 test_a_url_becomes_a_real_link_on_every_surface_that_shows_free_text() {
   local home port body helpers out
   home="$TMP_ROOT/linkify"
@@ -4206,6 +4267,8 @@ test_the_pages_decision_rules_hold
 test_jev_sorting_holds_with_the_network_stubbed
 test_the_server_serves_the_pages_decision_rules
 test_a_url_becomes_a_real_link_on_every_surface_that_shows_free_text
+test_the_tabs_are_served_in_the_captains_order
+test_a_markdown_table_in_a_message_renders_as_a_table
 test_a_document_is_served_and_a_file_address_to_it_becomes_its_link
 test_clicking_a_linked_url_never_also_triggers_a_delegated_row_action
 test_the_gutter_finds_every_pane_archive_and_hold_button

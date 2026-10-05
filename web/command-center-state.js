@@ -429,7 +429,7 @@ function messageNeedsReply(message, saidRows, items) {
 function inMessagesTab(message, saidRows, items, prs) {
   if (message.held) return false;
   if (!messageNeedsReply(message, saidRows, items)) return true;
-  return mergeAskOnly(message) && !(prs || []).some(pr => namesPr(message, pr));
+  return mergeAskOnly(message, prs) ? !prRowFor(message, prs) : false;
 }
 
 // --- pull requests: their own tab, never Input ------------------------------------
@@ -453,16 +453,29 @@ const MERGE_ASK = /\b(your|the captain's) merge\b|\bmerge (it|them|this|word|cal
 // pick, options or other ask beside the merge.
 // ponytail: wording heuristics over firstmate's own phrasing; if firstmate
 // ever records a merge ask as its own kind, read that field instead.
-function mergeAskOnly(message) {
+// Structural first (his report 2026-10-05, "why the fuck pr is coming under
+// input?"): a recorded question on a task whose pull request waits in the PRs
+// data (prs) is a merge ask when its words ask for a merge and nothing else -
+// no wording test on the merge itself, which missed "say merge 38". Only a
+// message with no such task falls back to the wording test.
+const MERGE_VERB = /\b(merge|land|approve)\b/i;
+function mergeAskOnly(message, prs) {
   const t = prText(message);
-  if (!PR_REF.test(t) || !MERGE_ASK.test(t)) return false;
   const low = t.toLowerCase();
   if (ASKS.some(p => low.includes(p)) || /\breply [a-d1-9]\b/.test(low)
       || /\b[a-d1-9],? or [a-d1-9]\b/.test(low)) return false;
-  return (t.match(/[^.!?\n]*\?/g) || []).every(q => /\bmerge/i.test(q));
+  const onlyMerge = (t.match(/[^.!?\n]*\?/g) || []).every(q => /\bmerge/i.test(q));
+  if (message && message.question && message.task
+      && (prs || []).some(pr => pr.id === message.task) && MERGE_VERB.test(t)) return onlyMerge;
+  return PR_REF.test(t) && MERGE_ASK.test(t) && onlyMerge;
+}
+// The waiting pull request row a merge ask belongs in, or null.
+function prRowFor(message, prs) {
+  return (prs || []).find(pr => (namesPr(message, pr) || (message && message.task === pr.id))
+    && mergeAskOnly(message, [pr])) || null;
 }
 function prAsks(pr, messages, saidRows, items) {
-  return (messages || []).filter(m => !m.held && namesPr(m, pr) && mergeAskOnly(m)
+  return (messages || []).filter(m => !m.held && prRowFor(m, [pr]) === pr
     && messageNeedsReply(m, saidRows, items));
 }
 
@@ -852,14 +865,14 @@ function waitingItems(items, nowSecs) {
   return (items || []).filter(it => onHisBoard(it) &&
     !isItemDeferred(it, nowSecs) && !it.archived && !it.held);
 }
-function waitingMessageRows(messages, saidRows, items) {
+function waitingMessageRows(messages, saidRows, items, prs) {
   return (messages || [])
-    .filter(m => !m.held && messageNeedsReply(m, saidRows, items) && !mergeAskOnly(m))
+    .filter(m => !m.held && messageNeedsReply(m, saidRows, items) && !mergeAskOnly(m, prs))
     .map(m => Object.assign({__msg: true}, m));
 }
-function waitingCount(items, messages, saidRows, nowSecs) {
+function waitingCount(items, messages, saidRows, nowSecs, prs) {
   return waitingItems(items, nowSecs).length
-    + waitingMessageRows(messages, saidRows, items).length;
+    + waitingMessageRows(messages, saidRows, items, prs).length;
 }
 
 // --- may the message list claim to be complete? ---------------------------------
@@ -871,7 +884,36 @@ function waitingCount(items, messages, saidRows, nowSecs) {
 // null when the list may speak for itself. The sweep's own record is the truth
 // of the last capture whoever ran it (the Stop hook runs it too); the server's
 // run_error matters only when that record is missing or stale.
-function captureBand(capture) {
+// ctx (captureContext in web/command-center.html): newestAt (ms) of the newest
+// message the page holds, nowMs, and workActive. A home whose conversation
+// record cannot be read captures nothing, so every message there is recorded
+// by hand: while those land recently that is the normal state, not a warning.
+// Only a silent stretch with work underway doubts the list.
+const HAND_RECENT_MS = 24 * 3600 * 1000;
+
+// The newest message's time in ms, or null when no row carries one.
+function newestMessageMs(rows) {
+  let newest = null;
+  for (const m of rows || []) {
+    const t = Date.parse(m && m.at);
+    if (Number.isFinite(t) && (newest === null || t > newest)) newest = t;
+  }
+  return newest;
+}
+
+function handRecent(ctx) {
+  return !!ctx && typeof ctx.newestAt === 'number' && typeof ctx.nowMs === 'number'
+    && ctx.nowMs - ctx.newestAt <= HAND_RECENT_MS;
+}
+
+// The muted line for the hand-recorded state (the page's footer, never the top).
+function handRecordedNote(capture, ctx) {
+  if (capture && capture.present !== false && capture.active === false && handRecent(ctx))
+    return 'Messages are being recorded by hand; automatic capture is off until firstmate is next started.';
+  return null;
+}
+
+function captureBand(capture, ctx) {
   if (!capture || capture.present === false)
     return 'Automatic capture of what firstmate says has not reported yet'
       + (capture && capture.run_error ? ' (' + capture.run_error + ')' : '')
@@ -879,9 +921,12 @@ function captureBand(capture) {
   if (capture.ok === false)
     return 'Automatic capture of what firstmate says is failing'
       + (capture.error ? ': ' + capture.error : '') + ' - this list may be incomplete.';
-  if (capture.active === false)
-    return 'No conversation record was found to capture from, so only messages '
-      + 'firstmate recorded by hand appear here - this list may be incomplete.';
+  if (capture.active === false) {
+    if (handRecent(ctx) || !(ctx && ctx.workActive)) return null;
+    return 'Firstmate has been working but nothing has been recorded here for a long while, '
+      + 'and no conversation record is being captured, so messages may be missing. '
+      + 'Start firstmate again from its own session so automatic capture can read it.';
+  }
   // Only a Stop hook's payload names the transcript a session actually writes.
   // Until one has, capture is reading a directory worked out from the home's
   // path, and a session started elsewhere writes where nothing is looking.
@@ -944,7 +989,7 @@ if (typeof module === 'object' && module.exports)
                      replyTarget, foldSaid, wordsAfter,
                      listSignature, mayRelease, logRead,
                      sendState, sendKeys, sameWords,
-                     heldWith, captureBand, saidDigest, mergeMessages,
+                     heldWith, captureBand, handRecordedNote, newestMessageMs, saidDigest, mergeMessages,
                      isItemDeferred, looksLikeClarifyingReply, inMessagesTab, onHisBoard,
                      waitingItems, waitingMessageRows, waitingCount,
                      namesPr, mergeAskOnly, prAsks, markRepeats,
