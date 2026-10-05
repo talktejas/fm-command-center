@@ -286,7 +286,8 @@ class Records:
         data["items"] = [closed_answer(ask_user_question(it, paths.get(it.get("home"))),
                                        paths.get(it.get("home")))
                          for it in remember_waiting(self.home, data.get("items", []))]
-        data["items"] = [hold_clock(fill_labels(it, it.get("id"), sources), sources)
+        data["items"] = [hold_clock(fill_labels(it, it.get("id"), sources), sources,
+                                    paths.get(it.get("home")) or self.home)
                          for it in data["items"]]
         with self.lock:
             self.etag = etag
@@ -765,6 +766,68 @@ def cached_waiting_prs(homes):
         return PRS_CACHE["rows"]
 
 
+# --- merge asks, remembered by message id ------------------------------------
+# A recorded question that asks for a merge and names its pull request is a
+# merge ask. Its task record is cleaned up once the pull request merges, so the
+# ask is remembered here by id (data/command-center/merge-asks.json) with its
+# pull request, and stays one: his report 2026-10-05, a merged pull request's
+# ask still sat under Action. The page reads the stamped merge_ask field
+# (mergeAskOnly, web/command-center-state.js). MERGE_ASK_RE and MERGE_ASK_PICKS
+# mirror MERGE_ASK and ASKS there.
+# ponytail: wording mirror of the page's rule; read the field if firstmate ever
+# records a merge ask as its own kind.
+MERGE_ASK_RE = re.compile(
+    r"\b(your|the captain's) merge\b|\bmerge (it|them|this|word|call)\b|\bmerge\b[^.!?\n]*\?"
+    r"|\bready (to|for) (be )?merged?\b|\bsay [\"']?merge\b|\bready (for|to) (your|the captain's) (word|merge)\b",
+    re.IGNORECASE)
+MERGE_ASK_PICKS = ("pick a name", "pick one", "choose", "say go")
+PICK_REF_RE = re.compile(r"\breply [a-d1-9]\b|\b[a-d1-9],? or [a-d1-9]\b")
+PR_URL_RE = re.compile(r"https?://\S+/pull/\d+")
+
+
+def merge_ask_url(row):
+    """The pull request url a recorded question asks him to merge, or None. It
+    must ask for a merge and nothing else: every question in it is about the
+    merge and it offers no pick."""
+    text = str(row.get("text") or row.get("title") or "")
+    low = text.lower()
+    if not row.get("question") or any(p in low for p in MERGE_ASK_PICKS) or PICK_REF_RE.search(low):
+        return None
+    if not MERGE_ASK_RE.search(text):
+        return None
+    if not all(re.search(r"merge", q, re.IGNORECASE) for q in re.findall(r"[^.!?\n]*\?", text)):
+        return None
+    m = PR_URL_RE.search(text)
+    return m.group(0) if m else None
+
+
+def merge_asks_path(home):
+    return os.path.join(home, "data", "command-center", "merge-asks.json")
+
+
+def apply_merge_asks(home, rows):
+    """Stamp each row that is a merge ask with merge_ask = its pull request url,
+    remembering new ones by id so it holds once the task record is gone."""
+    try:
+        with open(merge_asks_path(home), encoding="utf-8") as fh:
+            cache = json.load(fh)
+    except (OSError, json.JSONDecodeError):
+        cache = {}
+    if not isinstance(cache, dict):
+        cache = {}
+    changed = False
+    for row in rows:
+        if isinstance(row, dict) and row.get("id") and row["id"] not in cache:
+            url = merge_ask_url(row)
+            if url:
+                cache[row["id"]] = url
+                changed = True
+    if changed:
+        save_json_cache(merge_asks_path(home), cache)
+    return [dict(r, merge_ask=cache[r["id"]]) if isinstance(r, dict) and r.get("id") in cache else r
+            for r in rows]
+
+
 # --- Work: every piece of work asked for; Agents: who is doing it -------------
 # His ask 2026-10-05: "split it into two. work & agents" and "put all the
 # separate projects separately". Read only, from each local home's own backlog
@@ -1014,17 +1077,66 @@ def fill_labels(row, task_id, sources):
     return out
 
 
-def hold_clock(item, sources):
-    """A captain hold's age from the instant it was set, when the backlog
-    records one. The scan only has the bullet's "(since YYYY-MM-DD)" - a DATE,
-    read as that day's 00:00 UTC - so a hold filed seconds ago read "17h" at
-    17:00 UTC (his report 2026-10-05, just past his own midnight at UTC+7).
-    Without a recorded instant the row stays `created`, which the page words
-    by the day, never by the hour."""
+def hold_clock(item, sources, home_path):
+    """A captain hold's age from a real instant. The scan only has the bullet's
+    "(since YYYY-MM-DD)" - a DATE - so it is replaced by the first of: the
+    backlog's "Captain hold set:" instant (bin/fm-captain-hold.sh writes it on
+    every hold), the newest question message recorded for that task, the first
+    status line's own stamp, the backlog file's modification time. A bare date
+    is never used as an instant, so no hold is ever aged as midnight."""
     if item.get("source") != "hold" or item.get("since_kind") != "created":
         return item
-    at = _epoch(sources[0].get(item.get("id"), {}).get("hold_set") or "")
-    return dict(item, since_epoch=int(at), since_kind="hold-set") if at else item
+    task_id = item.get("id")
+    at = _epoch(sources[0].get(task_id, {}).get("hold_set") or "")
+    if at:
+        return dict(item, since_epoch=int(at), since_kind="hold-set")
+    found = latest_question_at(home_path, task_id) or first_status_stamp(home_path, task_id)
+    if found:
+        return dict(item, since_epoch=int(found[0]), since_kind=found[1])
+    mtime = backlog_mtime(home_path)
+    if mtime:
+        return dict(item, since_epoch=int(mtime), since_kind="backlog-mtime")
+    return dict(item, since_epoch=None, since_kind="none")
+
+
+def latest_question_at(home_path, task_id):
+    """(epoch, "question") for the newest recorded question on this task, or None."""
+    latest = None
+    try:
+        with open(message_log(home_path), encoding="utf-8", errors="replace") as fh:
+            for line in fh:
+                try:
+                    row = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if isinstance(row, dict) and row.get("task") == task_id and row.get("question"):
+                    at = _epoch(row.get("at") or "")
+                    if at and (latest is None or at > latest):
+                        latest = at
+    except OSError:
+        return None
+    return (latest, "question") if latest else None
+
+
+def first_status_stamp(home_path, task_id):
+    """(epoch, "status-timestamp") from the task's first timestamped status line, or None."""
+    try:
+        with open(os.path.join(home_path, "state", task_id + ".status"), encoding="utf-8") as fh:
+            for line in fh:
+                m = STATUS_STAMP_RE.search(line)
+                if m and _epoch(m.group(1)):
+                    return (_epoch(m.group(1)), "status-timestamp")
+    except OSError:
+        pass
+    return None
+
+
+def backlog_mtime(home_path):
+    try:
+        return os.path.getmtime(os.path.join(
+            home_path, _tasks_toml_backlog_rel(FIRSTMATE_ROOT) or "data/backlog.md"))
+    except OSError:
+        return None
 
 
 def label_messages(rows, records):
@@ -3202,7 +3314,8 @@ class Handler(BaseHTTPRequestHandler):
                 if row is not None:
                     row = dict(row, archived=archived_messages(self.records.home).get(msg_id, False),
                                held=read_parked(self.records.home).get(("message", msg_id)) == "held")
-                    row = self.sorter.apply(label_messages(enrich_messages([row], self.records), self.records))[0]
+                    row = apply_merge_asks(self.records.home, self.sorter.apply(
+                        label_messages(enrich_messages([row], self.records), self.records)))[0]
                 current, archived_total = message_totals(self.records.home)
                 self._send(200, dump({"messages": [row] if row else [],
                                       "more": False, "error": error,
@@ -3225,7 +3338,8 @@ class Handler(BaseHTTPRequestHandler):
                                               before=before, query=query,
                                               archived=archived)
             if not error:
-                rows = self.sorter.apply(label_messages(enrich_messages(rows, self.records), self.records))
+                rows = apply_merge_asks(self.records.home, self.sorter.apply(
+                    label_messages(enrich_messages(rows, self.records), self.records)))
             # A read that FAILED is not the state of the log: serving it under a
             # change check would answer 304 to every later poll and leave the
             # page saying this record could not be read long after it could.

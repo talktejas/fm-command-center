@@ -120,7 +120,7 @@ function shapeMessage(m) {
     title: knownValue(m.title) || String(m.text || '').trim().split('\n')[0].slice(0, 140)
       || '(no title recorded)',
     since_epoch: isNaN(at) ? null : Math.floor(at / 1000),
-    since_kind: isNaN(at) ? 'none' : 'created',
+    since_kind: isNaN(at) ? 'none' : 'recorded',
     branch_state: branch ? 'branch' : 'not-started',
   });
 }
@@ -448,7 +448,7 @@ function namesPr(message, pr) {
   return at >= 0 && !/\d/.test(prText(message).charAt(at + pr.url.length));
 }
 const PR_REF = /\/pull\/\d+|\bPRs? ?#?\d+|\bpull requests?\b/i;
-const MERGE_ASK = /\b(your|the captain's) merge\b|\bmerge (it|them|this|word|call)\b|\bmerge\b[^.!?\n]*\?|\bready (to|for) (be )?merged?\b/i;
+const MERGE_ASK = /\b(your|the captain's) merge\b|\bmerge (it|them|this|word|call)\b|\bmerge\b[^.!?\n]*\?|\bready (to|for) (be )?merged?\b|\bsay ["']?merge\b|\bready (for|to) (your|the captain's) (word|merge)\b/i;
 // "Nothing but": every question in it is about merging, and it offers no
 // pick, options or other ask beside the merge.
 // ponytail: wording heuristics over firstmate's own phrasing; if firstmate
@@ -460,6 +460,9 @@ const MERGE_ASK = /\b(your|the captain's) merge\b|\bmerge (it|them|this|word|cal
 // message with no such task falls back to the wording test.
 const MERGE_VERB = /\b(merge|land|approve)\b/i;
 function mergeAskOnly(message, prs) {
+  // Remembered by the server once it was read as a merge ask (apply_merge_asks),
+  // so it stays one after its task record - and its pull request - is gone.
+  if (message && message.merge_ask) return true;
   const t = prText(message);
   const low = t.toLowerCase();
   if (ASKS.some(p => low.includes(p)) || /\breply [a-d1-9]\b/.test(low)
@@ -471,7 +474,9 @@ function mergeAskOnly(message, prs) {
 }
 // The waiting pull request row a merge ask belongs in, or null.
 function prRowFor(message, prs) {
-  return (prs || []).find(pr => (namesPr(message, pr) || (message && message.task === pr.id))
+  return (prs || []).find(pr => (message && message.merge_ask
+    ? message.merge_ask === pr.url
+    : namesPr(message, pr) || (message && message.task === pr.id))
     && mergeAskOnly(message, [pr])) || null;
 }
 function prAsks(pr, messages, saidRows, items) {
@@ -994,15 +999,13 @@ function itemKey(it) {
 const saidOnItem = (said, key) => (said || []).filter(r => !r.msg && r.item_key === key);
 
 // --- how long ago, from absolute instants only ----------------------------------
-// Every age is now minus a recorded instant. The one record that is NOT an
-// instant is a hold's "(since YYYY-MM-DD)" - a date, served as that day's
-// 00:00 UTC with since_kind 'created' - and it is worded by the day, never by
-// the hour: his report 2026-10-05, a hold filed seconds earlier read "17h" at
-// 17:05 UTC (00:05 on his own UTC+7 clock), the hours since UTC midnight.
-function ageWords(sinceEpoch, nowSecs, sinceKind) {
+// Every age is now minus a recorded instant, worded as minutes, hours or days.
+// A hold's "(since YYYY-MM-DD)" is a date and never an instant: the server
+// replaces it with a real one (hold_clock, command-center.py), so no card is
+// ever aged from midnight or worded as "today".
+function ageWords(sinceEpoch, nowSecs) {
   if (!sinceEpoch) return 'no recorded time';
   const s = Math.max(0, nowSecs - sinceEpoch);
-  if (sinceKind === 'created' && s < 172800) return s < 86400 ? 'today' : '1d';
   if (s < 3600) return Math.max(1, Math.round(s / 60)) + 'm';
   if (s < 172800) return Math.round(s / 3600) + 'h';
   const d = Math.round(s / 86400);
