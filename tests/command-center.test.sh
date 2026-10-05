@@ -1165,6 +1165,23 @@ test_the_server_serves_the_pages_decision_rules() {
 # tab already shares), and a threaded firstmate answer - actually calls
 # linked() or para() on its text, not a bare esc(), by finding each call site
 # in the served bytes.
+# The tab order is his ruling (2026-10-05): Input first, then Info, Ignore,
+# PRs, Work, Archived, Hold. The stored keys behind them are unchanged.
+test_the_tabs_are_served_in_the_captains_order() {
+  local home port body order
+  home="$TMP_ROOT/tab-order"
+  seed_home "$home"
+  start_server "$home" || fail "the server did not start"
+  port=$SERVER_PORT
+  body=$(curl -s -m 30 "http://127.0.0.1:$port/")
+  order=$(printf '%s' "$body" | grep -o 'class="tab" role="tab" data-tab="[a-z]*"' \
+    | sed 's/.*data-tab="\([a-z]*\)"/\1/' | tr '\n' ' ')
+  stop_server
+  assert_equals "waiting messages info prs work archived hold " "$order" \
+    "the tabs are not served in the order he asked for"
+  pass "the tabs are served as Input, Info, Ignore, PRs, Work, Archived, Hold"
+}
+
 test_a_url_becomes_a_real_link_on_every_surface_that_shows_free_text() {
   local home port body helpers out
   home="$TMP_ROOT/linkify"
@@ -4206,6 +4223,7 @@ test_the_pages_decision_rules_hold
 test_jev_sorting_holds_with_the_network_stubbed
 test_the_server_serves_the_pages_decision_rules
 test_a_url_becomes_a_real_link_on_every_surface_that_shows_free_text
+test_the_tabs_are_served_in_the_captains_order
 test_a_document_is_served_and_a_file_address_to_it_becomes_its_link
 test_clicking_a_linked_url_never_also_triggers_a_delegated_row_action
 test_the_gutter_finds_every_pane_archive_and_hold_button

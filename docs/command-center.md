@@ -35,13 +35,13 @@ Re-run `--install-unit` after changing it, then `systemctl --user daemon-reload 
 
 ## What it shows
 
-The tabs, as renamed on 2026-10-05 (your words: "current message tab becomes info - it contains important info. then ignore which takes all the repetative things and nothing new... wiating for you becomes action... onlhold just name hold", then "merge will go in seperate PR tab and not in action tab. action is only where u need my input"):
+The tabs, in the order you asked for on 2026-10-05 (Input first, then Info, Ignore, PRs, Work, Archived, Hold), as renamed that day (your words: "current message tab becomes info - it contains important info. then ignore which takes all the repetative things and nothing new... wiating for you becomes action... onlhold just name hold", then "merge will go in seperate PR tab and not in action tab. action is only where u need my input"):
 
 | Tab | Was | Holds | Stored key |
 |---|---|---|---|
+| **Input** | Waiting on you | Only what needs your answer or decision | `waiting` |
 | **Info** | Messages | Important information from firstmate | `messages` |
 | **Ignore** | Info | Repeats and nothing-new notes, kept in view so you can check nothing important was ignored | `info` |
-| **Input** | Waiting on you | Only what needs your answer or decision | `waiting` |
 | **PRs** | new | Pull requests waiting for your merge word | `prs` |
 | **Work** | Work | Everything active: being worked on, or dormant waiting for you | `work` |
 | **Archived** | Archived | unchanged | `archived` |
@@ -76,7 +76,7 @@ It runs from two places, and they know different things. The Claude Stop hook (`
 Until some session has named its transcript, the only thing capture has is that derived directory, which is a guess - a session started from somewhere else writes where nothing is looking - so the Info list says so rather than showing a green band over a list it cannot vouch for.
 The messages already in the log are the dedupe record, so the two runners can never record the same message twice.
 Its first ever run backfills the log from today's local midnight, so the list starts complete for the day it arrives rather than from the moment it landed.
-When capture cannot be shown healthy - it failed, never ran, has not run recently, or found no conversation record to read (a firstmate running on a harness whose conversation record it cannot read) - the Info list says it may be incomplete rather than quietly showing a short one.
+When capture cannot be shown healthy - it failed, never ran, or has not run recently - the Info list says it may be incomplete rather than quietly showing a short one. A firstmate whose conversation record cannot be read captures nothing, so every message it sends is recorded by hand: while hand-recorded messages keep landing (the newest is less than a day old) there is no banner, only one muted line at the foot of the list saying so. The banner returns only for a silent stretch of a day or more with work underway (`captureBand` and `handRecordedNote`, `web/command-center-state.js`).
 On such a harness, and for anything said outside the recorded conversation, `bin/fm-captain-message.sh` remains the by-hand recorder (`AGENTS.md` section 9).
 It is also how a question is routed on a Claude primary: firstmate records a question tied to a decision by hand, and a captured message whose words a by-hand row already carries is not added beside it - each by-hand row stands for one captured message and no more, so saying the same thing again later is still recorded.
 

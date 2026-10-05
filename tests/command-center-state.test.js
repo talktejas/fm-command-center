@@ -10,7 +10,7 @@ const {
   shapeMessage, orderRows, archivedEpoch, stableGroupOrder, looksLikeQuestion, messageNeedsReply,
   replyTarget, foldSaid, wordsAfter,
   listSignature, mayRelease, logRead, sendState, sendKeys, sameWords,
-  heldWith, captureBand, saidDigest, mergeMessages,
+  heldWith, captureBand, handRecordedNote, newestMessageMs, saidDigest, mergeMessages,
   waitingCount, waitingMessageRows, inMessagesTab, onHisBoard,
   isInfoOnlyMessage, sortedTab, saidTaskId, matchAnswer, threadRows, threadStatus,
   recordedAnswers, answeredSend, answerFor, foldAnswers, noteThreads, noteMomentAnswer,
@@ -673,10 +673,37 @@ test('a capture no session has confirmed the location of doubts the list', () =>
     'a transcript a session named is exactly what makes the list vouchable');
 });
 
-test('a home with no conversation record says only hand-recorded messages appear', () => {
-  const band = captureBand({ present: true, ok: true, active: false });
-  assert.match(band, /by hand/);
-  assert.match(band, /may be incomplete/);
+// A home whose conversation record cannot be read captures nothing, so its
+// messages are all hand-recorded. That is the normal state while they land:
+// no banner at the top, only a quiet line at the foot of the page.
+test('hand-recorded messages landing recently are not a banner', () => {
+  const now = Date.parse('2026-10-05T18:00:00Z');
+  const ctx = { newestAt: Date.parse('2026-10-05T16:46:15Z'), nowMs: now, workActive: true };
+  const capture = { present: true, ok: true, active: false, named: 1 };
+  assert.strictEqual(captureBand(capture, ctx), null);
+  assert.strictEqual(captureBand(capture, { ...ctx, workActive: false }), null);
+  assert.match(handRecordedNote(capture, ctx), /recorded by hand.*automatic capture is off/);
+  assert.strictEqual(handRecordedNote(
+    { present: true, ok: true, active: true, named: 1 }, ctx), null);
+});
+
+// The one case that still doubts the list: nothing recorded for a long stretch
+// while work is underway, and no capture reading the conversation.
+test('a silent stretch with work underway still says what to do', () => {
+  const now = Date.parse('2026-10-05T18:00:00Z');
+  const old = { newestAt: Date.parse('2026-10-03T00:00:00Z'), nowMs: now, workActive: true };
+  const band = captureBand({ present: true, ok: true, active: false }, old);
+  assert.match(band, /may be missing/);
+  assert.match(band, /Start firstmate again/);
+  assert.strictEqual(captureBand({ present: true, ok: true, active: false },
+    { ...old, workActive: false }), null);
+  assert.strictEqual(handRecordedNote({ present: true, ok: true, active: false }, old), null);
+});
+
+test('the newest message time is read from the rows that carry one', () => {
+  assert.strictEqual(newestMessageMs([]), null);
+  assert.strictEqual(newestMessageMs([{ at: 'bad' }, { at: '2026-10-05T16:46:15Z' },
+    { at: '2026-10-05T10:00:00Z' }]), Date.parse('2026-10-05T16:46:15Z'));
 });
 
 // The sweep's record is the truth of the last capture whoever ran it; a fresh

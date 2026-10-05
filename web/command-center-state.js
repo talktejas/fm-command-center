@@ -871,7 +871,36 @@ function waitingCount(items, messages, saidRows, nowSecs) {
 // null when the list may speak for itself. The sweep's own record is the truth
 // of the last capture whoever ran it (the Stop hook runs it too); the server's
 // run_error matters only when that record is missing or stale.
-function captureBand(capture) {
+// ctx (captureContext in web/command-center.html): newestAt (ms) of the newest
+// message the page holds, nowMs, and workActive. A home whose conversation
+// record cannot be read captures nothing, so every message there is recorded
+// by hand: while those land recently that is the normal state, not a warning.
+// Only a silent stretch with work underway doubts the list.
+const HAND_RECENT_MS = 24 * 3600 * 1000;
+
+// The newest message's time in ms, or null when no row carries one.
+function newestMessageMs(rows) {
+  let newest = null;
+  for (const m of rows || []) {
+    const t = Date.parse(m && m.at);
+    if (Number.isFinite(t) && (newest === null || t > newest)) newest = t;
+  }
+  return newest;
+}
+
+function handRecent(ctx) {
+  return !!ctx && typeof ctx.newestAt === 'number' && typeof ctx.nowMs === 'number'
+    && ctx.nowMs - ctx.newestAt <= HAND_RECENT_MS;
+}
+
+// The muted line for the hand-recorded state (the page's footer, never the top).
+function handRecordedNote(capture, ctx) {
+  if (capture && capture.present !== false && capture.active === false && handRecent(ctx))
+    return 'Messages are being recorded by hand; automatic capture is off until firstmate is next started.';
+  return null;
+}
+
+function captureBand(capture, ctx) {
   if (!capture || capture.present === false)
     return 'Automatic capture of what firstmate says has not reported yet'
       + (capture && capture.run_error ? ' (' + capture.run_error + ')' : '')
@@ -879,9 +908,12 @@ function captureBand(capture) {
   if (capture.ok === false)
     return 'Automatic capture of what firstmate says is failing'
       + (capture.error ? ': ' + capture.error : '') + ' - this list may be incomplete.';
-  if (capture.active === false)
-    return 'No conversation record was found to capture from, so only messages '
-      + 'firstmate recorded by hand appear here - this list may be incomplete.';
+  if (capture.active === false) {
+    if (handRecent(ctx) || !(ctx && ctx.workActive)) return null;
+    return 'Firstmate has been working but nothing has been recorded here for a long while, '
+      + 'and no conversation record is being captured, so messages may be missing. '
+      + 'Start firstmate again from its own session so automatic capture can read it.';
+  }
   // Only a Stop hook's payload names the transcript a session actually writes.
   // Until one has, capture is reading a directory worked out from the home's
   // path, and a session started elsewhere writes where nothing is looking.
@@ -944,7 +976,7 @@ if (typeof module === 'object' && module.exports)
                      replyTarget, foldSaid, wordsAfter,
                      listSignature, mayRelease, logRead,
                      sendState, sendKeys, sameWords,
-                     heldWith, captureBand, saidDigest, mergeMessages,
+                     heldWith, captureBand, handRecordedNote, newestMessageMs, saidDigest, mergeMessages,
                      isItemDeferred, looksLikeClarifyingReply, inMessagesTab, onHisBoard,
                      waitingItems, waitingMessageRows, waitingCount,
                      namesPr, mergeAskOnly, prAsks, markRepeats,

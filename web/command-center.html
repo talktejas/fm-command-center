@@ -188,6 +188,7 @@
     font-size:11.5px;color:var(--dim);line-height:1.45}
 
   .rail-foot{border-top:1px solid var(--line2);padding:9px 16px;background:#fbfcfd}
+  .capture-note{font-size:11.5px;color:var(--dim);margin:0 0 7px}
   .notebtn{width:100%;border:1px dashed var(--line);background:#fff;border-radius:var(--radius);
     padding:8px;font-size:12.5px;color:var(--dim);cursor:pointer}
   .notebtn:hover{border-color:#c8cfd9;color:var(--ink)}
@@ -367,9 +368,9 @@
         <button class="clr" id="clr" hidden>×</button>
       </div>
       <div class="tabs" role="tablist">
+        <button class="tab" role="tab" data-tab="waiting" aria-selected="false" title="Only what needs your answer or decision">Input <span class="n" id="n-waiting"></span></button>
         <button class="tab" role="tab" data-tab="messages" aria-selected="true" title="Important information from firstmate">Info <span class="n" id="n-messages"></span></button>
         <button class="tab" role="tab" data-tab="info" aria-selected="false" title="Repeats and nothing-new notes, kept so you can check nothing important was ignored">Ignore <span class="n" id="n-info"></span></button>
-        <button class="tab" role="tab" data-tab="waiting" aria-selected="false" title="Only what needs your answer or decision">Input <span class="n" id="n-waiting"></span></button>
         <button class="tab" role="tab" data-tab="prs" aria-selected="false" title="Pull requests waiting for your merge word">PRs <span class="n" id="n-prs"></span></button>
         <button class="tab" role="tab" data-tab="work" aria-selected="false" title="Everything active: being worked on, or dormant waiting for you">Work <span class="n" id="n-work"></span></button>
         <button class="tab" role="tab" data-tab="archived" aria-selected="false">Archived <span class="n" id="n-archived"></span></button>
@@ -407,6 +408,7 @@
     </div>
     <div class="list" id="list"></div>
     <div class="rail-foot">
+      <div class="capture-note" id="capture-note" hidden></div>
       <button class="notebtn" id="open-note">✎&nbsp; Tell firstmate something — not an answer</button>
     </div>
   </aside>
@@ -1267,6 +1269,23 @@ function gutterHold(){
   if (btn) btn.click();
 }
 
+// What the capture-health rules decide from (captureBand, handRecordedNote in
+// web/command-center-state.js): the newest message the page holds and whether
+// any work is underway. Read fresh each time, never cached.
+function captureContext(){
+  return { newestAt: newestMessageMs(state.messages.concat(state.archivedMessages)),
+    nowMs: Date.now(), workActive: (state.work.underway || []).length > 0 };
+}
+
+// The hand-recorded state is a quiet line at the foot of the list, never a band
+// at the top (his report 2026-10-05: "why the fuck is this coming?").
+function paintCaptureNote(){
+  const note = state.msgRead ? handRecordedNote(state.capture, captureContext()) : null;
+  const el = $('#capture-note');
+  el.textContent = note || '';
+  el.hidden = !note;
+}
+
 function renderList(){
   renderGutter();
   markRepeats(state.messages);
@@ -1305,7 +1324,7 @@ function renderList(){
     t.setAttribute('aria-selected', String(t.dataset.tab === state.tab)));
   $('#clr').hidden = !state.q;
   $('#statebar').hidden = state.tab !== 'waiting';
-  renderProjectFilter(); renderWatcher();
+  renderProjectFilter(); renderWatcher(); paintCaptureNote();
   if (state.tab === 'messages' || state.tab === 'info'){ renderMessages(); return; }
   if (state.tab === 'archived'){ renderMessages(true); return; }
   if (state.tab === 'hold'){ renderHold(); return; }
@@ -1361,7 +1380,7 @@ function renderMessages(archived){
   // Capture health is its own fact and gets its own band (captureBand in
   // bin/command-center-state.js): a broken capture must never look like a
   // short conversation.
-  const cap = state.msgRead ? captureBand(state.capture) : null;
+  const cap = state.msgRead ? captureBand(state.capture, captureContext()) : null;
   if (cap) note += `<div class="archive-note" style="background:var(--warn-soft)">${esc(cap)}</div>`;
   const asked = state.q.trim();
   const answered = found ? found.q : '';
@@ -2372,7 +2391,7 @@ async function loadMessages(){
     state.msgEtag = res.headers.get('ETag');
     const body = await res.json();
     const before = listSignature(state.messages) + '/' + state.msgError
-      + '/' + JSON.stringify(captureBand(state.capture));
+      + '/' + JSON.stringify(captureBand(state.capture, captureContext()));
     // Only the newest window is polled, so it is merged into what the page
     // already holds rather than replacing it: a row that has fallen out of the
     // window since it was read is still one of the things firstmate said.
@@ -2401,7 +2420,7 @@ async function loadMessages(){
     state.capture = body.capture || null;
     state.msgRead = true;
     return before !== listSignature(state.messages) + '/' + state.msgError
-      + '/' + JSON.stringify(captureBand(state.capture));
+      + '/' + JSON.stringify(captureBand(state.capture, captureContext()));
   } catch (e) {
     // Reachability already has its own band from the item poll; this only
     // declines to claim the list is complete.
