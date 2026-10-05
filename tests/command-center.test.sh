@@ -1428,6 +1428,16 @@ $out"
   pass "the page's $out decision rules hold"
 }
 
+# Jev sorting (command-center.py's Sorter), with the network call stubbed.
+test_jev_sorting_holds_with_the_network_stubbed() {
+  local out rc=0
+  out=$(FM_FIRSTMATE_ROOT="$FIRSTMATE_ROOT" python3 \
+    "$(dirname "${BASH_SOURCE[0]}")/command-center-sort.test.py" 2>&1) || rc=$?
+  [ "$rc" -eq 0 ] || fail "Jev sorting regressed:
+$out"
+  pass "the $out Jev sorting rules hold"
+}
+
 # --- what firstmate SAID to him ---------------------------------------------
 # The whole point of the page: firstmate's work records are not a record of the
 # messages it sent him, so bin/fm-captain-message.sh writes them down and the
@@ -4193,6 +4203,7 @@ test_send_note_tracks_the_note_id_even_when_only_the_wake_failed
 test_send_note_survives_multibyte_reply_text
 test_concurrent_polls_produce_one_scan
 test_the_pages_decision_rules_hold
+test_jev_sorting_holds_with_the_network_stubbed
 test_the_server_serves_the_pages_decision_rules
 test_a_url_becomes_a_real_link_on_every_surface_that_shows_free_text
 test_a_document_is_served_and_a_file_address_to_it_becomes_its_link

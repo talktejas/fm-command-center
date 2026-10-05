@@ -14,6 +14,7 @@
 #
 # Usage:
 #   command-center.py --home <FM_HOME> [--port 8765] [--firstmate-root <dir>]
+#                     [--jev-sort on|off] [--jev-floor 0.6]
 #   command-center.py --install-unit --home <FM_HOME> [--port 8765]
 #
 # Standalone: this repo never copies or edits firstmate's own scripts. Sends
@@ -77,7 +78,9 @@ import subprocess
 import sys
 import threading
 import time
+import urllib.error
 import urllib.parse
+import urllib.request
 import uuid
 from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -1555,8 +1558,7 @@ def load_message_context_cache(home):
         if isinstance(data, dict) else {}
 
 
-def save_message_context_cache(home, cache):
-    path = message_context_cache_path(home)
+def save_json_cache(path, cache):
     try:
         os.makedirs(os.path.dirname(path), exist_ok=True)
         tmp = path + f".tmp{os.getpid()}"
@@ -1565,6 +1567,10 @@ def save_message_context_cache(home, cache):
         os.replace(tmp, path)
     except OSError as exc:
         sys.stderr.write(f"command-center: could not write {path}: {exc}\n")
+
+
+def save_message_context_cache(home, cache):
+    save_json_cache(message_context_cache_path(home), cache)
 
 
 def enrich_messages(rows, records):
@@ -1620,6 +1626,234 @@ def enrich_messages(rows, records):
     return fill_from_nearby_turn(enriched)
 
 
+# --- sorting messages with Jev -----------------------------------------------------
+# His three tabs, in his words (2026-10-05): "Waiting on you is things u need
+# input / decisions from me. messages are messages that i need to see / review.
+# info is just messages routine messages like nothing to review, its working
+# etc." The page's own rules (web/command-center-state.js: messageNeedsReply,
+# isInfoOnlyMessage) place a message by its recorded question flag and by
+# phrase lists; Jev - TypeSafe's System One decision-only model - reads the
+# message itself and picks one of the three. This is the same call
+# firstmate's bin/fm-dispatch-resolve.sh makes (its docs/configuration.md,
+# "Typed dispatch resolution"): same endpoint, model, Choice question,
+# probability check, 5 second timeout and key handling.
+#
+# It only ever ADDS a `sort` field to a served message, which those same page
+# rules read first. Without one - no key, switched off, not asked yet, the
+# call failed - the row is placed exactly as before. The answer is kept by
+# message id in this page's own cache (never in firstmate's records), so each
+# message is asked about once.
+JEV_URL = "https://api.typesafe.ai/v1/systemone"
+JEV_MODEL = "jev-latest"
+JEV_TIMEOUT = 5
+SORT_FLOOR = 0.6   # the default; --jev-floor / $FM_CC_JEV_FLOOR sets it
+SORT_BATCH = 5     # messages asked about per changed /api/messages read
+SORT_RETRY_SECS = 300
+SORT_TEXT_HEAD, SORT_TEXT_TAIL = 3000, 2000
+SORT_INSTRUCTIONS = (
+    "`message` is one message an AI agent (firstmate) sent to the person it "
+    "works for (the captain). Which ONE of his three tabs does it belong in? "
+    "A message that only recalls an ask made earlier, or says something is "
+    "still waiting on him, is not itself a decision.")
+SORT_CHOICES = {
+    "decision": "It needs the captain's input or a decision only he can give: a "
+                "choice between options, an approval or go-ahead, or a question "
+                "the work is waiting on him to answer.",
+    "message": "He needs to see or review it but does not have to answer: "
+               "finished work, a result, a finding or cause, a failure or "
+               "blocker, something that changed, or an answer to what he asked.",
+    "info": "Routine, with nothing to review: an acknowledgement, nothing new, "
+            "still running, it is working, progress with no result.",
+}
+
+
+def sort_cache_path(home):
+    """Jev's answer per message id, beside the page's other caches."""
+    return os.path.join(home, "data", "command-center", "message-sort.json")
+
+
+def env_file_value(path, key):
+    """KEY's value from a .env file, by firstmate's own rule (fmx_env_get,
+    bin/fm-env-lib.sh): the last assignment wins, a leading "export" and one
+    layer of matching quotes are tolerated, absent reads as empty."""
+    value = ""
+    try:
+        with open(path, encoding="utf-8") as fh:
+            for line in fh:
+                found = re.match(rf"\s*(?:export\s+)?{re.escape(key)}=(.*)", line)
+                if found:
+                    value = found.group(1).strip()
+    except OSError:
+        return ""
+    if len(value) >= 2 and value[0] == value[-1] and value[0] in "\"'":
+        value = value[1:-1]
+    return value
+
+
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, *args, **kwargs):
+        return None  # the key is for this one host; never carry it to another
+
+
+JEV_OPENER = urllib.request.build_opener(_NoRedirect)
+
+
+def jev_post(key, payload):
+    """The one network call. The key travels as a header only - never on a
+    command line, in a log line or in anything written to disk."""
+    request = urllib.request.Request(
+        JEV_URL, data=json.dumps(payload).encode("utf-8"), method="POST",
+        headers={"Content-Type": "application/json", "Authorization": "Bearer " + key})
+    with JEV_OPENER.open(request, timeout=JEV_TIMEOUT) as response:
+        return json.loads(response.read(1 << 20))
+
+
+def sort_request(row):
+    text = str(row.get("text") or "")
+    if len(text) > SORT_TEXT_HEAD + SORT_TEXT_TAIL:
+        # An ask usually closes a long message, so both ends are kept.
+        text = text[:SORT_TEXT_HEAD] + "\n[...]\n" + text[-SORT_TEXT_TAIL:]
+    return {"model": JEV_MODEL,
+            "state": {"message": {"title": str(row.get("title") or ""), "text": text}},
+            "questions": {"sort": {"type": "choice", "instructions": SORT_INSTRUCTIONS,
+                                   "criteria": SORT_CHOICES}}}
+
+
+def sort_answer(response):
+    """(choice, confidence) from Jev's response, or None when it is not a
+    Choice answer over exactly the three tabs: every probability a number from
+    0 through 1, summing to 1 within 0.01 (fm-dispatch-resolve.sh's check)."""
+    def unit(value):
+        return isinstance(value, (int, float)) and not isinstance(value, bool) \
+            and 0 <= value <= 1
+    try:
+        answer = response["answers"]["sort"]
+        choice, confidence = answer["choice"], answer["confidence"]
+        odds = answer["probabilities"]
+    except (KeyError, TypeError):
+        return None
+    if choice not in SORT_CHOICES or not unit(confidence) or not isinstance(odds, dict) \
+            or set(odds) != set(SORT_CHOICES) or not all(unit(v) for v in odds.values()) \
+            or not 0.99 <= sum(odds.values()) <= 1.01:
+        return None
+    return choice, confidence
+
+
+class Sorter:
+    """Jev's tab for each message, asked for behind the page and cached.
+
+    apply() never waits on the network: it attaches the answers already
+    cached and hands at most SORT_BATCH unsorted rows of what it was just
+    asked to serve to one background thread. Each finished batch rewrites the
+    cache file, which is part of /api/messages's tag (tag below), so the next
+    poll re-reads, picks up the new answers and starts the next batch - the
+    rows on screen get sorted a batch at a time, never the whole log at once.
+    """
+
+    def __init__(self, home, enabled=True, floor=SORT_FLOOR, env_key=""):
+        self.home = home
+        self.enabled = enabled
+        self.floor = floor
+        self.env_key = env_key
+        self.lock = threading.Lock()
+        self.busy = False
+        self.retry_at = 0.0
+        self.said_off = False
+        try:
+            with open(sort_cache_path(home), encoding="utf-8") as fh:
+                cache = json.load(fh)
+        except (OSError, json.JSONDecodeError):
+            cache = {}
+        self.cache = cache if isinstance(cache, dict) else {}
+
+    def tag(self):
+        """What of this an unchanged /api/messages poll depends on."""
+        return f"{self.enabled}/{self.floor}/{log_etag(sort_cache_path(self.home))}"
+
+    def key(self):
+        """The environment wins; else the served home's .env, read each time
+        so a key added later needs no restart."""
+        return self.env_key or env_file_value(os.path.join(self.home, ".env"),
+                                              "TYPESAFE_API_KEY")
+
+    def placed(self, row):
+        """The `sort` a row is served with, or None. A recorded question is
+        never Jev's to place. Below the floor, whatever Jev chose, the row
+        goes to Messages - never to Waiting on you, never buried in Info."""
+        entry = self.cache.get(row.get("id"))
+        if not isinstance(entry, dict) or row.get("question"):
+            return None
+        choice, confidence = entry.get("choice"), entry.get("confidence")
+        if choice not in SORT_CHOICES or not isinstance(confidence, (int, float)):
+            return None
+        return {"tab": choice if confidence >= self.floor else "message",
+                "choice": choice, "confidence": confidence}
+
+    def wanted(self, row):
+        # Not a recorded question (Jev is never asked to overrule one), not an
+        # answer to his own send (never noise), and only what a tab lists.
+        return bool(row.get("id")) and row["id"] not in self.cache \
+            and not (row.get("question") or row.get("answers")
+                     or row.get("archived") or row.get("held")) \
+            and bool(row.get("text") or row.get("title"))
+
+    def apply(self, rows):
+        if not self.enabled:
+            return rows
+        with self.lock:
+            out = []
+            for row in rows:
+                placed = self.placed(row)
+                out.append(dict(row, sort=placed) if placed else row)
+            todo = [row for row in rows if self.wanted(row)][:SORT_BATCH]
+            if not todo or self.busy or time.monotonic() < self.retry_at:
+                return out
+            key = self.key()
+            if not key:
+                if not self.said_off:
+                    self.said_off = True
+                    sys.stderr.write(
+                        "command-center: jev sort is off (TYPESAFE_API_KEY absent from "
+                        "the environment and the home's .env); the page's own rules "
+                        "place every message\n")
+                return out
+            self.said_off = False
+            self.busy = True
+        threading.Thread(target=self._run, args=(key, todo), daemon=True).start()
+        return out
+
+    def _run(self, key, rows):
+        sorted_any = False
+        try:
+            for row in rows:
+                try:
+                    answer = sort_answer(jev_post(key, sort_request(row)))
+                    reason = "the response is not a sort answer"
+                except urllib.error.HTTPError as exc:
+                    answer, reason = None, f"http {exc.code}"
+                except Exception as exc:  # network, timeout, unreadable body
+                    # Its class only: an exception's text can quote the request.
+                    answer, reason = None, type(exc).__name__
+                if answer is None:
+                    # ponytail: one fixed pause for any failure, and the next
+                    # try rides on the next changed read; a per-row retry
+                    # schedule if one bad row ever starves the rest.
+                    self.retry_at = time.monotonic() + SORT_RETRY_SECS
+                    sys.stderr.write(
+                        f"command-center: jev sort failed ({reason}); the page's own "
+                        f"rules place unsorted messages, next try in {SORT_RETRY_SECS}s\n")
+                    break
+                with self.lock:
+                    self.cache[row["id"]] = {"choice": answer[0], "confidence": answer[1],
+                                             "at": utc_now()}
+                sorted_any = True
+        finally:
+            if sorted_any:
+                with self.lock:
+                    save_json_cache(sort_cache_path(self.home), self.cache)
+            self.busy = False
+
+
 MESSAGE_WINDOW = 200
 
 # A field a record says it does not know - left empty, or written out as
@@ -1648,7 +1882,7 @@ def is_message(row):
         and row.get("kind") not in ("archive", "unarchive")
 
 
-def messages_etag(home, capture):
+def messages_etag(home, capture, sort_tag=""):
     """What an unchanged /api/messages poll is allowed to skip re-reading.
 
     The log is append-only, so its size, mtime and readability decide whether
@@ -1657,7 +1891,9 @@ def messages_etag(home, capture):
     that says this list may be incomplete must never be held back by a quiet
     log. A message's Hold lives in parked.jsonl, a different file, so its own
     stat is folded in too - a hold with nothing else changing must still bust
-    a poll that would otherwise answer 304 over the stale flag.
+    a poll that would otherwise answer 304 over the stale flag. So is the
+    sorter's own tag: a message Jev has just sorted moves tab with nothing
+    else changing.
     """
     path = message_log(home)
     try:
@@ -1667,7 +1903,7 @@ def messages_etag(home, capture):
         key = "none"
     except OSError:
         return None
-    key += "/" + (log_etag(parked_log(home)) or "none")
+    key += "/" + (log_etag(parked_log(home)) or "none") + "/" + sort_tag
     return '"m' + hashlib.sha1(
         (key + dump(band_facts(capture)).decode("utf-8")).encode("utf-8")
     ).hexdigest()[:16] + '"'
@@ -2086,6 +2322,7 @@ class Handler(BaseHTTPRequestHandler):
     records = None
     capture = None
     work = None
+    sorter = None
 
     def log_message(self, fmt, *args):  # quieter than the stdlib default
         if self.path.startswith("/api/items"):
@@ -2421,7 +2658,7 @@ class Handler(BaseHTTPRequestHandler):
                 if row is not None:
                     row = dict(row, archived=archived_messages(self.records.home).get(msg_id, False),
                                held=read_parked(self.records.home).get(("message", msg_id)) == "held")
-                    row = enrich_messages([row], self.records)[0]
+                    row = self.sorter.apply(enrich_messages([row], self.records))[0]
                 current, archived_total = message_totals(self.records.home)
                 self._send(200, dump({"messages": [row] if row else [],
                                       "more": False, "error": error,
@@ -2431,7 +2668,7 @@ class Handler(BaseHTTPRequestHandler):
                 return
             # Only the plain window is polled, so only it is worth a tag; a
             # search and a walk back through the log are asked for once.
-            etag = messages_etag(self.records.home, capture) \
+            etag = messages_etag(self.records.home, capture, self.sorter.tag()) \
                 if not (query or before) else None
             if etag and self.headers.get("If-None-Match") == etag:
                 self.send_response(304)
@@ -2444,7 +2681,7 @@ class Handler(BaseHTTPRequestHandler):
                                               before=before, query=query,
                                               archived=archived)
             if not error:
-                rows = enrich_messages(rows, self.records)
+                rows = self.sorter.apply(enrich_messages(rows, self.records))
             # A read that FAILED is not the state of the log: serving it under a
             # change check would answer 304 to every later poll and leave the
             # page saying this record could not be read long after it could.
@@ -2766,6 +3003,15 @@ def main(argv=None):
                         help="firstmate checkout whose bin/ scripts answer sends and "
                              "captures messages (default: $FM_FIRSTMATE_ROOT, else "
                              f"{DEFAULT_FIRSTMATE_ROOT})")
+    parser.add_argument("--jev-sort", choices=("on", "off"),
+                        default=os.environ.get("FM_CC_JEV_SORT", "on"),
+                        help="let Jev sort messages into Waiting on you / Messages / "
+                             "Info when a TYPESAFE_API_KEY is set (default: "
+                             "$FM_CC_JEV_SORT, else on)")
+    parser.add_argument("--jev-floor", type=float,
+                        default=os.environ.get("FM_CC_JEV_FLOOR", SORT_FLOOR),
+                        help="confidence below which Jev's answer only ever means "
+                             f"Messages (default: $FM_CC_JEV_FLOOR, else {SORT_FLOOR})")
     parser.add_argument("--install-unit", action="store_true",
                         help="write the systemd user unit and exit")
     args = parser.parse_args(argv)
@@ -2782,6 +3028,9 @@ def main(argv=None):
         return 1
     if args.install_unit:
         return install_unit(home, args.port, FIRSTMATE_ROOT)
+    if not 0 <= args.jev_floor <= 1:
+        print("command-center: --jev-floor must be from 0 to 1", file=sys.stderr)
+        return 1
     for needed in (PAGE, RULES):
         if not os.path.exists(needed):
             print(f"command-center: a page file is missing: {needed}", file=sys.stderr)
@@ -2790,6 +3039,9 @@ def main(argv=None):
     Handler.records = Records(home)
     Handler.capture = MessageCapture(home)
     Handler.work = Work(home)
+    # Taken out of the environment so no script this server runs inherits it.
+    Handler.sorter = Sorter(home, enabled=args.jev_sort == "on", floor=args.jev_floor,
+                            env_key=os.environ.pop("TYPESAFE_API_KEY", ""))
     # Start capture straight away so the list is complete - today's messages
     # backfilled on the first ever run - before the page is even opened.
     Handler.capture.ensure()
