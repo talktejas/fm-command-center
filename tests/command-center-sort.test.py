@@ -336,6 +336,24 @@ def the_server_serves_the_sort_and_never_the_key():
     assert jev.keys and set(jev.keys) == {KEY}
 
 
+@test
+def an_answer_given_under_an_older_wording_is_asked_again_as_its_row_is_served():
+    jev = Jev({"app is up for you to check": reply("decision", 0.9)})
+    sorter = sorter_with(jev, "wording")
+    sorter.cache = {"m0": {"choice": "message", "confidence": 0.96, "at": "2026-10-05T14:34:23Z"},
+                    "never-served": {"choice": "info", "confidence": 0.9}}
+    served = rows("app is up for you to check")
+    assert sorter.apply(served)[0]["sort"]["tab"] == "message", "the old answer was dropped unasked"
+    settle(sorter)
+    assert sorter.apply(served)[0]["sort"]["tab"] == "decision"
+    settle(sorter)
+    assert jev.asked == ["app is up for you to check"], jev.asked
+    assert sorter.cache["m0"]["wording"] == cc.SORT_WORDING
+    assert "wording" not in sorter.cache["never-served"], "history was re-sorted wholesale"
+    act = cc.SORT_CHOICES["decision"]
+    assert "check" in act and "merge" in act and "decide" in act, act
+
+
 if not failures:
     print(ran)
 sys.exit(1 if failures else 0)

@@ -1650,20 +1650,37 @@ SORT_FLOOR = 0.6   # the default; --jev-floor / $FM_CC_JEV_FLOOR sets it
 SORT_BATCH = 5     # messages asked about per changed /api/messages read
 SORT_RETRY_SECS = 300
 SORT_TEXT_HEAD, SORT_TEXT_TAIL = 3000, 2000
+# The first choice is wider than a decision (his report 2026-10-05, on a plain
+# "JewelTrek metals check app is back up" filed under Messages: "this is
+# important as i need to check the metal apps"): it is anything he has to ACT
+# on. The stored values stay the three below; SORT_WORDING names the wording
+# an answer was given under, so one from an older wording is asked again as
+# its row is next served rather than trusted forever. Bump it with the text.
+SORT_WORDING = 2
 SORT_INSTRUCTIONS = (
     "`message` is one message an AI agent (firstmate) sent to the person it "
     "works for (the captain). Which ONE of his three tabs does it belong in? "
-    "A message that only recalls an ask made earlier, or says something is "
-    "still waiting on him, is not itself a decision.")
+    "Ask: after reading it, is there something the captain himself will now go "
+    "and do? Being told that something he uses or was waiting for is up, back, "
+    "ready or available counts - he will go and use or check it - even when the "
+    "message asks him nothing. A message that only recalls an ask made earlier, "
+    "or says something is still waiting on him, does not. Nor does an optional "
+    "offer on work that is otherwise on track ('say the word and I will ...'), "
+    "or a report that work is under way or still coming.")
 SORT_CHOICES = {
-    "decision": "It needs the captain's input or a decision only he can give: a "
-                "choice between options, an approval or go-ahead, or a question "
-                "the work is waiting on him to answer.",
-    "message": "He needs to see or review it but does not have to answer: "
-               "finished work, a result, a finding or cause, a failure or "
-               "blocker, something that changed, or an answer to what he asked.",
-    "info": "Routine, with nothing to review: an acknowledgement, nothing new, "
-            "still running, it is working, progress with no result.",
+    "decision": "The captain has to act: decide between options, approve or give "
+                "a go-ahead, merge, answer a question, or go and check, test, use "
+                "or review something that is now ready or available for him - an "
+                "app or page that is up or back up at an address, a prototype, a "
+                "document or pull request awaiting him.",
+    "message": "A message to read, with no action from him: a finding or cause, "
+               "an explanation, a failure or blocker the agent is handling "
+               "itself, a fix or change reported as done, landed or live with "
+               "nothing he is asked to verify, something that changed, or an "
+               "answer to what he asked.",
+    "info": "Routine, nothing to read closely: an acknowledgement, nothing new, "
+            "nothing needed from him, still running, a transient glitch the agent "
+            "already handled, progress with no result.",
 }
 
 
@@ -1792,7 +1809,10 @@ class Sorter:
     def wanted(self, row):
         # Not a recorded question (Jev is never asked to overrule one), not an
         # answer to his own send (never noise), and only what a tab lists.
-        return bool(row.get("id")) and row["id"] not in self.cache \
+        # An answer given under an older wording is asked again, here, lazily.
+        entry = self.cache.get(row.get("id"))
+        return bool(row.get("id")) \
+            and not (isinstance(entry, dict) and entry.get("wording") == SORT_WORDING) \
             and not (row.get("question") or row.get("answers")
                      or row.get("archived") or row.get("held")) \
             and bool(row.get("text") or row.get("title"))
@@ -1845,7 +1865,7 @@ class Sorter:
                     break
                 with self.lock:
                     self.cache[row["id"]] = {"choice": answer[0], "confidence": answer[1],
-                                             "at": utc_now()}
+                                             "wording": SORT_WORDING, "at": utc_now()}
                 sorted_any = True
         finally:
             if sorted_any:

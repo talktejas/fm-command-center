@@ -967,4 +967,41 @@ test('a sort that arrives on a later poll changes the list signature', () => {
   assert.strictEqual(listSignature(before), listSignature(before.slice()));
 });
 
+// His replies 2026-10-05, on rows Jev had lifted into Messages: "these are just
+// info why fuck u are putting it in messages instead of in info tab", "Nothing
+// for you, captain all these kind go in info".
+test('a message that itself says there is nothing for him is Info always, whatever Jev says', () => {
+  const { declaresNothingForHim, looksLikeInfoOnly } = require('../web/command-center-state.js');
+  const real = [
+    'Nothing for you, captain — another GitHub read timing out from here.',
+    'Nothing for you, captain — the worker had misread why its check was failing; the evidence '
+      + 'says the hand-opened pull request simply never got the pipeline\'s stamp. I sent it the '
+      + 'correction: let the pipeline open its own. Still lands without asking you.',
+    "Held, captain — I've stopped the worker before it binds anything, so it won't fight you "
+      + 'for the ports. It keeps what it built and waits for your word.',
+    'Nothing new, captain — a failed status read on my side; all workers fine.',
+    'Landed, captain, nothing needed from you — the false alarm fix is merged.',
+    'No change. Still running.',
+  ];
+  for (const text of real) {
+    assert.strictEqual(declaresNothingForHim(text), true, text);
+    assert.strictEqual(looksLikeInfoOnly(text), true, 'the rules alone: ' + text);
+    for (const tab of ['decision', 'message', 'info']) {
+      const row = { id: 'n1', text, sort: { tab, choice: tab, confidence: 0.99 } };
+      assert.strictEqual(isInfoOnlyMessage(row), true, tab + ' lifted it out of Info: ' + text);
+      assert.strictEqual(messageNeedsReply(row, []), false, tab + ' put it under Waiting on you');
+    }
+  }
+  // Only the opening words declare it; and what he must answer still waits on him.
+  for (const text of ['JewelTrek metals check app is back up at http://127.0.0.1:4303.',
+    'The audit is in. Nothing changed in billing, but the ledger export is broken.',
+    'Holding pattern explained: the cause is a stale lock, and here is the full finding. '
+      + 'x'.repeat(400)])
+    assert.strictEqual(declaresNothingForHim(text), false, text);
+  const asked = { id: 'q1', question: true, text: 'Nothing new for you, captain — except: A or B?' };
+  assert.strictEqual(isInfoOnlyMessage(asked), false);
+  assert.strictEqual(messageNeedsReply(asked, []), true);
+  assert.strictEqual(isInfoOnlyMessage({ id: 'a1', answers: 'note-1', text: 'Nothing new.' }), false);
+});
+
 process.exit(failures ? 1 : 0);
