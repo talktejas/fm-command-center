@@ -367,12 +367,13 @@
         <button class="clr" id="clr" hidden>×</button>
       </div>
       <div class="tabs" role="tablist">
-        <button class="tab" role="tab" data-tab="messages" aria-selected="true">Messages <span class="n" id="n-messages"></span></button>
-        <button class="tab" role="tab" data-tab="info" aria-selected="false">Info <span class="n" id="n-info"></span></button>
-        <button class="tab" role="tab" data-tab="waiting" aria-selected="false">Waiting on you <span class="n" id="n-waiting"></span></button>
-        <button class="tab" role="tab" data-tab="work" aria-selected="false">Work <span class="n" id="n-work"></span></button>
+        <button class="tab" role="tab" data-tab="messages" aria-selected="true" title="Important information from firstmate">Info <span class="n" id="n-messages"></span></button>
+        <button class="tab" role="tab" data-tab="info" aria-selected="false" title="Repeats and nothing-new notes, kept so you can check nothing important was ignored">Ignore <span class="n" id="n-info"></span></button>
+        <button class="tab" role="tab" data-tab="waiting" aria-selected="false" title="Only what needs your answer or decision">Input <span class="n" id="n-waiting"></span></button>
+        <button class="tab" role="tab" data-tab="prs" aria-selected="false" title="Pull requests waiting for your merge word">PRs <span class="n" id="n-prs"></span></button>
+        <button class="tab" role="tab" data-tab="work" aria-selected="false" title="Everything active: being worked on, or dormant waiting for you">Work <span class="n" id="n-work"></span></button>
         <button class="tab" role="tab" data-tab="archived" aria-selected="false">Archived <span class="n" id="n-archived"></span></button>
-        <button class="tab" role="tab" data-tab="hold" aria-selected="false">On hold <span class="n" id="n-hold"></span></button>
+        <button class="tab" role="tab" data-tab="hold" aria-selected="false">Hold <span class="n" id="n-hold"></span></button>
       </div>
       <div class="groupbar">
         <label for="grouping">Group by</label>
@@ -545,7 +546,7 @@ const para = t => linked(t).split(/\n{2,}/)
 
 const state = {
   tab:'messages', group:'project', sfilter:'', q:'', project:'',
-  open:null, view:{homes:[],items:[]}, said:[], messages:[], archivedMessages:[], msgError:null,
+  open:null, view:{homes:[],items:[]}, prs:[], prsError:null, said:[], messages:[], archivedMessages:[], msgError:null,
   saidDropped:0, msgEtag:null, saidEtag:null,
   // The page holds the newest window of the log; the rest is one click away
   // and searchable whole, and `capture` is the health of the automatic
@@ -830,7 +831,7 @@ function visibleMessages(allProjects){
   // One record, one tab (inMessagesTab, bin/command-center-state.js): a
   // message still waiting on him is listed only in Waiting on you, so a batch
   // here can never reach it. Archived rows are never waiting.
-  const listed = archived ? m => !isMsgHeld(m) : m => inMessagesTab(m, state.said, state.view.items);
+  const listed = archived ? m => !isMsgHeld(m) : m => inMessagesTab(m, state.said, state.view.items, state.prs);
   // Unsearched, a recorded answer is folded into the conversation it
   // continues (foldAnswers, bin/command-center-state.js) rather than listed on
   // its own; a search shows whatever matched, answers included.
@@ -1032,6 +1033,7 @@ function displayOrder(rows, newestDefault, isMessage, keyFn){
 const inProject = r => !state.project || projectOf(r) === state.project;
 function renderProjectFilter(){
   const rows = state.tab === 'waiting' ? visible(true)
+    : state.tab === 'prs' ? state.prs
     : state.tab === 'hold' ? heldItemsList().concat(heldMessagesList(), heldNotes())
     : state.tab === 'archived' ? visibleMessages(true).concat(archivedItemsList(), archivedNotes())
     : visibleMessages(true).concat(state.tab === 'messages' ? listedNotes() : []);
@@ -1267,6 +1269,7 @@ function gutterHold(){
 
 function renderList(){
   renderGutter();
+  markRepeats(state.messages);
   const items = state.view.items || [];
   // The server's own count of the current log, not the client's accumulated
   // cache: a message archived through any other route (another tab,
@@ -1280,7 +1283,7 @@ function renderList(){
   // Both badges are exactly what visibleMessages() would show for that tab,
   // the same window-based rule n-hold already uses.
   const unheldMsgs = foldAnswers(state.messages, state.said, heldMessages())
-    .filter(m => inMessagesTab(m, state.said, state.view.items));
+    .filter(m => inMessagesTab(m, state.said, state.view.items, state.prs));
   const infoCount = unheldMsgs.filter(isInfoOnlyMessage).length;
   $('#n-messages').textContent = unheldMsgs.length - infoCount + listedNotes().length;
   $('#n-info').textContent = infoCount;
@@ -1296,7 +1299,8 @@ function renderList(){
   // his call, or work already underway that a "0" badge would hide entirely -
   // Recently landed and Charted next stay read-only context, not counted.
   $('#n-work').textContent = workCalls().length
-    + (state.work.underway || []).length;
+    + (state.work.underway || []).length + workDormant().length;
+  $('#n-prs').textContent = state.prs.length;
   document.querySelectorAll('.tab').forEach(t =>
     t.setAttribute('aria-selected', String(t.dataset.tab === state.tab)));
   $('#clr').hidden = !state.q;
@@ -1306,11 +1310,12 @@ function renderList(){
   if (state.tab === 'archived'){ renderMessages(true); return; }
   if (state.tab === 'hold'){ renderHold(); return; }
   if (state.tab === 'work'){ renderWork(); return; }
+  if (state.tab === 'prs'){ renderPrs(); return; }
 
   const rows = ordered(visible());
   const empty = state.q || state.sfilter ? 'Nothing matches.'
     : !state.scanned ? 'The records have not been read yet.'
-    : 'Nothing is waiting on you.<br>Firstmate is getting on with it.';
+    : 'Nothing needs your input.<br>Firstmate is getting on with it.';
   // loadMessages walks every unarchived message in before this list is built;
   // until it has, a question further back could be missing, so it says so.
   const partial = state.more ? `<div class="archive-note" style="background:var(--warn-soft)">
@@ -1325,13 +1330,13 @@ function renderHold(){
   const items = ordered(heldItemsList().filter(inProject));
   const msgs = ordered(heldMessagesList().concat(heldNotes()).filter(inProject), true);
   const sections = [
-    ['Messages', msgs, m => m.__note ? noteRow(m) : messageRow(m, 'held')],
-    ['Waiting-on-you items', items, it => itemRow(it, 'held')],
+    ['Info', msgs, m => m.__note ? noteRow(m) : messageRow(m, 'held')],
+    ['Input items', items, it => itemRow(it, 'held')],
   ].filter(([, rows]) => rows.length);
   paintList(sections.length
     ? sections.map(([title, rows, fn]) => `<div class="worksection"><h3>${esc(title)}
         <span class="n">${rows.length}</span></h3>${rows.map(fn).join('')}</div>`).join('')
-    : `<div class="empty">Nothing on hold.</div>`);
+    : `<div class="empty">Nothing on Hold.</div>`);
 }
 
 // Messages are the default list and the reason this page exists: everything
@@ -1571,7 +1576,7 @@ function workDecisionRow(r){
 function workUnderwayRow(r){
   return `<div class="work-row">
     <div class="work-title">${esc(r.title || r.id)}</div>
-    ${r.doing ? `<div class="work-sub">${esc(r.doing)}</div>` : ''}
+    ${(r.doing || r.state) ? `<div class="work-sub">${esc(r.doing || r.state)}</div>` : ''}
     ${workMetaHtml(r)}
   </div>`;
 }
@@ -1590,6 +1595,47 @@ function workChartedRow(r){
     ${workMetaHtml(r)}
   </div>`;
 }
+// His ask 2026-10-05: everything active belongs under Work - "being worked on
+// or dormant waiting for my input". Underway is the first half; this is the
+// second: what his Input tab holds and every pull request waiting on his merge
+// word, one plain line each. Read-only here - each is answered on its own tab.
+function workDormant(){
+  const asked = (state.work.captains_call || []).filter(r => !workCalls().includes(r))
+    .map(r => Object.assign({}, r, {doing: 'Waiting for your answer — under Input'}));
+  const prs = state.prs.map(r => Object.assign({}, r, {pr: r.url,
+    doing: 'Pull request open, waiting for your merge word — under PRs'}));
+  return asked.concat(prs);
+}
+function prRow(r){
+  const asks = prAsks(r, state.messages, state.said, state.view.items);
+  const branch = (r.branch || 'branch not recorded') + ' → ' + (r.base || 'base not recorded');
+  return `<div class="work-row">
+    <div class="work-title">${esc(r.title || r.id)}</div>
+    <div class="work-sub">${esc(r.project || 'Project not recorded')} · ${esc(branch)}
+      · waiting ${esc(ageLabel(r))}</div>
+    <div class="work-sub"><a href="${esc(r.url)}" target="_blank" rel="noopener">${esc(r.url)}</a></div>
+    ${asks.map(m => `<div class="work-sub">${para(m.text || m.title)}</div>`).join('')}
+  </div>`;
+}
+function renderPrs(){
+  const rows = state.prs.filter(inProject);
+  let html = state.prsError ? `<div class="archive-note" style="background:var(--warn-soft)">
+    <b>The pull requests could not be read.</b> ${esc(state.prsError)}</div>` : '';
+  html += workSectionHtml('Waiting for your merge word', rows, prRow,
+    'No pull request is waiting on you.');
+  paintList(html);
+}
+async function loadPrs(){
+  try {
+    const res = await fetch('/api/prs');
+    const body = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(body.error || ('HTTP ' + res.status));
+    state.prs = body.prs || []; state.prsError = null;
+  } catch (e) {
+    state.prsError = String(e.message || e);   // the rows he has still stand
+  }
+}
+
 function workSectionHtml(title, rows, rowFn, emptyText){
   const body = rows.length ? rows.map(rowFn).join('')
     : `<div class="empty">${esc(emptyText)}</div>`;
@@ -1604,6 +1650,8 @@ function renderWork(){
   html += workSectionHtml("Captain’s Call", workCalls(), workDecisionRow,
     'Nothing is waiting on your call.');
   html += workSectionHtml('Underway', w.underway || [], workUnderwayRow, 'Nothing is underway.');
+  html += workSectionHtml('Dormant — waiting on you', workDormant(), workUnderwayRow,
+    'Nothing is dormant waiting on you.');
   html += workSectionHtml('Recently landed', w.landed || [], workLandedRow, 'Nothing landed recently.');
   html += workSectionHtml('Charted next', w.charted || [], workChartedRow, 'Nothing is charted next.');
   paintList(html);
@@ -1884,7 +1932,7 @@ function renderNotePane(n){
           before your next message, is on this board.</p>`}
     <div class="reply-foot">
       <button class="defer" data-archive-note="${sid}">${
-        n.archived ? 'Restore to Messages' : 'Archive'}</button>
+        n.archived ? 'Restore to Info' : 'Archive'}</button>
       ${n.held
         ? `<button class="defer" data-unhold-note="${sid}">Back to list</button>`
         : `<button class="defer" data-hold-note="${sid}">Hold</button>`}
@@ -1985,7 +2033,7 @@ function renderMessagePane(m){
     ${replyBoxHtml(key, going)}
     <div class="reply-foot">
       <button class="defer ${archiveRecvClass(latestReplyTo(m))}" data-archive-msg="${esc(m.id)}" ${state.archiving === m.id ? 'disabled' : ''}>${
-        m.archived ? 'Restore to Messages' : state.archiving === m.id ? 'Archiving…' : 'Archive'}</button>
+        m.archived ? 'Restore to Info' : state.archiving === m.id ? 'Archiving…' : 'Archive'}</button>
       ${isMsgHeld(m)
         ? `<button class="defer" data-unhold-msg="${esc(m.id)}">Back to list</button>`
         : `<button class="defer" data-hold-msg="${esc(m.id)}">Hold</button>`}
@@ -2014,7 +2062,8 @@ function renderMain(){
   if (!it){
     paintMain('', `<div class="blank"><strong>Pick something on the left.</strong>
       <span>Everything firstmate has said to you, newest first, with a box to reply in.<br>
-      <b>Waiting on you</b> is what firstmate has put to you and is still waiting on.<br>
+      <b>Input</b> is only what needs your answer or decision; <b>PRs</b> is what waits for your merge word.<br>
+      <b>Ignore</b> keeps the repeats and nothing-new notes, so you can check nothing important was dropped.<br>
       New things appear on their own — you never reload, and you never get a new link.</span></div>`);
     return;
   }
@@ -2982,7 +3031,7 @@ $('#note-dlg').addEventListener('close', async function(){
 // first opening Archived.
 $('#grouping').value = state.group;
 $('#statefilter').value = state.sfilter;
-Promise.all([loadSaid(), loadMessages(), loadWork(), loadArchivedMessages()]).then(([said]) => {
+Promise.all([loadSaid(), loadMessages(), loadWork(), loadArchivedMessages(), loadPrs()]).then(([said]) => {
   reconcilePending(said.read);
   if (state.open) open(state.open); else renderList();
   return poll();
@@ -2992,7 +3041,7 @@ setInterval(poll, POLL_MS);
 // class) because it shells out to fm-bearings-snapshot.sh, which does bounded
 // remote-ledger reads; polling it on the 3-second item cadence would buy
 // nothing and cost every tab a slow request it does not need.
-setInterval(async () => { await loadWork(); renderList(); }, 15000);
+setInterval(async () => { await Promise.all([loadWork(), loadPrs()]); renderList(); }, 15000);
 // The message log is a local file read, so it is polled on the same cadence and
 // re-rendered only when a message actually arrived - his typing survives the
 // re-render either way, because paintMain owns that.

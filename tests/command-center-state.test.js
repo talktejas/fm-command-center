@@ -14,6 +14,7 @@ const {
   waitingCount, waitingMessageRows, inMessagesTab, onHisBoard,
   isInfoOnlyMessage, sortedTab, saidTaskId, matchAnswer, threadRows, threadStatus,
   recordedAnswers, answeredSend, answerFor, foldAnswers, noteThreads, noteMomentAnswer,
+  namesPr, mergeAskOnly, prAsks, markRepeats,
 } = require(path.join(__dirname, '..', 'web', 'command-center-state.js'));
 
 // Quiet on success: tests/command-center.test.sh runs this and reports the
@@ -1017,6 +1018,67 @@ test('a message that itself says there is nothing for him is Info always, whatev
   assert.strictEqual(isInfoOnlyMessage(asked), false);
   assert.strictEqual(messageNeedsReply(asked, []), true);
   assert.strictEqual(isInfoOnlyMessage({ id: 'a1', answers: 'note-1', text: 'Nothing new.' }), false);
+});
+
+// His ruling 2026-10-05: "merge will go in seperate PR tab and not in action
+// tab. action is only where u need my input."
+test('a question that is nothing but a merge ask is shown in its PRs row, never under Input', () => {
+  const pr = { id: 'media2', url: 'https://github.com/talktejas/interactp/pull/39' };
+  const ask = { id: 'q39', question: true, text: 'Captain, INTERACT media slice 2 is ready for your '
+    + 'merge call. 306 tests pass. Merge it? https://github.com/talktejas/interactp/pull/39' };
+  const pick = { id: 'q1', question: true, text: 'Koin: pick a prototype - A, B, C or D?' };
+  const both = { id: 'q2', question: true, text: 'Merge it? https://github.com/talktejas/interactp/pull/39 '
+    + 'And which name do you want for the module?' };
+  const all = [ask, pick, both];
+  assert.strictEqual(mergeAskOnly(ask), true);
+  assert.strictEqual(mergeAskOnly(pick), false);
+  assert.strictEqual(mergeAskOnly(both), false, 'a second, different question still needs his input');
+  assert.deepStrictEqual(waitingMessageRows(all, [], [], [pr]).map(m => m.id), ['q1', 'q2']);
+  assert.strictEqual(waitingCount([], all, [], 0, [pr]), 2);
+  assert.deepStrictEqual(prAsks(pr, all, [], []).map(m => m.id), ['q39']);
+  // One record, one tab: inside the PRs row it is not also a row under Info.
+  assert.strictEqual(inMessagesTab(ask, [], [], [pr]), false);
+  // Its pull request no longer waits (merged): it is a message to read, not lost.
+  assert.strictEqual(inMessagesTab(ask, [], [], []), true);
+  assert.strictEqual(isInfoOnlyMessage(ask), false);
+  // Answered, it leaves the PRs row for Info like any answered question.
+  const said = [{ msg: 'q39', text: 'merge it' }];
+  assert.deepStrictEqual(prAsks(pr, all, said, []), []);
+  assert.strictEqual(inMessagesTab(ask, said, [], [pr]), true);
+  // pull/3 is not pull/39.
+  assert.strictEqual(namesPr(ask, { url: 'https://github.com/talktejas/interactp/pull/3' }), false);
+});
+
+// His ask 2026-10-05: "these repeted messages about pr waiting to be merged
+// should not come in command center. should be ignored."
+test('the first report of a pull request is Info; later still-waiting notes and copies are Ignore', () => {
+  const url = 'https://github.com/talktejas/jeweltrek2627-slim/pull/230';
+  const rows = markRepeats([   // newest first, as the page holds them
+    { id: 'm6', text: 'Still waiting on your prototype pick — A, B, C or D.' },
+    { id: 'm5', text: 'Still waiting on your prototype pick — A, B, C or D.' },
+    { id: 'm4', text: 'The metals app is back   up.' },
+    { id: 'm3', text: 'Cert mismatch (PR 230) is still holding for your merge word.' },
+    { id: 'm2', text: 'Captain, ' + url + ' failed its checks after the rebase.' },
+    { id: 'm1', text: 'The metals app is back up.' },
+    { id: 'm0', text: 'The cert-mismatch work is finished and parked on your merge word: ' + url },
+  ]);
+  const by = Object.fromEntries(rows.map(m => [m.id, m]));
+  assert.strictEqual(by.m0.repeat, false, 'the first report of a pull request was ignored');
+  assert.strictEqual(isInfoOnlyMessage(by.m0), false);
+  assert.strictEqual(by.m2.repeat, false, 'news about a known pull request was ignored');
+  assert.strictEqual(by.m3.repeat, true);
+  assert.strictEqual(isInfoOnlyMessage(by.m3), true);
+  assert.strictEqual(by.m4.repeat, true, 'a word-for-word copy was listed twice');
+  assert.strictEqual(by.m1.repeat, false);
+  // A pick he owes is never noise, even repeated (his reply 2026-10-05).
+  assert.strictEqual(by.m6.repeat, false);
+  // Jev cannot lift a repeat into Input or Info; a recorded question is never one.
+  const sorted = Object.assign({}, by.m3, { sort: { tab: 'decision', choice: 'decision', confidence: 0.9 } });
+  assert.strictEqual(messageNeedsReply(sorted, []), false);
+  assert.strictEqual(isInfoOnlyMessage(sorted), true);
+  assert.strictEqual(isInfoOnlyMessage(Object.assign({}, by.m3, { question: true })), false);
+  // A still-waiting note about a pull request never reported is not a repeat.
+  assert.strictEqual(markRepeats([{ id: 'x', text: 'PR 7 is still waiting on your merge word.' }])[0].repeat, false);
 });
 
 process.exit(failures ? 1 : 0);

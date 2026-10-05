@@ -408,7 +408,7 @@ function messageNeedsReply(message, saidRows, items) {
   // the confidence floor (sortedTab); it leaves the same way, by his reply.
   // Never for a row that itself says there is nothing for him (rule 0 of
   // looksLikeInfoOnly): that one is Info whatever Jev read it as.
-  if (!message.question && (sortedTab(message) !== 'decision'
+  if (!message.question && (sortedTab(message) !== 'decision' || message.repeat
       || declaresNothingForHim(message.text || message.title))) return false;
   const named = replyTarget(message, items).item;
   if (named && named.closed) return false;
@@ -423,8 +423,81 @@ function messageNeedsReply(message, saidRows, items) {
 // on him is listed ONLY in Waiting on you; once answered or settled it moves to
 // Messages (or Info), and only there can a batch reach it. Every badge counts
 // through these same two rules, so no record is counted twice.
-function inMessagesTab(message, saidRows, items) {
-  return !message.held && !messageNeedsReply(message, saidRows, items);
+// A merge ask is never Input (mergeAskOnly below): while the pull request it
+// names waits it is shown inside that PRs row and nowhere else; naming none
+// that waits, it is a message to read.
+function inMessagesTab(message, saidRows, items, prs) {
+  if (message.held) return false;
+  if (!messageNeedsReply(message, saidRows, items)) return true;
+  return mergeAskOnly(message) && !(prs || []).some(pr => namesPr(message, pr));
+}
+
+// --- pull requests: their own tab, never Input ------------------------------------
+// His ruling 2026-10-05: "merge will go in seperate PR tab and not in action
+// tab. action is only where u need my input." The PRs tab lists what the
+// server reads from each home's task records (/api/prs, command-center.py's
+// waiting_prs). A message waiting on him that is nothing but a merge ask is
+// taken out of Input; the pull request's own row shows its words (prAsks).
+function prText(message) {
+  return String((message && (message.text || message.title)) || '');
+}
+function namesPr(message, pr) {
+  if (!message || !pr || !pr.url) return false;
+  const at = prText(message).indexOf(pr.url);
+  // ".../pull/22" must not match ".../pull/224".
+  return at >= 0 && !/\d/.test(prText(message).charAt(at + pr.url.length));
+}
+const PR_REF = /\/pull\/\d+|\bPRs? ?#?\d+|\bpull requests?\b/i;
+const MERGE_ASK = /\b(your|the captain's) merge\b|\bmerge (it|them|this|word|call)\b|\bmerge\b[^.!?\n]*\?|\bready (to|for) (be )?merged?\b/i;
+// "Nothing but": every question in it is about merging, and it offers no
+// pick, options or other ask beside the merge.
+// ponytail: wording heuristics over firstmate's own phrasing; if firstmate
+// ever records a merge ask as its own kind, read that field instead.
+function mergeAskOnly(message) {
+  const t = prText(message);
+  if (!PR_REF.test(t) || !MERGE_ASK.test(t)) return false;
+  const low = t.toLowerCase();
+  if (ASKS.some(p => low.includes(p)) || /\breply [a-d1-9]\b/.test(low)
+      || /\b[a-d1-9],? or [a-d1-9]\b/.test(low)) return false;
+  return (t.match(/[^.!?\n]*\?/g) || []).every(q => /\bmerge/i.test(q));
+}
+function prAsks(pr, messages, saidRows, items) {
+  return (messages || []).filter(m => !m.held && namesPr(m, pr) && mergeAskOnly(m)
+    && messageNeedsReply(m, saidRows, items));
+}
+
+// --- repeats go to Ignore ---------------------------------------------------------
+// His ask 2026-10-05: "these repeted messages about pr waiting to be merged
+// should not come in command center... not to bog the user down with same
+// details again and again". Two kinds, both judged against every EARLIER
+// message the page holds: a word-for-word copy of a note already shown, and a
+// note that a pull request is still waiting when that pull request was already
+// reported. The first report of a pull request is never a repeat. A copy that
+// asks him for something is not one either (asksHim: a pick he owes is never
+// noise). Marks message.repeat in place - isInfoOnlyMessage reads it - and
+// returns the same list; newest first, like everything the page holds.
+const STILL_WAITING = /\bstill (open|holding|waiting|parked|on you)\b|\b(holding|waiting|parked)\b[^.\n]*\bmerge\b|\bmerge (word|call)\b|\b(waiting|waits) (for|on) your word\b/i;
+function prRefs(text) {
+  const refs = [];
+  for (const m of String(text || '').matchAll(/([\w.-]+)\/pull\/(\d+)/g)) refs.push(m[1] + '/' + m[2]);
+  for (const m of String(text || '').matchAll(/\bPRs? ?#?(\d+)/gi)) refs.push('/' + m[1]);
+  return refs;
+}
+function markRepeats(messages) {
+  const texts = new Set(), seen = new Set();
+  // "PR 224" names no repository: it matches any pull request 224 seen so far.
+  const known = ref => ref.startsWith('/')
+    ? [...seen].some(s => s.endsWith(ref)) : seen.has(ref);
+  const rows = messages || [];
+  for (let i = rows.length - 1; i >= 0; i--) {
+    const m = rows[i], t = prText(m), norm = t.toLowerCase().replace(/\s+/g, ' ').trim();
+    const refs = prRefs(t);
+    m.repeat = Boolean(norm) && ((texts.has(norm) && !asksHim(t))
+      || (refs.length > 0 && STILL_WAITING.test(t) && refs.every(known)));
+    texts.add(norm);
+    refs.filter(r => !r.startsWith('/')).forEach(r => seen.add(r));
+  }
+  return rows;
 }
 
 // His board shows only what firstmate has put to HIM (his ruling 2026-09-28,
@@ -745,6 +818,8 @@ function isInfoOnlyMessage(message) {
   if (message.answers) return false;
   // Rule first, Jev second: Jev may never lift such a row out of Info.
   if (declaresNothingForHim(message.text || message.title)) return true;
+  // A repeat of what he was already shown (markRepeats), whatever Jev read.
+  if (message.repeat) return true;
   // Jev's placement, when there is one, decides Messages vs Info; a row it
   // read as a decision is in Messages once it no longer waits on him.
   const tab = sortedTab(message);
@@ -779,7 +854,7 @@ function waitingItems(items, nowSecs) {
 }
 function waitingMessageRows(messages, saidRows, items) {
   return (messages || [])
-    .filter(m => !m.held && messageNeedsReply(m, saidRows, items))
+    .filter(m => !m.held && messageNeedsReply(m, saidRows, items) && !mergeAskOnly(m))
     .map(m => Object.assign({__msg: true}, m));
 }
 function waitingCount(items, messages, saidRows, nowSecs) {
@@ -872,6 +947,7 @@ if (typeof module === 'object' && module.exports)
                      heldWith, captureBand, saidDigest, mergeMessages,
                      isItemDeferred, looksLikeClarifyingReply, inMessagesTab, onHisBoard,
                      waitingItems, waitingMessageRows, waitingCount,
+                     namesPr, mergeAskOnly, prAsks, markRepeats,
                      looksLikeInfoOnly, declaresNothingForHim, asksHim, isInfoOnlyMessage, sortedTab,
                      saidTaskId, matchAnswer, threadRows, threadStatus,
                      recordedAnswers, answeredSend, answerFor, foldAnswers, noteThreads,

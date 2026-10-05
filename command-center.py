@@ -648,6 +648,120 @@ class Work:
             return self.body
 
 
+# --- pull requests waiting on his merge word ---------------------------------
+# His ask 2026-10-05: "merge will go in seperate PR tab". Read only, from what
+# each local home already records - never a forge call: a task's state/<id>.meta
+# carries pr= once its worker raised one, and firstmate's own poll writes
+# state/<id>.pr-poll-merge-notified when it sees that pull request merged.
+# ponytail: a pull request closed unmerged, or merged where no poll saw it,
+# stays listed until that marker lands; add one cached forge read per repo if
+# that ever shows.
+PRS_INTERVAL = 15.0
+PRS_CACHE = {"at": float("-inf"), "key": None, "rows": []}
+PRS_LOCK = threading.Lock()
+BACKLOG_TITLE_RE = re.compile(
+    r'^- \[[ x]\] (\S+) - (.*?)(?:\s+blocked-by:.*?)?(?:\s+\((?:repo|kind|since|hold): .*)?$')
+STATUS_STAMP_RE = re.compile(r'\[(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z)\]')
+
+
+def read_meta(path):
+    fields = {}
+    try:
+        with open(path, encoding="utf-8") as fh:
+            for line in fh:
+                key, sep, value = line.rstrip("\n").partition("=")
+                if sep and key not in fields:
+                    fields[key] = value
+    except OSError:
+        pass
+    return fields
+
+
+def backlog_titles(home_path):
+    titles = {}
+    rel = _tasks_toml_backlog_rel(FIRSTMATE_ROOT) or "data/backlog.md"
+    try:
+        with open(os.path.join(home_path, rel), encoding="utf-8") as fh:
+            for line in fh:
+                m = BACKLOG_TITLE_RE.match(line.rstrip("\n"))
+                if m:
+                    titles[m.group(1)] = m.group(2).strip()
+    except OSError:
+        pass
+    return titles
+
+
+def worktree_branch(worktree):
+    if not worktree or not os.path.isdir(worktree):
+        return None
+    try:
+        proc = subprocess.run(
+            ["git", "-C", worktree, "symbolic-ref", "--quiet", "--short", "HEAD"],
+            capture_output=True, text=True, timeout=5, stdin=subprocess.DEVNULL, check=False)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    return proc.stdout.strip() or None
+
+
+def pr_waiting_since(state_dir, task_id, url):
+    """When the pull request was first reported: the stamp on the first status
+    line naming it, else when the task's meta last changed."""
+    try:
+        with open(os.path.join(state_dir, task_id + ".status"), encoding="utf-8") as fh:
+            for line in fh:
+                if url in line:
+                    m = STATUS_STAMP_RE.search(line)
+                    if m and _epoch(m.group(1)):
+                        return int(_epoch(m.group(1)))
+    except OSError:
+        pass
+    try:
+        return int(os.path.getmtime(os.path.join(state_dir, task_id + ".meta")))
+    except OSError:
+        return None
+
+
+def waiting_prs(homes):
+    """One row per pull request a local home records and has not seen merged."""
+    rows = []
+    for home in homes:
+        state_dir = os.path.join(home.get("path") or "", "state")
+        try:
+            metas = sorted(n for n in os.listdir(state_dir) if n.endswith(".meta"))
+        except OSError:
+            continue
+        titles = None
+        for name in metas:
+            task_id = name[:-len(".meta")]
+            meta = read_meta(os.path.join(state_dir, name))
+            url = meta.get("pr", "").strip()
+            if not re.match(r"^https?://\S+$", url):
+                continue
+            if os.path.exists(os.path.join(state_dir, task_id + ".pr-poll-merge-notified")):
+                continue
+            if titles is None:
+                titles = backlog_titles(home["path"])
+            worktree = meta.get("worktree") or None
+            rows.append({
+                "id": task_id, "home": home.get("id"), "url": url,
+                "title": titles.get(task_id),
+                "project": os.path.basename(meta.get("project", "").rstrip("/")) or None,
+                "worktree": worktree, "branch": worktree_branch(worktree),
+                "base": meta.get("base") or None,
+                "since_epoch": pr_waiting_since(state_dir, task_id, url),
+            })
+    rows.sort(key=lambda r: (r["since_epoch"] is None, r["since_epoch"] or 0, r["url"]))
+    return rows
+
+
+def cached_waiting_prs(homes):
+    key = tuple((h.get("id"), h.get("path")) for h in homes)
+    with PRS_LOCK:
+        if PRS_CACHE["key"] != key or time.monotonic() - PRS_CACHE["at"] >= PRS_INTERVAL:
+            PRS_CACHE.update(at=time.monotonic(), key=key, rows=waiting_prs(homes))
+        return PRS_CACHE["rows"]
+
+
 class MessageCapture:
     """Keeps the automatic message capture running and reports its health.
 
@@ -2847,6 +2961,13 @@ class Handler(BaseHTTPRequestHandler):
                                extra_fingerprint=self._said_fingerprint)
             return
 
+        if path == "/api/prs":
+            # Before the first scan has named the homes, the served one alone.
+            view = self.records.view() if self.records.etag is not None else {}
+            homes = view.get("homes") or [{"id": "main", "path": self.records.home}]
+            self._json(200, {"prs": cached_waiting_prs(homes)})
+            return
+
         if path == "/api/work":
             self.work.refresh()
             body = self.work.snapshot()
@@ -3154,8 +3275,8 @@ def main(argv=None):
                              f"{DEFAULT_FIRSTMATE_ROOT})")
     parser.add_argument("--jev-sort", choices=("on", "off"),
                         default=os.environ.get("FM_CC_JEV_SORT", "on"),
-                        help="let Jev sort messages into Waiting on you / Messages / "
-                             "Info when a TYPESAFE_API_KEY is set (default: "
+                        help="let Jev sort messages into Input / Info / "
+                             "Ignore when a TYPESAFE_API_KEY is set (default: "
                              "$FM_CC_JEV_SORT, else on)")
     parser.add_argument("--jev-floor", type=float,
                         default=os.environ.get("FM_CC_JEV_FLOOR", SORT_FLOOR),
