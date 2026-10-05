@@ -47,13 +47,38 @@ def reply(choice, confidence):
         c: confidence if c == choice else rest for c in cc.SORT_CHOICES}}}}
 
 
+def odds(criteria, choice, confidence):
+    rest = (1 - confidence) / (len(criteria) - 1)
+    return {"choice": choice, "confidence": confidence, "probabilities": {
+        c: confidence if c == choice else rest for c in criteria}}
+
+
+REGISTRY = """# Projects
+- koin [direct-PR] - Koin, a multi-currency expense tracker (repo talktejas/koin)
+- b2becom [direct-PR] - KaratCraft B2B jewellery wholesale portal
+- jt2627s [direct-PR] - JewelTrek inventory SaaS
+- oldshop [direct-PR finished] - A shop that shipped and is done
+"""
+
+
+def registry(path, text=REGISTRY):
+    with open(os.path.join(path, "data", "projects.md"), "w", encoding="utf-8") as fh:
+        fh.write(text)
+
+
+def about(sorter, project, confidence=0.9):
+    """A scripted response: this message is about `project`."""
+    return {"answers": {"project": odds(
+        cc.project_choices(cc.offered_projects(sorter.home)), project, confidence)}}
+
+
 class Jev:
     """Stands in for jev_post: answers by the message's own text, records what
     it was asked, and can be held shut to prove nothing waits on it."""
 
     def __init__(self, answers=None, fail=None):
         self.answers, self.fail = answers or {}, fail
-        self.asked, self.keys = [], []
+        self.asked, self.keys, self.questions = [], [], []
         self.open = threading.Event()
         self.open.set()
 
@@ -63,7 +88,15 @@ class Jev:
         self.asked.append(payload["state"]["message"]["text"])
         if self.fail:
             raise self.fail
-        return self.answers.get(self.asked[-1], reply("message", 0.9))
+        self.questions.append(sorted(payload["questions"]))
+        answers = dict(self.answers.get(self.asked[-1], {}).get("answers") or {})
+        if answers.get("sort", 1) is None:  # a test's own malformed response
+            return {"answers": answers}
+        # Whatever a test did not script gets a valid, harmless answer.
+        for name, question in payload["questions"].items():
+            default = "message" if name == "sort" else cc.PROJECT_NONE
+            answers.setdefault(name, odds(question["criteria"], default, 0.9))
+        return {"answers": answers}
 
 
 def sorter_with(jev, name, **kwargs):
@@ -228,7 +261,7 @@ def a_failed_call_falls_back_silently_with_one_log_line_and_no_key_in_it():
 
 @test
 def a_malformed_response_is_a_failure_not_an_answer():
-    jev = Jev({"a": {"answers": {"sort": {"choice": "info"}}}})
+    jev = Jev({"a": {"answers": {"sort": None}}})
     sorter = sorter_with(jev, "malformed")
     log = logged(lambda: (sorter.apply(rows("a")), settle(sorter)))
     assert "the response is not a sort answer" in log, log
@@ -352,6 +385,120 @@ def an_answer_given_under_an_older_wording_is_asked_again_as_its_row_is_served()
     assert "wording" not in sorter.cache["never-served"], "history was re-sorted wholesale"
     act = cc.SORT_CHOICES["decision"]
     assert "check" in act and "merge" in act and "decide" in act, act
+
+
+@test
+def the_project_choices_are_the_registry_minus_finished_plus_two_fixed_ones():
+    path = home("registry")
+    assert cc.offered_projects(path) == {}, "projects were offered with no registry"
+    registry(path)
+    assert set(cc.offered_projects(path)) == {"koin", "b2becom", "jt2627s"}
+    assert set(cc.project_choices(cc.offered_projects(path))) == \
+        {"koin", "b2becom", "jt2627s", cc.PROJECT_SEVERAL, cc.PROJECT_NONE}
+    registry(path, REGISTRY + "- newone [local-only] - Something new\n")
+    assert "newone" in cc.offered_projects(path), "a project added to the registry was not offered"
+    with open(os.path.join(ROOT, "command-center.py"), encoding="utf-8") as fh:
+        source = fh.read().split("# --- sorting messages with Jev")[1].split("MESSAGE_WINDOW = ")[0]
+    assert "koin" not in source.lower() and "b2becom" not in source, "a project name is hardcoded"
+
+
+@test
+def jevs_project_replaces_a_different_recorded_one_and_keeps_it_visible():
+    jev = Jev()
+    sorter = sorter_with(jev, "project")
+    registry(sorter.home)
+    jev.answers = {"koin wallet bug": about(sorter, "koin", 0.9),
+                   "koin and jeweltrek items": about(sorter, cc.PROJECT_SEVERAL, 0.8),
+                   "maybe koin": about(sorter, "koin", 0.4),
+                   "the agent restarted": about(sorter, cc.PROJECT_NONE, 0.95),
+                   "karatcraft order page": about(sorter, "b2becom", 0.9),
+                   "unlabelled koin": about(sorter, "koin", 0.9)}
+    served = rows("koin wallet bug", "koin and jeweltrek items", "maybe koin",
+                  "the agent restarted", "karatcraft order page", project="b2becom")
+    served.append({"id": "bare", "text": "unlabelled koin", "project": None})
+    for _ in range(2):
+        assert [r["project"] for r in sorter.apply(served[:5])] == ["b2becom"] * 5 \
+            or not jev.open.is_set() or sorter.projects, "a label moved before Jev answered"
+        sorter.apply(served)
+        settle(sorter)
+    out = sorter.apply(served)
+    assert [r["project"] for r in out] == \
+        ["koin", "several projects", "b2becom", "b2becom", "b2becom", "koin"], out
+    assert out[0]["project_recorded"] == "b2becom" and out[0]["project_by"] == "jev"
+    assert out[1]["project_recorded"] == "b2becom"
+    assert out[5]["project_recorded"] is None and out[5]["project_by"] == "jev"
+    for same in out[2:5]:
+        assert "project_by" not in same and "project_recorded" not in same, same
+    assert out[2]["project_jev"] == {"choice": "koin", "confidence": 0.4}
+    # One call per row carried both questions, and the answers sit beside the sort cache.
+    assert len(jev.asked) == 6 and jev.questions[0] == ["project", "sort"], jev.questions
+    assert os.path.dirname(cc.project_cache_path(sorter.home)) == \
+        os.path.dirname(cc.sort_cache_path(sorter.home))
+    with open(cc.project_cache_path(sorter.home), encoding="utf-8") as fh:
+        assert KEY not in fh.read()
+    # The floor is applied to the cached answer; a restart asks nothing again.
+    loose = cc.Sorter(sorter.home, floor=0.3, env_key=KEY)
+    assert loose.apply(served)[2]["project"] == "koin"
+    settle(loose)
+    assert len(jev.asked) == 6
+
+
+@test
+def a_recorded_question_and_an_archived_row_still_get_a_project_but_never_a_sort():
+    jev = Jev()
+    sorter = sorter_with(jev, "project-question")
+    registry(sorter.home)
+    jev.answers = {"pick A or B": about(sorter, "koin")}
+    served = rows("pick A or B", question=True, project="b2becom") + \
+        [{"id": "arch", "text": "archived", "archived": True}]
+    sorter.apply(served)
+    settle(sorter)
+    assert jev.questions == [["project"], ["project"]], jev.questions
+    out = sorter.apply(served)
+    assert out[0]["project"] == "koin" and "sort" not in out[0]
+
+
+@test
+def a_changed_project_list_re_asks_only_the_rows_served_in_the_same_batches():
+    jev = Jev()
+    sorter = sorter_with(jev, "relist")
+    registry(sorter.home)
+    served = rows(*[f"row {i}" for i in range(cc.SORT_BATCH + 2)])
+    for _ in range(3):
+        sorter.apply(served)
+        settle(sorter)
+    asked = len(jev.asked)
+    assert asked == len(served), asked
+    before = sorter.tag()
+    registry(sorter.home, REGISTRY.replace("- koin [direct-PR]", "- koin [direct-PR finished]"))
+    assert sorter.tag() != before, "a changed registry would not bust the unchanged poll"
+    sorter.apply(served)
+    settle(sorter)
+    assert len(jev.asked) - asked == cc.SORT_BATCH, "the re-ask was not one bounded batch"
+    assert jev.questions[-1] == ["project"], "a row already sorted was sorted again"
+    untouched = [k for k, v in sorter.projects.items() if v["of"] != cc.projects_tag(
+        cc.offered_projects(sorter.home))]
+    assert len(untouched) == 2, "rows not yet re-served were reclassified"
+
+
+@test
+def a_failed_or_malformed_project_answer_leaves_the_recorded_label():
+    for n, (fail, answers) in enumerate(((TimeoutError("timed out"), {}),
+                          (None, {"a": {"answers": {"project": {"choice": "koin"}}}}),
+                          (None, {"a": {"answers": {"project": odds(
+                              {"koin": "", "not-a-project": ""}, "not-a-project", 0.9)}}}))):
+        jev = Jev(answers, fail=fail)
+        sorter = sorter_with(jev, f"project-fail-{n}")
+        registry(sorter.home)
+        served = rows("a", project="b2becom")
+        log = logged(lambda: [(sorter.apply(served), settle(sorter)) for _ in range(2)])
+        assert sorter.apply(served) == served, "a failed call changed the label"
+        assert log.count("\n") == 1 and "jev sort failed" in log, log
+        assert not os.path.exists(cc.project_cache_path(sorter.home))
+    quiet = sorter_with(Jev(), "project-nokey", env_key="")
+    registry(quiet.home)
+    logged(lambda: quiet.apply(served))
+    assert quiet.apply(served) == served
 
 
 if not failures:

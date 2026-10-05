@@ -275,8 +275,10 @@ function mayRelease(read, held, row, now, windowMs) {
 function listSignature(rows) {
   const newest = (rows || [])[0] || {};
   const sorted = SORT_TABS.map(tab => (rows || []).filter(r => sortedTab(r) === tab).length);
+  // So is a project label Jev changed after the row was served.
+  const relabelled = (rows || []).filter(r => r.project_by).map(r => r.project).join(',');
   return [(rows || []).length, newest.sid || newest.id || '',
-          newest.outcome || '', newest.at || '', sorted.join('.')].join('/');
+          newest.outcome || '', newest.at || '', sorted.join('.'), relabelled].join('/');
 }
 
 // --- what an arrived outcome does to the words he typed -------------------------
@@ -338,7 +340,7 @@ function replyTarget(message, items) {
 // command-center.py's Sorter asks Jev (TypeSafe's decision-only model) which of
 // his three tabs a message belongs in, once per message and behind the page,
 // and serves the placement as message.sort.tab: 'decision' (Waiting on you -
-// he has to act, which includes checking something now ready for him),
+// the message itself asks him to act, checking a thing prepared for him included),
 // 'message' (Messages) or 'info' (Info). The server has already applied the
 // confidence floor - an unsure answer is served as 'message' - and never sorts
 // a recorded question. No sort on a row (no key, switched off, not asked yet,
@@ -703,10 +705,22 @@ const NOTHING_FOR_HIM = new RegExp('\\b(' + [
 // ("Held, captain — I've stopped the worker ... waits for your word", which
 // Jev read as a decision): his own order coming back is nothing to act on.
 const HOLD_ACK = /^(captain, )?(held|holding|standing by|stood down)\b/i;
+// Never when the same message asks him for something (his reply 2026-10-05,
+// on "Still waiting on your prototype pick — A, B, C or D." filed as Info:
+// "this is fucking important should go in waiting for u"): a pick or decision
+// he owes is never noise, even recalled, even under "Nothing new".
+function asksHim(text) {
+  const low = String(text || '').toLowerCase();
+  return low.includes('?') || low.includes('waiting on you') || low.includes('still yours')
+    || /\byour (pick|choice|decision|answer|go-ahead|approval)\b/.test(low)
+    || /\breply [a-d1-9]\b/.test(low)
+    || DECISION_PHRASES.some(p => low.includes(p)) || ASKS.some(p => low.includes(p));
+}
 function declaresNothingForHim(text) {
   const t = String(text || '').trim();
   const opening = t.split(/\n| — | - |[.:;!?](\s|$)/)[0].slice(0, 120);
-  return NOTHING_FOR_HIM.test(opening) || (HOLD_ACK.test(opening) && t.length <= ROUTINE_MAX);
+  return (NOTHING_FOR_HIM.test(opening) || (HOLD_ACK.test(opening) && t.length <= ROUTINE_MAX))
+    && !asksHim(t);
 }
 function looksLikeInfoOnly(text) {
   const t = String(text || '').trim();
@@ -714,7 +728,9 @@ function looksLikeInfoOnly(text) {
   if (declaresNothingForHim(t)) return true;
   if (t.endsWith('?')) return false;
   const asked = t.replace(RECAP, '');
-  if (!/[a-z0-9]/i.test(asked)) return true;  // nothing but a recap of an ask made elsewhere
+  // Nothing but a recap of an ask he still owes: never Info. Jev decides
+  // whether it waits on him; unsorted, it is a message to read.
+  if (!/[a-z0-9]/i.test(asked)) return false;
   if (looksLikeQuestion(asked) || ASKS.some(p => asked.toLowerCase().includes(p))) return false;
   const low = asked.toLowerCase();
   if (SIGNAL.test(low.replace(NEGATED, ''))) return false;
@@ -856,7 +872,7 @@ if (typeof module === 'object' && module.exports)
                      heldWith, captureBand, saidDigest, mergeMessages,
                      isItemDeferred, looksLikeClarifyingReply, inMessagesTab, onHisBoard,
                      waitingItems, waitingMessageRows, waitingCount,
-                     looksLikeInfoOnly, declaresNothingForHim, isInfoOnlyMessage, sortedTab,
+                     looksLikeInfoOnly, declaresNothingForHim, asksHim, isInfoOnlyMessage, sortedTab,
                      saidTaskId, matchAnswer, threadRows, threadStatus,
                      recordedAnswers, answeredSend, answerFor, foldAnswers, noteThreads,
                      noteMomentAnswer, NOTE_MOMENT_MINUTES };

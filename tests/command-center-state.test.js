@@ -362,8 +362,10 @@ test('a message that only recalls an ask made elsewhere is not itself waiting on
   assert.strictEqual(looksLikeQuestion('Eight diamond items are built and waiting on your word, none merged.'), true,
     'a first ask phrased as waiting on him still waits');
   assert.strictEqual(looksLikeQuestion('Three ways to install it. Reply A, B or C.'), true);
-  assert.strictEqual(isInfoOnlyMessage({ text: '*(no message - still waiting on your A, B or C for the Koin build tools)*' }), true,
-    'a bare recall of an open ask is routine');
+  // His reply 2026-10-05 on "Still waiting on your prototype pick" filed as
+  // Info: "this is fucking important should go in waiting for u".
+  assert.strictEqual(isInfoOnlyMessage({ text: '*(no message - still waiting on your A, B or C for the Koin build tools)*' }), false,
+    'a recall of an ask he still owes was filed as Info');
 });
 
 test('a long explanation written back to him is never routine, whatever quiet words it quotes', () => {
@@ -998,6 +1000,19 @@ test('a message that itself says there is nothing for him is Info always, whatev
     'Holding pattern explained: the cause is a stale lock, and here is the full finding. '
       + 'x'.repeat(400)])
     assert.strictEqual(declaresNothingForHim(text), false, text);
+  // The always-Info rule never fires on a row that also asks him something.
+  const pick = 'Still waiting on your prototype pick — A, B, C or D.';
+  assert.strictEqual(looksLikeInfoOnly(pick), false, 'a pick he owes was filed as Info');
+  assert.strictEqual(isInfoOnlyMessage({ id: 'p0', text: pick }), false);
+  for (const text of ['Nothing new, captain. Still waiting on your prototype pick — A, B, C or D.',
+    'Nothing new for you in that, captain — the mate is back up.\n\nStill yours:\n1. Koin prototype — A, B, C or D.',
+    'Nothing for you, captain — unless you want it faster: say the word and I restart it.',
+    'No change. Which one do you want?']) {
+    assert.strictEqual(declaresNothingForHim(text), false, text);
+    const row = { id: 'p1', text, sort: { tab: 'decision', choice: 'decision', confidence: 0.9 } };
+    assert.strictEqual(isInfoOnlyMessage(row), false, 'an ask was buried in Info: ' + text);
+    assert.strictEqual(messageNeedsReply(row, []), true, 'Jev could not list an ask: ' + text);
+  }
   const asked = { id: 'q1', question: true, text: 'Nothing new for you, captain — except: A or B?' };
   assert.strictEqual(isInfoOnlyMessage(asked), false);
   assert.strictEqual(messageNeedsReply(asked, []), true);
