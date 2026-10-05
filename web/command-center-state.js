@@ -708,12 +708,16 @@ function noteThreads(saidRows) {
 // once firstmate's threaded answer landed after his latest reply, "awaiting
 // firstmate" with the wait time otherwise. null when he has not replied at
 // all yet, since there is nothing here to mark.
+// A send firstmate has acknowledged (`received`: the note moved to
+// state/inbox/handled/) is no longer awaiting it, answer recorded or not - his
+// report 2026-10-05: "Why the fuck is it still showing 'Awaiting Firstmate'" on
+// notes firstmate had already read. Nothing is claimed in its place: the row
+// carries no marker until an answer threads under it and it reads "answered".
 function threadStatus(entries) {
   if (!entries || !entries.length) return null;
   const last = entries[entries.length - 1];
-  return last.kind === 'firstmate'
-    ? { state: 'answered', at: last.row.at }
-    : { state: 'awaiting', at: last.row.at };
+  if (last.kind === 'firstmate') return { state: 'answered', at: last.row.at };
+  return last.row.received ? null : { state: 'awaiting', at: last.row.at };
 }
 
 // --- Messages vs Info -------------------------------------------------------------
@@ -982,6 +986,126 @@ function itemKey(it) {
   return [it.home, it.source, it.id, it.key || ''].join('/');
 }
 
+// What he wrote ON an item, newest first as said.jsonl is served. A reply he
+// typed on a message can carry that item's key too (the answer route, for the
+// send lock), but it was written on the message and is shown only there - his
+// report 2026-10-05: "the above answer i gave against some other ticket why
+// the fuck it is coming against this?".
+const saidOnItem = (said, key) => (said || []).filter(r => !r.msg && r.item_key === key);
+
+// --- how long ago, from absolute instants only ----------------------------------
+// Every age is now minus a recorded instant. The one record that is NOT an
+// instant is a hold's "(since YYYY-MM-DD)" - a date, served as that day's
+// 00:00 UTC with since_kind 'created' - and it is worded by the day, never by
+// the hour: his report 2026-10-05, a hold filed seconds earlier read "17h" at
+// 17:05 UTC (00:05 on his own UTC+7 clock), the hours since UTC midnight.
+function ageWords(sinceEpoch, nowSecs, sinceKind) {
+  if (!sinceEpoch) return 'no recorded time';
+  const s = Math.max(0, nowSecs - sinceEpoch);
+  if (sinceKind === 'created' && s < 172800) return s < 86400 ? 'today' : '1d';
+  if (s < 3600) return Math.max(1, Math.round(s / 60)) + 'm';
+  if (s < 172800) return Math.round(s / 3600) + 'h';
+  const d = Math.round(s / 86400);
+  return d < 14 ? d + 'd' : Math.round(d / 7) + 'w';
+}
+
+// --- project · worktree · branch, on every card ---------------------------------
+// His standing rule, restated 2026-10-05 ("where is the fucking worktree and
+// branch?"): all three, always, in this order. One the record cannot name is
+// said as "… not recorded" and flagged `missing`, so the page can style it as
+// a warning and count it - never blank, never dropped.
+const shortPath = p => String(p || '').replace(/^\/home\/[^/]+(?=\/|$)/, '~');
+function cardLabels(r) {
+  return ['project', 'worktree', 'branch'].map(key => {
+    const value = knownValue((r || {})[key]);
+    return { key, missing: !value,
+             text: !value ? key + ' not recorded' : key === 'worktree' ? shortPath(value) : value };
+  });
+}
+const lacksWorkLabel = r => cardLabels(r).some(l => l.missing && l.key !== 'project');
+
+// --- the dot beside each thing he sent ------------------------------------------
+// The dot itself is unchanged (white ring, yellow, red - his own design); this
+// only decides WHICH it is, from the record. His report 2026-10-05: "if message
+// is delivred it has to trun yellow it just remains white". It used to turn
+// yellow only once firstmate had READ the note (the file moved to
+// state/inbox/handled/), so a note already delivered to firstmate's inbox sat
+// white for as long as firstmate took to read it - and for ever on a send from
+// before note ids were recorded. Delivered is now yellow; read stays yellow.
+//   going     white   the send has not answered yet, or nothing recorded what
+//                     became of it
+//   delivered yellow  said.jsonl's outcome is `sent`: it is in firstmate's inbox
+//   read      yellow  firstmate acknowledged it (`received`)
+//   failed    red     the send is known to have failed
+const SEND_DOT_WORDS = {
+  going: 'Going out — not yet confirmed delivered',
+  delivered: 'Delivered to firstmate’s inbox — not read yet',
+  read: 'Received by firstmate',
+  failed: 'Delivery failed',
+};
+function sendDot(row, pending) {
+  if (!row || !row.sid) return null;               // a draft was never sent
+  const s = sendState(row, pending);
+  if (s === 'sent') {
+    if (row.received) return { state: 'read', title: SEND_DOT_WORDS.read };
+    return { state: 'delivered', title: row.note_id ? SEND_DOT_WORDS.delivered
+      : 'Delivered to firstmate’s inbox — sent before read receipts were recorded' };
+  }
+  if (s === 'failed') return { state: 'failed', title: SEND_DOT_WORDS.failed };
+  return { state: 'going', title: s === 'sending' ? SEND_DOT_WORDS.going
+    : 'Nothing recorded what became of this send — it may or may not have arrived' };
+}
+
+// --- Work: every piece of work asked for, one row each, one project each ----
+// His ask 2026-10-05: "put all the separate projects separately". Rows come
+// from /api/work's items (the backlog joined with task meta, server-side);
+// this only words a row's state and lays the rows out. A row with no project
+// recorded groups under '' - shown as "Project unknown", never under another
+// row's project.
+const WORK_STATES = ['waiting', 'building', 'queued', 'done'];
+const WORK_STATE_WORDS = { waiting: 'Waiting on you', building: 'Being built now',
+                           queued: 'Not started', done: 'Done' };
+function workStateLabel(r, today){
+  if (r.state === 'done'){
+    const days = r.done_on ? Math.round((Date.parse(today) - Date.parse(r.done_on)) / 86400000) : NaN;
+    return days === 0 ? 'Done today' : days === 1 ? 'Done yesterday'
+      : r.done_on ? 'Done ' + r.done_on : 'Done';
+  }
+  const waits = (r.waits_on || []).map(w => w.title || w.id).join('; ');
+  const more = waits ? 'waits on ' + waits : (r.detail || '');
+  return (WORK_STATE_WORDS[r.state] || r.state || 'State not recorded') + (more ? ' — ' + more : '');
+}
+// [{key, name, rows, done}] - by project (rows ordered by state), or by state
+// (rows ordered by project). Finished rows are always kept apart in `done`, so
+// the page can fold them away; by state they are the last group's.
+function workGroups(items, sort){
+  const project = r => knownValue(r.project) || '';
+  const rank = r => { const i = WORK_STATES.indexOf(r.state); return i < 0 ? WORK_STATES.length : i; };
+  const byProject = (a, b) => (!project(a) - !project(b)) || project(a).localeCompare(project(b));
+  const rows = (items || []).slice();
+  if (sort === 'state'){
+    rows.sort((a, b) => byProject(a, b) || String(a.id).localeCompare(String(b.id)));
+    const live = WORK_STATES.filter(s => s !== 'done').map(s => ({ key: s,
+      name: WORK_STATE_WORDS[s], rows: rows.filter(r => r.state === s), done: [] }));
+    const other = rows.filter(r => !WORK_STATES.includes(r.state));
+    if (other.length) live.push({ key: 'other', name: 'State not recorded', rows: other, done: [] });
+    return live.filter(g => g.rows.length).concat(
+      [{ key: 'done', name: 'Done', rows: [], done: rows.filter(r => r.state === 'done') }]
+        .filter(g => g.done.length));
+  }
+  rows.sort((a, b) => byProject(a, b) || rank(a) - rank(b)
+    || String(b.done_on || '').localeCompare(String(a.done_on || ''))
+    || String(a.id).localeCompare(String(b.id)));
+  const groups = [];
+  for (const r of rows){
+    let g = groups[groups.length - 1];
+    if (!g || g.key !== project(r))
+      groups.push(g = { key: project(r), name: project(r) || 'Project unknown', rows: [], done: [] });
+    (r.state === 'done' ? g.done : g.rows).push(r);
+  }
+  return groups;
+}
+
 if (typeof module === 'object' && module.exports)
   module.exports = { knownValue, pollFacts, tense, transportFailure, verdictFor,
                      releaseVerdicts, itemKey, shapeMessage, orderRows, archivedEpoch,
@@ -996,4 +1120,7 @@ if (typeof module === 'object' && module.exports)
                      looksLikeInfoOnly, declaresNothingForHim, asksHim, isInfoOnlyMessage, sortedTab,
                      saidTaskId, matchAnswer, threadRows, threadStatus,
                      recordedAnswers, answeredSend, answerFor, foldAnswers, noteThreads,
-                     noteMomentAnswer, NOTE_MOMENT_MINUTES };
+                     noteMomentAnswer, NOTE_MOMENT_MINUTES,
+                     workGroups, workStateLabel, WORK_STATE_WORDS, saidOnItem,
+                     sendDot, SEND_DOT_WORDS,
+                     ageWords, shortPath, cardLabels, lacksWorkLabel };

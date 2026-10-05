@@ -14,7 +14,8 @@ const {
   waitingCount, waitingMessageRows, inMessagesTab, onHisBoard,
   isInfoOnlyMessage, sortedTab, saidTaskId, matchAnswer, threadRows, threadStatus,
   recordedAnswers, answeredSend, answerFor, foldAnswers, noteThreads, noteMomentAnswer,
-  namesPr, mergeAskOnly, prAsks, markRepeats,
+  namesPr, mergeAskOnly, prAsks, markRepeats, workGroups, workStateLabel, saidOnItem, sendDot,
+  ageWords, cardLabels, lacksWorkLabel,
 } = require(path.join(__dirname, '..', 'web', 'command-center-state.js'));
 
 // Quiet on success: tests/command-center.test.sh runs this and reports the
@@ -1106,6 +1107,103 @@ test('the first report of a pull request is Info; later still-waiting notes and 
   assert.strictEqual(isInfoOnlyMessage(Object.assign({}, by.m3, { question: true })), false);
   // A still-waiting note about a pull request never reported is not a repeat.
   assert.strictEqual(markRepeats([{ id: 'x', text: 'PR 7 is still waiting on your merge word.' }])[0].repeat, false);
+});
+
+// His ask 2026-10-05: "put all the separate projects separately". Work rows
+// group by their own one project; a row with none is its own group, last.
+test('work rows group by their own project, finished ones kept apart', () => {
+  const items = [
+    { id: 'a2', project: 'alpha', state: 'queued', waits_on: [{ id: 'a1', title: 'Build A' }] },
+    { id: 'b1', project: 'beta', state: 'waiting', detail: 'Pick one' },
+    { id: 'a1', project: 'alpha', state: 'building' },
+    { id: 'a0', project: 'alpha', state: 'done', done_on: '2026-10-05' },
+    { id: 'x1', project: null, state: 'queued' },
+    { id: 'x2', project: 'unknown', state: 'building' },
+  ];
+  const groups = workGroups(items, 'project');
+  assert.deepStrictEqual(groups.map(g => [g.name, g.rows.map(r => r.id), g.done.map(r => r.id)]), [
+    ['alpha', ['a1', 'a2'], ['a0']],
+    ['beta', ['b1'], []],
+    ['Project unknown', ['x2', 'x1'], []],
+  ]);
+  // Every row is in exactly one group, whatever the sort.
+  for (const sort of ['project', 'state'])
+    assert.strictEqual(workGroups(items, sort).reduce((n, g) => n + g.rows.length + g.done.length, 0),
+      items.length, sort);
+  assert.deepStrictEqual(workGroups(items, 'state').map(g => [g.name, g.rows.length, g.done.length]),
+    [['Waiting on you', 1, 0], ['Being built now', 2, 0], ['Not started', 2, 0], ['Done', 0, 1]]);
+  assert.strictEqual(workStateLabel(items[0], '2026-10-05'), 'Not started — waits on Build A');
+  assert.strictEqual(workStateLabel(items[1], '2026-10-05'), 'Waiting on you — Pick one');
+  assert.strictEqual(workStateLabel(items[3], '2026-10-05'), 'Done today');
+  assert.strictEqual(workStateLabel(items[3], '2026-10-06'), 'Done yesterday');
+  assert.strictEqual(workStateLabel(items[3], '2026-10-09'), 'Done 2026-10-05');
+});
+
+// His report 2026-10-05: "the above answer i gave against some other ticket
+// why the fuck it is coming against this?" - a reply typed on a message was
+// threaded under the hold its task carried.
+test('a reply written on a message is never shown under an item', () => {
+  const key = 'main/hold/t1/t1';
+  const said = [{ sid: 'b', item_key: key, text: 'written on the item' },
+                { sid: 'a', msg: 'm1', item_key: key, text: 'written on the message' }];
+  assert.deepStrictEqual(saidOnItem(said, key).map(r => r.sid), ['b']);
+});
+
+// His report 2026-10-05: a note already in firstmate's inbox stayed the same
+// white ring as one still going out. Each recorded fact has its own state.
+test('the sent marker follows the record: going, delivered, read, failed', () => {
+  const dot = (row, pending) => (sendDot(row, pending) || {}).state || null;
+  assert.strictEqual(dot({ kind: 'draft' }), null);
+  assert.strictEqual(dot({ sid: 'a', outcome: 'sending' }), 'going');
+  assert.strictEqual(dot({ sid: 'a', outcome: 'unknown' }), 'going');
+  assert.strictEqual(dot({ sid: 'a', outcome: 'sent', note_id: 'n1' }), 'delivered');
+  assert.strictEqual(dot({ sid: 'a', outcome: 'sent' }), 'delivered', 'a send from before note ids');
+  assert.strictEqual(dot({ sid: 'a', outcome: 'sent', note_id: 'n1', received: true }), 'read');
+  assert.strictEqual(dot({ sid: 'a', outcome: 'failed' }), 'failed');
+  // Every state says what it means in words.
+  for (const row of [{ sid: 'a', outcome: 'sending' }, { sid: 'a', outcome: 'unknown' },
+                     { sid: 'a', outcome: 'sent' }, { sid: 'a', outcome: 'failed' }])
+    assert.ok(sendDot(row).title.length > 10);
+});
+
+// His report 2026-10-05, at 00:05 on his own clock (UTC+7), 17:05 UTC: rows
+// filed seconds earlier read "17h". A hold's "(since 2026-10-05)" is a date,
+// served as that day's 00:00 UTC - the hours since UTC midnight are not an age.
+test('an age is now minus a recorded instant; a date-only record is worded by the day', () => {
+  const now = Date.parse('2026-10-05T17:05:00Z') / 1000;       // 2026-10-06 00:05 +07:00
+  const filedToday = Date.parse('2026-10-05T00:00:00Z') / 1000; // "(since 2026-10-05)"
+  assert.strictEqual(ageWords(filedToday, now, 'created'), 'today', 'not 17h');
+  assert.strictEqual(ageWords(filedToday - 86400, now, 'created'), '1d');
+  assert.strictEqual(ageWords(filedToday - 5 * 86400, now, 'created'), '6d');
+  // A real instant keeps its real age on either side of his midnight.
+  const set = Date.parse('2026-10-05T16:51:13Z') / 1000;
+  assert.strictEqual(ageWords(set, now, 'hold-set'), '14m');
+  assert.strictEqual(ageWords(set, Date.parse('2026-10-05T16:59:13Z') / 1000, 'hold-set'), '8m');
+  assert.strictEqual(ageWords(now - 20, now), '1m');
+  assert.strictEqual(ageWords(Date.parse('2026-10-05T00:05:00Z') / 1000, now), '17h');
+  assert.strictEqual(ageWords(null, now), 'no recorded time');
+});
+
+// His report 2026-10-05: "where is the fucking worktree and branch?"
+test('every card names project, worktree and branch, and says which is not recorded', () => {
+  assert.deepStrictEqual(cardLabels({ project: 'koin', worktree: '/home/tds/p/koin', branch: 'develop' })
+    .map(l => [l.text, l.missing]), [['koin', false], ['~/p/koin', false], ['develop', false]]);
+  assert.deepStrictEqual(cardLabels({ project: 'koin', worktree: 'unknown', branch: null })
+    .map(l => [l.text, l.missing]),
+    [['koin', false], ['worktree not recorded', true], ['branch not recorded', true]]);
+  assert.deepStrictEqual(cardLabels({}).map(l => l.text),
+    ['project not recorded', 'worktree not recorded', 'branch not recorded']);
+  assert.strictEqual(lacksWorkLabel({ project: 'koin', worktree: '~/p/koin', branch: 'develop' }), false);
+  assert.strictEqual(lacksWorkLabel({ project: 'koin', worktree: '~/p/koin' }), true);
+});
+
+// His report 2026-10-05: notes firstmate had read still said "awaiting firstmate".
+test('a send firstmate has acknowledged is no longer awaiting firstmate', () => {
+  const sent = { sid: 'a', kind: 'note', at: '2026-10-05T17:09:13Z', note_id: 'n1', outcome: 'sent' };
+  assert.strictEqual(threadStatus([{ kind: 'you', row: sent }]).state, 'awaiting');
+  assert.strictEqual(threadStatus([{ kind: 'you', row: Object.assign({ received: true }, sent) }]), null);
+  assert.strictEqual(threadStatus([{ kind: 'you', row: sent },
+    { kind: 'firstmate', row: { id: 'm1', at: '2026-10-05T17:09:58Z' } }]).state, 'answered');
 });
 
 process.exit(failures ? 1 : 0);
