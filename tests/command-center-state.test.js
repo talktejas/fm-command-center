@@ -1109,3 +1109,24 @@ test('the first report of a pull request is Info; later still-waiting notes and 
 });
 
 process.exit(failures ? 1 : 0);
+
+// His report 2026-10-05 ("why the fuck pr is coming under input?"): a recorded
+// question on a task whose pull request waits in the PRs data, asking only for
+// the merge, is shown in that PR row and never under Action - even when its
+// words name no pull request URL and match no merge wording test. The proof is
+// message m20261005T164859Z-36852 ("say \"merge 38\"").
+test('a recorded merge ask on a task with a waiting pull request is never under Action', () => {
+  const pr = { id: 'fm-jev-wake-triage', url: 'https://github.com/talktejas/firstmate/pull/38' };
+  const proof = { id: 'm20261005T164859Z-36852', question: true, task: 'fm-jev-wake-triage',
+    text: 'Captain, one merge is ready for your word (firstmate): '
+      + 'https://github.com/talktejas/firstmate/pull/38 - say "merge 38".\n\n'
+      + '1. **What it does:** Jev quietly closes the routine re-checks of a pull request.' };
+  assert.strictEqual(mergeAskOnly(proof, [pr]), true);
+  assert.deepStrictEqual(waitingMessageRows([proof], [], [], [pr]).map(m => m.id), []);
+  assert.strictEqual(inMessagesTab(proof, [], [], [pr]), false, 'one record, one tab');
+  assert.deepStrictEqual(prAsks(pr, [proof], [], []).map(m => m.id), [proof.id]);
+  assert.strictEqual(waitingCount([], [proof], [], 0, [pr]), 0);
+  // Without that pull request in the PRs data, it is a plain recorded question again.
+  assert.strictEqual(mergeAskOnly(proof, []), false);
+  assert.strictEqual(waitingCount([], [proof], [], 0, []), 1);
+});

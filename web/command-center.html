@@ -947,7 +947,7 @@ function waitingMessages(){
   // touches none of those, so that can never shrink this list on its own (his
   // report 2026-09-24: "i had two items in waiting on you... clicked one... now
   // there was only 1"). A reply moves only the message it answers, to Messages.
-  return waitingMessageRows(state.messages, state.said, state.view.items)
+  return waitingMessageRows(state.messages, state.said, state.view.items, state.prs)
     .filter(m => !q || haystack(m).includes(q));
 }
 
@@ -1335,7 +1335,7 @@ function renderList(){
   // waitingCount (bin/command-center-state.js) is pure over the scanned items,
   // the messages and what he said - opening a row or typing into it touches
   // neither, so this cannot move on its own (see waitingMessages above).
-  $('#n-waiting').textContent = waitingCount(items, state.messages, state.said, nowSecs());
+  $('#n-waiting').textContent = waitingCount(items, state.messages, state.said, nowSecs(), state.prs);
   // The count is what needs his attention right now: a decision waiting on
   // his call, or work already underway that a "0" badge would hide entirely -
   // Recently landed and Charted next stay read-only context, not counted.

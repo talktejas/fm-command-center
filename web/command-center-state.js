@@ -429,7 +429,7 @@ function messageNeedsReply(message, saidRows, items) {
 function inMessagesTab(message, saidRows, items, prs) {
   if (message.held) return false;
   if (!messageNeedsReply(message, saidRows, items)) return true;
-  return mergeAskOnly(message) && !(prs || []).some(pr => namesPr(message, pr));
+  return mergeAskOnly(message, prs) ? !prRowFor(message, prs) : false;
 }
 
 // --- pull requests: their own tab, never Input ------------------------------------
@@ -453,16 +453,29 @@ const MERGE_ASK = /\b(your|the captain's) merge\b|\bmerge (it|them|this|word|cal
 // pick, options or other ask beside the merge.
 // ponytail: wording heuristics over firstmate's own phrasing; if firstmate
 // ever records a merge ask as its own kind, read that field instead.
-function mergeAskOnly(message) {
+// Structural first (his report 2026-10-05, "why the fuck pr is coming under
+// input?"): a recorded question on a task whose pull request waits in the PRs
+// data (prs) is a merge ask when its words ask for a merge and nothing else -
+// no wording test on the merge itself, which missed "say merge 38". Only a
+// message with no such task falls back to the wording test.
+const MERGE_VERB = /\b(merge|land|approve)\b/i;
+function mergeAskOnly(message, prs) {
   const t = prText(message);
-  if (!PR_REF.test(t) || !MERGE_ASK.test(t)) return false;
   const low = t.toLowerCase();
   if (ASKS.some(p => low.includes(p)) || /\breply [a-d1-9]\b/.test(low)
       || /\b[a-d1-9],? or [a-d1-9]\b/.test(low)) return false;
-  return (t.match(/[^.!?\n]*\?/g) || []).every(q => /\bmerge/i.test(q));
+  const onlyMerge = (t.match(/[^.!?\n]*\?/g) || []).every(q => /\bmerge/i.test(q));
+  if (message && message.question && message.task
+      && (prs || []).some(pr => pr.id === message.task) && MERGE_VERB.test(t)) return onlyMerge;
+  return PR_REF.test(t) && MERGE_ASK.test(t) && onlyMerge;
+}
+// The waiting pull request row a merge ask belongs in, or null.
+function prRowFor(message, prs) {
+  return (prs || []).find(pr => (namesPr(message, pr) || (message && message.task === pr.id))
+    && mergeAskOnly(message, [pr])) || null;
 }
 function prAsks(pr, messages, saidRows, items) {
-  return (messages || []).filter(m => !m.held && namesPr(m, pr) && mergeAskOnly(m)
+  return (messages || []).filter(m => !m.held && prRowFor(m, [pr]) === pr
     && messageNeedsReply(m, saidRows, items));
 }
 
@@ -852,14 +865,14 @@ function waitingItems(items, nowSecs) {
   return (items || []).filter(it => onHisBoard(it) &&
     !isItemDeferred(it, nowSecs) && !it.archived && !it.held);
 }
-function waitingMessageRows(messages, saidRows, items) {
+function waitingMessageRows(messages, saidRows, items, prs) {
   return (messages || [])
-    .filter(m => !m.held && messageNeedsReply(m, saidRows, items) && !mergeAskOnly(m))
+    .filter(m => !m.held && messageNeedsReply(m, saidRows, items) && !mergeAskOnly(m, prs))
     .map(m => Object.assign({__msg: true}, m));
 }
-function waitingCount(items, messages, saidRows, nowSecs) {
+function waitingCount(items, messages, saidRows, nowSecs, prs) {
   return waitingItems(items, nowSecs).length
-    + waitingMessageRows(messages, saidRows, items).length;
+    + waitingMessageRows(messages, saidRows, items, prs).length;
 }
 
 // --- may the message list claim to be complete? ---------------------------------
