@@ -188,6 +188,11 @@
     font-size:11.5px;color:var(--dim);line-height:1.45}
 
   .rail-foot{border-top:1px solid var(--line2);padding:9px 16px;background:#fbfcfd}
+  .msg-table{overflow-x:auto;margin:8px 0;max-width:100%;white-space:normal}
+  .msg-table table{border-collapse:collapse;font-size:12.5px;width:100%}
+  .msg-table th,.msg-table td{border:1px solid var(--line);padding:5px 8px;text-align:left;vertical-align:top}
+  .msg-table th{background:var(--line2)}
+  .msg-table tbody tr:nth-child(even){background:#fbfcfd}
   .capture-note{font-size:11.5px;color:var(--dim);margin:0 0 7px}
   .notebtn{width:100%;border:1px dashed var(--line);background:#fff;border-radius:var(--radius);
     padding:8px;font-size:12.5px;color:var(--dim);cursor:pointer}
@@ -368,7 +373,7 @@
         <button class="clr" id="clr" hidden>×</button>
       </div>
       <div class="tabs" role="tablist">
-        <button class="tab" role="tab" data-tab="waiting" aria-selected="false" title="Only what needs your answer or decision">Input <span class="n" id="n-waiting"></span></button>
+        <button class="tab" role="tab" data-tab="waiting" aria-selected="false" title="Only what needs your answer or decision">Action <span class="n" id="n-waiting"></span></button>
         <button class="tab" role="tab" data-tab="messages" aria-selected="true" title="Important information from firstmate">Info <span class="n" id="n-messages"></span></button>
         <button class="tab" role="tab" data-tab="info" aria-selected="false" title="Repeats and nothing-new notes, kept so you can check nothing important was ignored">Ignore <span class="n" id="n-info"></span></button>
         <button class="tab" role="tab" data-tab="prs" aria-selected="false" title="Pull requests waiting for your merge word">PRs <span class="n" id="n-prs"></span></button>
@@ -543,8 +548,25 @@ function linkify(escapedText){
 // multi-paragraph body (blank-line-separated, single newlines kept as <br>,
 // each paragraph escaped and linked the same way).
 const linked = t => linkify(esc(t));
-const para = t => linked(t).split(/\n{2,}/)
-  .map(x => `<p>${x.replace(/\n/g, '<br>')}</p>`).join('');
+// A Markdown table in a message (his report 2026-10-05: "it doesnt display
+// tables properly here") renders as a real table, inside its own scroll box so
+// a wide one never breaks the pane. Cells get the same escaping and links as
+// any other text, and only **bold** is read from the markup - the text is
+// escaped before anything here looks at it, so no raw HTML gets through.
+const isTableBlock = lines => lines.length >= 2 && /\|/.test(lines[0])
+  && /^\s*\|?\s*:?-{3,}:?\s*(\|\s*:?-{3,}:?\s*)*\|?\s*$/.test(lines[1]);
+const tableRow = line => line.trim().replace(/^\|/, '').replace(/\|$/, '').split('|')
+  .map(c => linkify(c.trim()).replace(/\*\*(.+?)\*\*/g, '<b>$1</b>'));
+const tableHtml = lines => {
+  const [head, ...body] = lines.filter((l, i) => i !== 1);
+  return `<div class="msg-table"><table><thead><tr>${tableRow(head).map(c => `<th>${c}</th>`).join('')}</tr></thead>`
+    + `<tbody>${body.map(l => `<tr>${tableRow(l).map(c => `<td>${c}</td>`).join('')}</tr>`).join('')}</tbody></table></div>`;
+};
+const para = t => esc(t).split(/\n{2,}/).map(block => {
+  const lines = block.split('\n');
+  return isTableBlock(lines) ? tableHtml(lines)
+    : `<p>${linkify(block).replace(/\n/g, '<br>')}</p>`;
+}).join('');
 
 const state = {
   tab:'messages', group:'project', sfilter:'', q:'', project:'',
@@ -1350,7 +1372,7 @@ function renderHold(){
   const msgs = ordered(heldMessagesList().concat(heldNotes()).filter(inProject), true);
   const sections = [
     ['Info', msgs, m => m.__note ? noteRow(m) : messageRow(m, 'held')],
-    ['Input items', items, it => itemRow(it, 'held')],
+    ['Action items', items, it => itemRow(it, 'held')],
   ].filter(([, rows]) => rows.length);
   paintList(sections.length
     ? sections.map(([title, rows, fn]) => `<div class="worksection"><h3>${esc(title)}
@@ -1620,7 +1642,7 @@ function workChartedRow(r){
 // word, one plain line each. Read-only here - each is answered on its own tab.
 function workDormant(){
   const asked = (state.work.captains_call || []).filter(r => !workCalls().includes(r))
-    .map(r => Object.assign({}, r, {doing: 'Waiting for your answer — under Input'}));
+    .map(r => Object.assign({}, r, {doing: 'Waiting for your answer — under Action'}));
   const prs = state.prs.map(r => Object.assign({}, r, {pr: r.url,
     doing: 'Pull request open, waiting for your merge word — under PRs'}));
   return asked.concat(prs);
@@ -2081,7 +2103,7 @@ function renderMain(){
   if (!it){
     paintMain('', `<div class="blank"><strong>Pick something on the left.</strong>
       <span>Everything firstmate has said to you, newest first, with a box to reply in.<br>
-      <b>Input</b> is only what needs your answer or decision; <b>PRs</b> is what waits for your merge word.<br>
+      <b>Action</b> is only what needs your answer or decision; <b>PRs</b> is what waits for your merge word.<br>
       <b>Ignore</b> keeps the repeats and nothing-new notes, so you can check nothing important was dropped.<br>
       New things appear on their own — you never reload, and you never get a new link.</span></div>`);
     return;
