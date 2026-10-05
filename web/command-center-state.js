@@ -337,7 +337,8 @@ function replyTarget(message, items) {
 // --- Jev's sorting ----------------------------------------------------------------
 // command-center.py's Sorter asks Jev (TypeSafe's decision-only model) which of
 // his three tabs a message belongs in, once per message and behind the page,
-// and serves the placement as message.sort.tab: 'decision' (Waiting on you),
+// and serves the placement as message.sort.tab: 'decision' (Waiting on you -
+// he has to act, which includes checking something now ready for him),
 // 'message' (Messages) or 'info' (Info). The server has already applied the
 // confidence floor - an unsure answer is served as 'message' - and never sorts
 // a recorded question. No sort on a row (no key, switched off, not asked yet,
@@ -403,7 +404,10 @@ function messageNeedsReply(message, saidRows, items) {
   // is a message to read, and looksLikeQuestion now only keeps it out of Info.
   // The one other way in is Jev reading the message as a decision, at or above
   // the confidence floor (sortedTab); it leaves the same way, by his reply.
-  if (!message.question && sortedTab(message) !== 'decision') return false;
+  // Never for a row that itself says there is nothing for him (rule 0 of
+  // looksLikeInfoOnly): that one is Info whatever Jev read it as.
+  if (!message.question && (sortedTab(message) !== 'decision'
+      || declaresNothingForHim(message.text || message.title))) return false;
   const named = replyTarget(message, items).item;
   if (named && named.closed) return false;
   const latest = (saidRows || []).find(r => r.msg === message.id);
@@ -644,6 +648,8 @@ function threadStatus(entries) {
 //      "waiting on your word"                                 -> Messages
 //   3. anywhere in it: an outcome, a finding, a failure, a
 //      change, or a review/merge ask (SIGNAL below)           -> Messages
+//   0. its opening words declare nothing in it is for him
+//      (declaresNothingForHim) - before Jev too               -> Info
 //   4. says there is nothing new, or reads as an ack or as
 //      progress with no result (NOISE below)                  -> Info
 //   5. anything else                                          -> Messages
@@ -681,9 +687,31 @@ const NOISE = new RegExp([
 // longer than this that NOISE caught was an explanation, a finding or a plan
 // written back to him ("you're right, and here is why..."), never routine.
 const ROUTINE_MAX = 400;
+// Rule 0, before every rule above and before Jev (his replies 2026-10-05, on
+// "Nothing for you, captain — another GitHub read timing out" and on one whose
+// body named a failing check and its evidence: "these are just info", "Nothing
+// for you, captain all these kind go in info"): a message whose own opening
+// words declare there is nothing in it for him is Info ALWAYS, whatever the
+// rest of it says and whatever Jev read it as. Only the opening clause counts -
+// "nothing changed" deep in a report declares nothing about the report.
+const NOTHING_FOR_HIM = new RegExp('\\b(' + [
+  'nothing (new|changed)', 'nothing (new |here |in (this|that) )?for (you|the captain)',
+  'nothing (is )?(needed|required) from (you|the captain)', 'nothing (else )?needs you',
+  'nothing to report', 'no change', 'no action (needed|required)',
+].join('|') + ')\\b(?! will)', 'i');
+// So is a short bare acknowledgement that it has stopped as he told it to
+// ("Held, captain — I've stopped the worker ... waits for your word", which
+// Jev read as a decision): his own order coming back is nothing to act on.
+const HOLD_ACK = /^(captain, )?(held|holding|standing by|stood down)\b/i;
+function declaresNothingForHim(text) {
+  const t = String(text || '').trim();
+  const opening = t.split(/\n| — | - |[.:;!?](\s|$)/)[0].slice(0, 120);
+  return NOTHING_FOR_HIM.test(opening) || (HOLD_ACK.test(opening) && t.length <= ROUTINE_MAX);
+}
 function looksLikeInfoOnly(text) {
   const t = String(text || '').trim();
   if (!t) return false;
+  if (declaresNothingForHim(t)) return true;
   if (t.endsWith('?')) return false;
   const asked = t.replace(RECAP, '');
   if (!/[a-z0-9]/i.test(asked)) return true;  // nothing but a recap of an ask made elsewhere
@@ -699,6 +727,8 @@ function isInfoOnlyMessage(message) {
   // An answer to something he sent is never noise: it is how an answer to a
   // message he already archived comes back to him (answerFor below).
   if (message.answers) return false;
+  // Rule first, Jev second: Jev may never lift such a row out of Info.
+  if (declaresNothingForHim(message.text || message.title)) return true;
   // Jev's placement, when there is one, decides Messages vs Info; a row it
   // read as a decision is in Messages once it no longer waits on him.
   const tab = sortedTab(message);
@@ -826,7 +856,7 @@ if (typeof module === 'object' && module.exports)
                      heldWith, captureBand, saidDigest, mergeMessages,
                      isItemDeferred, looksLikeClarifyingReply, inMessagesTab, onHisBoard,
                      waitingItems, waitingMessageRows, waitingCount,
-                     looksLikeInfoOnly, isInfoOnlyMessage, sortedTab,
+                     looksLikeInfoOnly, declaresNothingForHim, isInfoOnlyMessage, sortedTab,
                      saidTaskId, matchAnswer, threadRows, threadStatus,
                      recordedAnswers, answeredSend, answerFor, foldAnswers, noteThreads,
                      noteMomentAnswer, NOTE_MOMENT_MINUTES };
