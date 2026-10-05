@@ -41,4 +41,6 @@ loginctl enable-linger "$USER"
 tests/command-center.test.sh
 ```
 
+`node tests/command-center-state.test.js` (the page's rules) and `python3 tests/command-center-sort.test.py` (Jev sorting, network stubbed) run on their own too.
+
 Runs against a throwaway firstmate home and a real firstmate checkout (`$FM_FIRSTMATE_ROOT`/`--firstmate-root`, default as above) for the scripts it calls out to.

@@ -12,7 +12,7 @@ const {
   listSignature, mayRelease, logRead, sendState, sendKeys, sameWords,
   heldWith, captureBand, saidDigest, mergeMessages,
   waitingCount, waitingMessageRows, inMessagesTab, onHisBoard,
-  isInfoOnlyMessage, saidTaskId, matchAnswer, threadRows, threadStatus,
+  isInfoOnlyMessage, sortedTab, saidTaskId, matchAnswer, threadRows, threadStatus,
   recordedAnswers, answeredSend, answerFor, foldAnswers, noteThreads, noteMomentAnswer,
 } = require(path.join(__dirname, '..', 'web', 'command-center-state.js'));
 
@@ -908,6 +908,63 @@ test('a note is matched to what firstmate said next, and to nothing after his ne
   const onTask = shapeMessage({ id: 't', at: '2026-09-28T11:34:00Z', title: 'about koin', task: 'koin' });
   const replyToQ = { kind: 'reply', sid: 's0', msg: 'q', at: '2026-09-28T11:32:00Z', text: 'yes' };
   assert.strictEqual(noteMomentAnswer(note, [asked, onTask, reply], [note, replyToQ]).id, 'r');
+});
+
+// --- Jev's sorting (message.sort, served by command-center.py's Sorter) ----------
+// His three tabs 2026-10-05: "Waiting on you is things u need input / decisions
+// from me. messages are messages that i need to see / review. info is just
+// messages routine messages like nothing to review, its working etc."
+const sortedAs = (tab, extra) => Object.assign(
+  { id: 'j1', text: 'The audit is in.', sort: { tab, choice: tab, confidence: 0.9 } }, extra);
+
+test('a row Jev has not sorted is placed exactly as before', () => {
+  for (const sort of [undefined, null, {}, { tab: 'elsewhere' }]) {
+    assert.strictEqual(sortedTab({ sort }), null);
+    assert.strictEqual(messageNeedsReply({ id: 'p', text: 'Reply 1 or 2?', sort }, []), false);
+    assert.strictEqual(isInfoOnlyMessage({ text: 'Still running.', sort }), true);
+    assert.strictEqual(isInfoOnlyMessage({ text: 'The audit is in.', sort }), false);
+  }
+});
+
+test('Jev moves an unflagged row between Messages and Info', () => {
+  // Against what the phrase lists alone would say, both ways.
+  assert.strictEqual(isInfoOnlyMessage({ text: 'Still running.', sort: sortedAs('message').sort }), false);
+  assert.strictEqual(isInfoOnlyMessage(sortedAs('info')), true);
+  assert.strictEqual(inMessagesTab(sortedAs('info'), [], []), true, 'Info is still a Messages-side row');
+  assert.strictEqual(messageNeedsReply(sortedAs('info'), []), false);
+  assert.strictEqual(messageNeedsReply(sortedAs('message'), []), false);
+});
+
+test('a row Jev reads as a decision waits on him, in one tab, until he answers', () => {
+  const row = sortedAs('decision');
+  assert.strictEqual(messageNeedsReply(row, []), true);
+  assert.strictEqual(inMessagesTab(row, [], []), false, 'listed in two tabs');
+  assert.deepStrictEqual(waitingMessageRows([row], [], []).map(m => m.id), ['j1']);
+  assert.strictEqual(waitingCount([], [row], [], NOW), 1);
+  // A reply that only asks back leaves it; one that decides moves it to Messages.
+  assert.strictEqual(messageNeedsReply(row, [{ msg: 'j1', text: 'Which one?' }]), true);
+  const decided = [{ msg: 'j1', text: 'Go with the first.' }];
+  assert.strictEqual(messageNeedsReply(row, decided), false);
+  assert.strictEqual(inMessagesTab(row, decided, []), true);
+  assert.strictEqual(isInfoOnlyMessage(row), false, 'an answered decision was filed as Info');
+});
+
+test('a recorded question is never Jev\'s to move', () => {
+  // The server never sorts one; even a sort that slipped through changes nothing.
+  for (const tab of ['info', 'message']) {
+    const flagged = sortedAs(tab, { question: true });
+    assert.strictEqual(messageNeedsReply(flagged, []), true, tab + ' took it out of Waiting on you');
+    assert.strictEqual(isInfoOnlyMessage(flagged), false);
+  }
+  assert.strictEqual(isInfoOnlyMessage(sortedAs('info', { answers: 'note-1' })), false,
+    'an answer to his own send was filed as Info');
+});
+
+test('a sort that arrives on a later poll changes the list signature', () => {
+  const before = [{ id: 'a', at: '2026-10-05T10:00:00Z' }, { id: 'b', at: '2026-10-05T09:00:00Z' }];
+  const after = [before[0], Object.assign({}, before[1], { sort: { tab: 'info' } })];
+  assert.notStrictEqual(listSignature(before), listSignature(after));
+  assert.strictEqual(listSignature(before), listSignature(before.slice()));
 });
 
 process.exit(failures ? 1 : 0);

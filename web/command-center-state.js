@@ -268,10 +268,15 @@ function mayRelease(read, held, row, now, windowMs) {
 // their newest row is their identity; a poll that finds the same one must not
 // re-render, or the open reply box is rebuilt under his cursor every few
 // seconds.
+//
+// A message Jev sorts after it was first served changes tab with neither end
+// of the list moving, so how many rows sit in each sorted tab is part of the
+// identity too - or that poll looks unchanged and the row never moves.
 function listSignature(rows) {
   const newest = (rows || [])[0] || {};
+  const sorted = SORT_TABS.map(tab => (rows || []).filter(r => sortedTab(r) === tab).length);
   return [(rows || []).length, newest.sid || newest.id || '',
-          newest.outcome || '', newest.at || ''].join('/');
+          newest.outcome || '', newest.at || '', sorted.join('.')].join('/');
 }
 
 // --- what an arrived outcome does to the words he typed -------------------------
@@ -329,6 +334,21 @@ function replyTarget(message, items) {
                       : { kind: 'note', settled: true };
 }
 
+// --- Jev's sorting ----------------------------------------------------------------
+// command-center.py's Sorter asks Jev (TypeSafe's decision-only model) which of
+// his three tabs a message belongs in, once per message and behind the page,
+// and serves the placement as message.sort.tab: 'decision' (Waiting on you),
+// 'message' (Messages) or 'info' (Info). The server has already applied the
+// confidence floor - an unsure answer is served as 'message' - and never sorts
+// a recorded question. No sort on a row (no key, switched off, not asked yet,
+// the call failed) reads as null here, and the rules below place it exactly as
+// they did before Jev: this is one more input to them, not a second set.
+const SORT_TABS = ['decision', 'message', 'info'];
+function sortedTab(message) {
+  const tab = message && message.sort && message.sort.tab;
+  return SORT_TABS.includes(tab) ? tab : null;
+}
+
 // --- does a captured message need him to decide something? ----------------------
 // A message the recorder marked as a QUESTION always does (message.question,
 // set by fm-captain-message-sweep.py, read by replyTarget above). His report
@@ -381,7 +401,9 @@ function messageNeedsReply(message, saidRows, items) {
   // RECORDED as a question waits on him. Its words never promote a plain
   // capture - a status update that ends "?" or recaps "until you say the word"
   // is a message to read, and looksLikeQuestion now only keeps it out of Info.
-  if (!message.question) return false;
+  // The one other way in is Jev reading the message as a decision, at or above
+  // the confidence floor (sortedTab); it leaves the same way, by his reply.
+  if (!message.question && sortedTab(message) !== 'decision') return false;
   const named = replyTarget(message, items).item;
   if (named && named.closed) return false;
   const latest = (saidRows || []).find(r => r.msg === message.id);
@@ -677,6 +699,10 @@ function isInfoOnlyMessage(message) {
   // An answer to something he sent is never noise: it is how an answer to a
   // message he already archived comes back to him (answerFor below).
   if (message.answers) return false;
+  // Jev's placement, when there is one, decides Messages vs Info; a row it
+  // read as a decision is in Messages once it no longer waits on him.
+  const tab = sortedTab(message);
+  if (tab) return tab === 'info';
   return looksLikeInfoOnly(message.text || message.title);
 }
 
@@ -800,7 +826,7 @@ if (typeof module === 'object' && module.exports)
                      heldWith, captureBand, saidDigest, mergeMessages,
                      isItemDeferred, looksLikeClarifyingReply, inMessagesTab, onHisBoard,
                      waitingItems, waitingMessageRows, waitingCount,
-                     looksLikeInfoOnly, isInfoOnlyMessage,
+                     looksLikeInfoOnly, isInfoOnlyMessage, sortedTab,
                      saidTaskId, matchAnswer, threadRows, threadStatus,
                      recordedAnswers, answeredSend, answerFor, foldAnswers, noteThreads,
                      noteMomentAnswer, NOTE_MOMENT_MINUTES };
