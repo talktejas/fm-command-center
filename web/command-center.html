@@ -799,6 +799,10 @@ function setNoteHeld(r, held){
 // 2026-09-28). Items are normalized here too, since they skip shapeMessage.
 const NO_PROJECT = 'Not recorded';
 const projectOf = it => knownValue(it.project) || NO_PROJECT;
+// Jev's project replaced the label on this row (project_by); what was
+// recorded with the message is still said, never dropped.
+const recordedProject = m => !m.project_by ? ''
+  : ` (recorded with it: ${knownValue(m.project_recorded) || 'no project'})`;
 const homeOf = id => state.view.homes.find(h => h.id === id) || {id, name:id};
 const homeColour = id => HOME_COLOURS[
   Math.max(0, state.view.homes.findIndex(h => h.id === id)) % HOME_COLOURS.length];
@@ -1740,7 +1744,7 @@ function messageRow(m, mode){
       <span class="age" title="from the time firstmate sent it">${ageLabel(m)}</span>
       ${recvDotHtml(latestReplyTo(m))}
     </span>
-    <span class="item-sub" title="${esc([m.project || 'project not recorded',
+    <span class="item-sub" title="${esc([(m.project || 'project not recorded') + recordedProject(m),
         m.worktree || 'worktree not recorded', m.branch || 'branch not recorded'].join(' · '))}">
       ${where.map((w, i) => (i ? '<span class="sep">·</span>' : '') +
         `<span class="${i ? 'mono' : ''}">${esc(w)}</span>`).join('')}
@@ -1965,6 +1969,8 @@ function renderMessagePane(m){
       ${cell('Worktree', m.worktree, 'Not recorded')}
       ${cell('Branch', m.branch, 'Not recorded')}
     </div>
+    ${m.project_by ? `<div class="quiet">Project read from the message by Jev${
+      esc(recordedProject(m))}</div>` : ''}
     ${m.context_source ? `<div class="quiet">${esc(m.context_source)}</div>` : ''}
     ${answer ? `<div class="thread"><h3>In answer to what you said${answer.title
       ? ` about “${esc(answer.title)}”` : ''}</h3>${

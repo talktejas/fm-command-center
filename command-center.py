@@ -1652,32 +1652,35 @@ SORT_RETRY_SECS = 300
 SORT_TEXT_HEAD, SORT_TEXT_TAIL = 3000, 2000
 # The first choice is wider than a decision (his report 2026-10-05, on a plain
 # "JewelTrek metals check app is back up" filed under Messages: "this is
-# important as i need to check the metal apps"): it is anything he has to ACT
-# on. The stored values stay the three below; SORT_WORDING names the wording
+# important as i need to check the metal apps"): it is anything the message
+# itself ASKS him to do. An announcement with no ask in it - up, live, landed -
+# is for reading: wording 2 put six of those under Waiting on you, too many.
+# The stored values stay the three below; SORT_WORDING names the wording
 # an answer was given under, so one from an older wording is asked again as
 # its row is next served rather than trusted forever. Bump it with the text.
-SORT_WORDING = 2
+SORT_WORDING = 3
 SORT_INSTRUCTIONS = (
     "`message` is one message an AI agent (firstmate) sent to the person it "
     "works for (the captain). Which ONE of his three tabs does it belong in? "
-    "Ask: after reading it, is there something the captain himself will now go "
-    "and do? Being told that something he uses or was waiting for is up, back, "
-    "ready or available counts - he will go and use or check it - even when the "
-    "message asks him nothing. A message that only recalls an ask made earlier, "
-    "or says something is still waiting on him, does not. Nor does an optional "
-    "offer on work that is otherwise on track ('say the word and I will ...'), "
-    "or a report that work is under way or still coming.")
+    "The test is whether the message ITSELF asks the captain to do something. "
+    "An announcement that something is up, back up, live, started, fixed, "
+    "landed or available, with no request to him in it, asks nothing: it is "
+    "for reading, however useful the thing is to him. So is an optional offer "
+    "on work that is otherwise on track ('say the word and I will ...'), a "
+    "report that work is under way or still coming, and a report about "
+    "something else that only mentions in passing what is still waiting on "
+    "him. But a message whose point is to remind him of a pick, answer or "
+    "decision he still owes DOES ask him.")
 SORT_CHOICES = {
-    "decision": "The captain has to act: decide between options, approve or give "
-                "a go-ahead, merge, answer a question, or go and check, test, use "
-                "or review something that is now ready or available for him - an "
-                "app or page that is up or back up at an address, a prototype, a "
-                "document or pull request awaiting him.",
-    "message": "A message to read, with no action from him: a finding or cause, "
-               "an explanation, a failure or blocker the agent is handling "
-               "itself, a fix or change reported as done, landed or live with "
-               "nothing he is asked to verify, something that changed, or an "
-               "answer to what he asked.",
+    "decision": "The message asks the captain to act: to decide between options, "
+                "approve or give a go-ahead, merge, answer a question, or check, "
+                "test or review a named thing that was prepared for him to check "
+                "and that it asks him to check.",
+    "message": "A message to read, with no request to him: an announcement that "
+               "something is up, back up, live, started, fixed or landed; a "
+               "finding or cause, an explanation, a failure or blocker the agent "
+               "is handling itself, something that changed, or an answer to what "
+               "he asked.",
     "info": "Routine, nothing to read closely: an acknowledgement, nothing new, "
             "nothing needed from him, still running, a transient glitch the agent "
             "already handled, progress with no result.",
@@ -1725,39 +1728,103 @@ def jev_post(key, payload):
         return json.loads(response.read(1 << 20))
 
 
-def sort_request(row):
+# The second question the same call can carry (his ask 2026-10-05, on a row
+# labelled with one project whose items belonged to two others): which ONE of his
+# projects is this message about? The choices are never written here - they
+# are the served home's own registry, data/projects.md, read when asked, plus
+# these two.
+PROJECT_SEVERAL, PROJECT_NONE = "several-projects", "none-of-these"
+PROJECT_SEVERAL_LABEL = "several projects"
+PROJECT_DESC_MAX = 300
+PROJECT_INSTRUCTIONS = (
+    "`message` is one message an AI agent (firstmate) sent to the person it "
+    "works for (the captain), who runs several software projects. Which ONE "
+    "project is the message about? Judge by what the message itself is "
+    "about, not by which helper or channel delivered it.")
+PROJECT_FINISHED_RE = re.compile(r'^- \S+\s+\[[^\]]*\bfinished\b', re.IGNORECASE)
+
+
+def project_cache_path(home):
+    """Jev's project per message id, beside message-sort.json."""
+    return os.path.join(home, "data", "command-center", "message-project.json")
+
+
+def offered_projects(home):
+    """name -> description for every project Jev may pick: one per
+    data/projects.md line, read each time so a project added there is offered
+    with no restart. A line whose bracket carries the word "finished"
+    (`- name [direct-PR finished] - ...`) stays in the registry but is no
+    longer offered. The file is only ever read."""
+    offered = {}
+    try:
+        with open(os.path.join(home, "data", "projects.md"), encoding="utf-8") as fh:
+            for line in fh:
+                m = PROJECTS_LINE_RE.match(line)
+                if m and not PROJECT_FINISHED_RE.match(line) \
+                        and m.group(1) not in (PROJECT_SEVERAL, PROJECT_NONE):
+                    offered[m.group(1)] = m.group(2).strip()[:PROJECT_DESC_MAX] or m.group(1)
+    except OSError:
+        pass
+    return offered
+
+
+def project_choices(offered):
+    return dict(offered, **{
+        PROJECT_SEVERAL: "More than one project: it covers items belonging to two or "
+                         "more of the projects listed, with no single one as its subject.",
+        PROJECT_NONE: "None of these / general: it is about no listed project - the "
+                      "agent's own running, housekeeping, or something else."})
+
+
+def projects_tag(offered):
+    """Which list an answer was chosen from; a different list asks again."""
+    return hashlib.sha1("\n".join(sorted(offered)).encode("utf-8")).hexdigest()[:12]
+
+
+def jev_request(row, questions):
     text = str(row.get("text") or "")
     if len(text) > SORT_TEXT_HEAD + SORT_TEXT_TAIL:
         # An ask usually closes a long message, so both ends are kept.
         text = text[:SORT_TEXT_HEAD] + "\n[...]\n" + text[-SORT_TEXT_TAIL:]
     return {"model": JEV_MODEL,
             "state": {"message": {"title": str(row.get("title") or ""), "text": text}},
-            "questions": {"sort": {"type": "choice", "instructions": SORT_INSTRUCTIONS,
-                                   "criteria": SORT_CHOICES}}}
+            "questions": {name: {"type": "choice", "instructions": instructions,
+                                 "criteria": criteria}
+                          for name, (instructions, criteria) in questions.items()}}
 
 
-def sort_answer(response):
-    """(choice, confidence) from Jev's response, or None when it is not a
-    Choice answer over exactly the three tabs: every probability a number from
-    0 through 1, summing to 1 within 0.01 (fm-dispatch-resolve.sh's check)."""
+def sort_request(row):
+    return jev_request(row, {"sort": (SORT_INSTRUCTIONS, SORT_CHOICES)})
+
+
+def choice_answer(response, name, choices):
+    """(choice, confidence) for one question of Jev's response, or None when
+    it is not a Choice answer over exactly `choices`: every probability a
+    number from 0 through 1, summing to 1 within 0.01 (fm-dispatch-resolve.sh's
+    check)."""
     def unit(value):
         return isinstance(value, (int, float)) and not isinstance(value, bool) \
             and 0 <= value <= 1
     try:
-        answer = response["answers"]["sort"]
+        answer = response["answers"][name]
         choice, confidence = answer["choice"], answer["confidence"]
         odds = answer["probabilities"]
     except (KeyError, TypeError):
         return None
-    if choice not in SORT_CHOICES or not unit(confidence) or not isinstance(odds, dict) \
-            or set(odds) != set(SORT_CHOICES) or not all(unit(v) for v in odds.values()) \
+    if choice not in choices or not unit(confidence) or not isinstance(odds, dict) \
+            or set(odds) != set(choices) or not all(unit(v) for v in odds.values()) \
             or not 0.99 <= sum(odds.values()) <= 1.01:
         return None
     return choice, confidence
 
 
+def sort_answer(response):
+    return choice_answer(response, "sort", SORT_CHOICES)
+
+
 class Sorter:
-    """Jev's tab for each message, asked for behind the page and cached.
+    """Jev's tab and project for each message, asked for behind the page and
+    cached - one call per row carrying whichever of the two it still lacks.
 
     apply() never waits on the network: it attaches the answers already
     cached and hands at most SORT_BATCH unsorted rows of what it was just
@@ -1776,16 +1843,25 @@ class Sorter:
         self.busy = False
         self.retry_at = 0.0
         self.said_off = False
+        self.cache = self._load(sort_cache_path(home))
+        self.projects = self._load(project_cache_path(home))
+
+    @staticmethod
+    def _load(path):
         try:
-            with open(sort_cache_path(home), encoding="utf-8") as fh:
+            with open(path, encoding="utf-8") as fh:
                 cache = json.load(fh)
         except (OSError, json.JSONDecodeError):
             cache = {}
-        self.cache = cache if isinstance(cache, dict) else {}
+        return cache if isinstance(cache, dict) else {}
 
     def tag(self):
-        """What of this an unchanged /api/messages poll depends on."""
-        return f"{self.enabled}/{self.floor}/{log_etag(sort_cache_path(self.home))}"
+        """What of this an unchanged /api/messages poll depends on: both
+        caches, and the registry - a changed project list has rows to re-ask."""
+        return "/".join(str(part) for part in (
+            self.enabled, self.floor, log_etag(sort_cache_path(self.home)),
+            log_etag(project_cache_path(self.home)),
+            log_etag(os.path.join(self.home, "data", "projects.md"))))
 
     def key(self):
         """The environment wins; else the served home's .env, read each time
@@ -1817,15 +1893,47 @@ class Sorter:
                      or row.get("archived") or row.get("held")) \
             and bool(row.get("text") or row.get("title"))
 
+    def labelled(self, row):
+        """The row with Jev's project, when he answered at or above the
+        floor: a single project differing from the recorded one replaces it,
+        "more than one" reads as a plain "several projects", and either way
+        the recorded label stays on the row as project_recorded. Below the
+        floor, "none of these", or the same project: the row as recorded."""
+        entry = self.projects.get(row.get("id"))
+        if not isinstance(entry, dict):
+            return row
+        choice, confidence = entry.get("choice"), entry.get("confidence")
+        if not isinstance(choice, str) or not isinstance(confidence, (int, float)):
+            return row
+        row = dict(row, project_jev={"choice": choice, "confidence": confidence})
+        label = PROJECT_SEVERAL_LABEL if choice == PROJECT_SEVERAL else choice
+        if confidence < self.floor or choice == PROJECT_NONE \
+                or label == known_value(row.get("project")):
+            return row
+        return dict(row, project=label, project_by="jev",
+                    project_recorded=known_value(row.get("project")))
+
+    def wants_project(self, row, list_tag):
+        """Every shown row with words, a recorded question or an archived one
+        included - each carries a project label. An answer chosen from a
+        different list is asked again, but only as its row is served."""
+        entry = self.projects.get(row.get("id"))
+        return bool(list_tag and row.get("id") and (row.get("text") or row.get("title"))) \
+            and not (isinstance(entry, dict) and entry.get("of") == list_tag)
+
     def apply(self, rows):
         if not self.enabled:
             return rows
+        offered = offered_projects(self.home)
+        list_tag = projects_tag(offered) if offered else ""
         with self.lock:
             out = []
             for row in rows:
                 placed = self.placed(row)
-                out.append(dict(row, sort=placed) if placed else row)
-            todo = [row for row in rows if self.wanted(row)][:SORT_BATCH]
+                out.append(self.labelled(dict(row, sort=placed) if placed else row))
+            todo = [(row, self.wanted(row), self.wants_project(row, list_tag))
+                    for row in rows]
+            todo = [t for t in todo if t[1] or t[2]][:SORT_BATCH]
             if not todo or self.busy or time.monotonic() < self.retry_at:
                 return out
             key = self.key()
@@ -1839,15 +1947,26 @@ class Sorter:
                 return out
             self.said_off = False
             self.busy = True
-        threading.Thread(target=self._run, args=(key, todo), daemon=True).start()
+        threading.Thread(target=self._run, args=(key, todo, offered, list_tag),
+                         daemon=True).start()
         return out
 
-    def _run(self, key, rows):
-        sorted_any = False
+    def _run(self, key, todo, offered, list_tag):
+        sorted_any = labelled_any = False
+        choices = project_choices(offered)
         try:
-            for row in rows:
+            for row, want_sort, want_project in todo:
+                questions = {}
+                if want_sort:
+                    questions["sort"] = (SORT_INSTRUCTIONS, SORT_CHOICES)
+                if want_project:
+                    questions["project"] = (PROJECT_INSTRUCTIONS, choices)
                 try:
-                    answer = sort_answer(jev_post(key, sort_request(row)))
+                    response = jev_post(key, jev_request(row, questions))
+                    answer = {name: choice_answer(response, name, criteria)
+                              for name, (_, criteria) in questions.items()}
+                    if None in answer.values():
+                        answer = None
                     reason = "the response is not a sort answer"
                 except urllib.error.HTTPError as exc:
                     answer, reason = None, f"http {exc.code}"
@@ -1864,13 +1983,23 @@ class Sorter:
                         f"rules place unsorted messages, next try in {SORT_RETRY_SECS}s\n")
                     break
                 with self.lock:
-                    self.cache[row["id"]] = {"choice": answer[0], "confidence": answer[1],
-                                             "wording": SORT_WORDING, "at": utc_now()}
-                sorted_any = True
+                    if want_sort:
+                        self.cache[row["id"]] = {"choice": answer["sort"][0],
+                                                 "confidence": answer["sort"][1],
+                                                 "wording": SORT_WORDING,
+                                                 "at": utc_now()}
+                        sorted_any = True
+                    if want_project:
+                        self.projects[row["id"]] = {"choice": answer["project"][0],
+                                                    "confidence": answer["project"][1],
+                                                    "of": list_tag, "at": utc_now()}
+                        labelled_any = True
         finally:
-            if sorted_any:
-                with self.lock:
+            with self.lock:
+                if sorted_any:
                     save_json_cache(sort_cache_path(self.home), self.cache)
+                if labelled_any:
+                    save_json_cache(project_cache_path(self.home), self.projects)
             self.busy = False
 
 
