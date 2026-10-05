@@ -376,9 +376,12 @@ function looksLikeClarifyingReply(text) {
 // whose decision firstmate has since closed is settled too (replyTarget).
 function messageNeedsReply(message, saidRows, items) {
   if (!message) return false;
-  const flagged = Boolean(message.question) || looksLikeQuestion(message.text)
-    || looksLikeQuestion(message.title);
-  if (!flagged) return false;
+  // His report 2026-10-05 ("there is no input needed from me that u put such
+  // message in waiting on you, these are just simple messages"): only a row
+  // RECORDED as a question waits on him. Its words never promote a plain
+  // capture - a status update that ends "?" or recaps "until you say the word"
+  // is a message to read, and looksLikeQuestion now only keeps it out of Info.
+  if (!message.question) return false;
   const named = replyTarget(message, items).item;
   if (named && named.closed) return false;
   const latest = (saidRows || []).find(r => r.msg === message.id);

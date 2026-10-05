@@ -373,17 +373,38 @@ test('a long explanation written back to him is never routine, whatever quiet wo
   assert.strictEqual(isInfoOnlyMessage({ text: long }), false);
 });
 
-test('a message needs a reply when recorded as a question or plainly asking one, until he replies', () => {
+test('a message needs a reply only when recorded as a question, until he replies', () => {
   const flagged = { id: 'm1', question: true, text: 'status update, nothing to decide' };
   const worded = { id: 'm2', question: false, text: 'Can I merge this branch?' };
   const plain = { id: 'm3', question: false, text: 'Deployed to staging.' };
   assert.strictEqual(messageNeedsReply(flagged, []), true);
-  assert.strictEqual(messageNeedsReply(worded, []), true);
+  assert.strictEqual(messageNeedsReply(worded, []), false, 'its words promoted a plain message');
   assert.strictEqual(messageNeedsReply(plain, []), false);
   assert.strictEqual(messageNeedsReply(flagged, [{ msg: 'm1' }]), false,
     'a message he already replied to is no longer waiting on him');
-  assert.strictEqual(messageNeedsReply(worded, [{ msg: 'm9' }]), true,
+  assert.strictEqual(messageNeedsReply(flagged, [{ msg: 'm9' }]), true,
     'a reply to a different message must not settle this one');
+});
+
+// His report 2026-10-05, the two real rows (captured from the transcript, no
+// question flag, both attached to task b2b): "there is no input needed from me
+// that u put such message in waiting on you, these are just simple messages."
+// Neither its words, its task, nor that task's own open decision promotes one.
+test('a plain captured message is never in Waiting on you, whatever it says or is attached to', () => {
+  const items = [{ home: 'main', source: 'hold', id: 'b2b', key: '' }];
+  const messages = [
+    { id: 'c722110c6da3ba584', task: 'b2b', source: 'transcript',
+      text: 'Nothing new for you in that, captain. Still yours: 1. Koin prototype - A, B, C or D. '
+        + '2. Merge diamond - the next item cannot start until you say the word.' },
+    { id: 'c5a77be02b8de0cc7', task: 'b2b', source: 'transcript',
+      text: 'Captain, two things: 1. b2becom is under way. 2. luminaire - I can\'t find it. Which is it: '
+        + 'a folder under a different name, a repo I should clone, or something new?' },
+    { id: 'real', task: 'b2b', question: true, question_key: 'k', text: 'Which shape?' },
+  ];
+  assert.deepStrictEqual(waitingMessageRows(messages, [], items).map(m => m.id), ['real']);
+  assert.deepStrictEqual(messages.filter(m => inMessagesTab(m, [], items)).map(m => m.id),
+    ['c722110c6da3ba584', 'c5a77be02b8de0cc7']);
+  assert.strictEqual(waitingCount(items, messages, [], 0), 2, 'the hold and the one recorded question');
 });
 
 // His report 2026-09-24: "an item must never leave Waiting on you because his
@@ -411,8 +432,8 @@ test('a reply that only asks firstmate something back never settles a waiting me
 test('a message is listed in Waiting on you or in Messages, never both', () => {
   const items = [Object.assign({}, stopped, { closed: true })];
   const messages = [
-    { id: 'q1', text: 'Merge feature/x?' },
-    { id: 'q2', text: 'Should I ship it?' },
+    { id: 'q1', question: true, text: 'Merge feature/x?' },
+    { id: 'q2', question: true, text: 'Should I ship it?' },
     { id: 'q3', question: true, task: 't1', question_key: 'k1', text: 'Which shape?' },
     { id: 'n1', text: 'Deployed to staging.' },
     { id: 'h1', text: 'Tabs or spaces?', held: true },
