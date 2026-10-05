@@ -282,9 +282,12 @@ class Records:
             return
         self.error = None
         paths = {h["id"]: h["path"] for h in data.get("homes", [])}
+        sources = label_sources([self.home] + [p for p in paths.values() if p != self.home])
         data["items"] = [closed_answer(ask_user_question(it, paths.get(it.get("home"))),
                                        paths.get(it.get("home")))
                          for it in remember_waiting(self.home, data.get("items", []))]
+        data["items"] = [hold_clock(fill_labels(it, it.get("id"), sources), sources)
+                         for it in data["items"]]
         with self.lock:
             self.etag = etag
             self.body = dump(data)
@@ -760,6 +763,276 @@ def cached_waiting_prs(homes):
         if PRS_CACHE["key"] != key or time.monotonic() - PRS_CACHE["at"] >= PRS_INTERVAL:
             PRS_CACHE.update(at=time.monotonic(), key=key, rows=waiting_prs(homes))
         return PRS_CACHE["rows"]
+
+
+# --- Work: every piece of work asked for; Agents: who is doing it -------------
+# His ask 2026-10-05: "split it into two. work & agents" and "put all the
+# separate projects separately". Read only, from each local home's own backlog
+# (every request is filed there with its project as "repo") joined with
+# state/<id>.meta where a task has a worker. One row per backlog item, one
+# project per row: a row whose project is not recorded, or names several,
+# carries none - it is never lent another row's.
+# ponytail: read on every /api/work (the page asks every 15s): one backlog per
+# home and one git call per live worker. Give it cached_waiting_prs' clock if
+# that ever shows.
+WORK_SECTIONS = {"## In flight": "flight", "## Queued": "queued", "## Done": "done"}
+WORK_LINE_RE = re.compile(r'^- \[([ x])\] (\S+) - (.*)$')
+WORK_TITLE_END_RE = re.compile(
+    r'\s+(?:blocked-by:|\((?:(?:repo|kind|priority|mode|default|hold|hold-kind|hold-until): '
+    r'|(?:since|merged|reported|done|decided|closed) \d{4}-))')
+WORK_DONE_RE = re.compile(r'\((?:merged|reported|done|decided|closed) (\d{4}-\d{2}-\d{2})')
+WORK_PR_RE = re.compile(r'https?://\S+/pull/\d+')
+STATUS_LINE_RE = re.compile(
+    r'^([a-z][a-z-]*)(?: \[[^\]]*\])*:\s*(?:\[[^\]]*\]\s*)?(?:corr=\S+\s+)*(.*)$')
+
+
+def one_project(value):
+    """A single project name, or None: several named is not one."""
+    value = known_value(os.path.basename((value or "").strip().rstrip("/")))
+    return value if value and not re.search(r"[\s,]", value) else None
+
+
+def backlog_work(home_path):
+    """Every task bullet under In flight / Queued / Done, as the backlog words it."""
+    rows, section = [], None
+    rel = _tasks_toml_backlog_rel(FIRSTMATE_ROOT) or "data/backlog.md"
+    try:
+        with open(os.path.join(home_path, rel), encoding="utf-8", errors="replace") as fh:
+            lines = fh.read().splitlines()
+    except OSError:
+        return rows
+    for line in lines:
+        if line.startswith("## "):
+            section = WORK_SECTIONS.get(line.strip())
+            continue
+        m = WORK_LINE_RE.match(line) if section else None
+        if not m:
+            continue
+        rest = m.group(3)
+        end = WORK_TITLE_END_RE.search(rest)
+        title = WORK_PR_RE.sub("", rest[:end.start()] if end else rest)
+        repo = re.search(r'\(repo: ([^)]*)\)', rest)
+        hold = re.search(r'\(hold: (.*?)\)(?:\s+\(hold-(?:kind|until): |\s*$)', rest)
+        kind = re.search(r'\(hold-kind: ([^)]*)\)', rest)
+        blocked = re.search(r'blocked-by: ([\w.-]+(?:,\s*[\w.-]+)*)', rest)
+        done = WORK_DONE_RE.search(rest)
+        pr = WORK_PR_RE.search(rest)
+        rows.append({
+            "id": m.group(2), "title": " ".join(title.split()) or None,
+            "section": section, "checked": m.group(1) == "x",
+            "project": one_project(repo.group(1)) if repo else None,
+            "hold": hold.group(1) if hold else None,
+            # Only hold-kind "captain", exactly, is his (command-center-scan.sh).
+            "his": bool(hold and kind and kind.group(1).strip() == "captain"),
+            "blocked_by": re.split(r',\s*', blocked.group(1)) if blocked else [],
+            "done_on": done.group(1) if done else None,
+            "pr": pr.group(0) if pr else None,
+        })
+    return rows
+
+
+def last_status(state_dir, task_id):
+    """(state word, plain text) of a task's newest status line, else (None, None)."""
+    try:
+        with open(os.path.join(state_dir, task_id + ".status"), encoding="utf-8",
+                  errors="replace") as fh:
+            lines = [l.strip() for l in fh if l.strip()]
+    except OSError:
+        return None, None
+    m = STATUS_LINE_RE.match(lines[-1]) if lines else None
+    return (m.group(1), m.group(2).strip() or None) if m else (None, lines[-1] if lines else None)
+
+
+def work_board(homes):
+    """{"items": one row per backlog item, "agents": one row per live worker}."""
+    agents, backlog = {}, []
+    for home in homes:
+        path = home.get("path") or ""
+        state_dir = os.path.join(path, "state")
+        for row in backlog_work(path):
+            backlog.append(dict(row, home=home.get("id")))
+        try:
+            metas = sorted(n for n in os.listdir(state_dir) if n.endswith(".meta"))
+        except OSError:
+            continue
+        for name in metas:
+            task_id = name[:-len(".meta")]
+            meta = read_meta(os.path.join(state_dir, name))
+            second = meta.get("kind") == "secondmate"
+            worktree = None if second else meta.get("worktree") or None
+            spawned = re.match(r"s(\d{9,})", meta.get("spawn_gen", ""))
+            try:
+                since = int(spawned.group(1)) if spawned else int(
+                    os.path.getmtime(os.path.join(state_dir, name)))
+            except OSError:
+                since = None
+            word, text = last_status(state_dir, task_id)
+            pr = meta.get("pr", "").strip()
+            agents.setdefault(task_id, {
+                "id": task_id, "home": home.get("id"), "kind": meta.get("kind") or None,
+                "project": one_project(meta.get("projects") if second else meta.get("project")),
+                "worktree": worktree, "branch": worktree_branch(worktree),
+                "base": meta.get("base") or None, "since_epoch": since,
+                "status_state": word, "status": text,
+                "pr": pr if re.match(r"^https?://\S+$", pr) else None,
+                "merged": os.path.exists(os.path.join(state_dir, task_id + ".pr-poll-merge-notified")),
+            })
+    by_id = {r["id"]: r for r in backlog}
+    is_done = lambda r: r["checked"] or r["section"] == "done"
+    items = []
+    for row in backlog:
+        agent = agents.get(row["id"])
+        waits = [{"id": b, "title": by_id[b]["title"] if b in by_id else None}
+                 for b in row["blocked_by"] if not (b in by_id and is_done(by_id[b]))]
+        detail = None
+        if is_done(row):
+            state = "done"
+        elif row["his"]:
+            state, detail = "waiting", row["hold"]
+        elif agent and agent["pr"] and not agent["merged"]:   # the PRs tab's own rule
+            state, detail = "waiting", "pull request open, waiting for your merge word"
+        elif row["section"] == "flight":
+            state = "building"
+            detail = None if agent else "in flight, no worker running right now"
+        else:
+            state = "queued"
+            detail = ("on hold: " + row["hold"]) if row["hold"] else None
+        items.append({
+            "id": row["id"], "home": row["home"], "title": row["title"],
+            "project": row["project"] or (agent or {}).get("project"),
+            "state": state, "detail": detail, "waits_on": waits if state == "queued" else [],
+            "done_on": row["done_on"], "agent": bool(agent),
+            "branch": (agent or {}).get("branch"), "base": (agent or {}).get("base"),
+            "worktree": (agent or {}).get("worktree"),
+            "pr": (agent or {}).get("pr") or row["pr"],
+        })
+    for agent in agents.values():
+        item = by_id.get(agent["id"])
+        agent["title"] = item["title"] if item else None
+        agent["item"] = bool(item)
+        # The work's own project first: a scout's meta names where it was
+        # launched, which need not be the project it is reading about.
+        agent["project"] = (item or {}).get("project") or agent["project"]
+        del agent["merged"]
+    return {"items": items, "agents": sorted(
+        agents.values(), key=lambda a: (a["since_epoch"] is None, -(a["since_epoch"] or 0)))}
+
+
+# --- project / worktree / branch on every card, and a hold's real clock --------
+# His report 2026-10-05, four times in ten minutes: "where is the fucking
+# worktree and branch?". Each of the three is resolved in his order - what the
+# record itself carries (the message's fields; the task's state/<id>.meta, read
+# by the scan and by enrich_messages), else the backlog item's own
+# "project: / worktree: / branch:" body lines firstmate writes, else the
+# project's registered copy in data/projects.md - and never guessed past that:
+# the page says "not recorded" for what is still missing.
+LABEL_LINE_RE = re.compile(r'^\s+(project|worktree|branch):\s*(\S.*?)\s*$')
+HOLD_SET_RE = re.compile(r'^\s+Captain hold set:\s*(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z)\s*$')
+PROJECT_COPY_RE = re.compile(r"(?<![\w.~/-])((?:~|/home/[\w.-]+)/[\w./-]*[\w-])")
+PROJECT_BRANCH_RE = re.compile(
+    r"\bbase=([\w/-]+)|active branch(?: is)? ([\w/-]+)|only ([\w/-]+) exists", re.IGNORECASE)
+
+
+def backlog_labels(home_path):
+    """{task id: {project, worktree, branch, hold_set}} from one home's backlog."""
+    out, current = {}, None
+    rel = _tasks_toml_backlog_rel(FIRSTMATE_ROOT) or "data/backlog.md"
+    try:
+        with open(os.path.join(home_path, rel), encoding="utf-8", errors="replace") as fh:
+            lines = fh.read().splitlines()
+    except OSError:
+        return out
+    for line in lines:
+        m = WORK_LINE_RE.match(line)
+        if m:
+            repo = re.search(r'\(repo: ([^)]*)\)', line)
+            current = out.setdefault(m.group(2), {})
+            if repo and one_project(repo.group(1)):
+                current.setdefault("project", one_project(repo.group(1)))
+            continue
+        if line.startswith("#"):
+            current = None
+        if current is None:
+            continue
+        m = LABEL_LINE_RE.match(line)
+        if m and known_value(m.group(2)):
+            # The body's own line outranks the bullet's repo: it is the label
+            # firstmate wrote for exactly this purpose.
+            if m.group(1) == "project" or m.group(1) not in current:
+                current[m.group(1)] = m.group(2)
+            continue
+        m = HOLD_SET_RE.match(line)
+        if m:
+            current["hold_set"] = m.group(1)          # the last one stands
+    return out
+
+
+def registered_copies(home_path):
+    """{project: {worktree, branch}} - the copy data/projects.md names for it."""
+    out = {}
+    try:
+        with open(os.path.join(home_path, "data", "projects.md"), encoding="utf-8",
+                  errors="replace") as fh:
+            lines = fh.read().splitlines()
+    except OSError:
+        return out
+    for line in lines:
+        m = re.match(r'^- ([\w.-]+) \[', line)
+        if not m:
+            continue
+        copy, branch = PROJECT_COPY_RE.search(line), PROJECT_BRANCH_RE.search(line)
+        out[m.group(1)] = {
+            "worktree": copy.group(1) if copy else None,
+            "branch": next((g for g in branch.groups() if g), None) if branch else None}
+    return out
+
+
+def label_sources(home_paths):
+    """The two fallbacks, read once per request: every home's backlog body
+    labels (first home wins an id) and the main home's registered copies."""
+    tasks = {}
+    for path in home_paths:
+        for task_id, labels in backlog_labels(path).items():
+            tasks.setdefault(task_id, labels)
+    return tasks, registered_copies(home_paths[0]) if home_paths else {}
+
+
+def fill_labels(row, task_id, sources):
+    """`row` with project/worktree/branch filled where its own record left them
+    blank. A branch is only ever taken with the worktree it belongs to."""
+    tasks, copies = sources
+    body = tasks.get(task_id or "", {})
+    out = dict(row)
+    for key in ("project", "worktree", "branch"):
+        if not known_value(out.get(key)) and body.get(key):
+            out[key] = body[key]
+    copy = copies.get(known_value(out.get("project")) or "", {})
+    if not known_value(out.get("worktree")) and copy.get("worktree"):
+        out["worktree"] = copy["worktree"]
+        if not known_value(out.get("branch")) and copy.get("branch"):
+            out["branch"] = copy["branch"]
+    return out
+
+
+def hold_clock(item, sources):
+    """A captain hold's age from the instant it was set, when the backlog
+    records one. The scan only has the bullet's "(since YYYY-MM-DD)" - a DATE,
+    read as that day's 00:00 UTC - so a hold filed seconds ago read "17h" at
+    17:00 UTC (his report 2026-10-05, just past his own midnight at UTC+7).
+    Without a recorded instant the row stays `created`, which the page words
+    by the day, never by the hour."""
+    if item.get("source") != "hold" or item.get("since_kind") != "created":
+        return item
+    at = _epoch(sources[0].get(item.get("id"), {}).get("hold_set") or "")
+    return dict(item, since_epoch=int(at), since_kind="hold-set") if at else item
+
+
+def label_messages(rows, records):
+    view = records.view() if records.etag is not None else {}
+    paths = [records.home] + [h["path"] for h in view.get("homes", [])
+                              if h.get("path") != records.home]
+    sources = label_sources(paths)
+    return [fill_labels(r, r.get("task"), sources) for r in rows]
 
 
 class MessageCapture:
@@ -2444,7 +2717,7 @@ def send_note(home_path, text):
     return outcome, "fm-inbox.sh note", detail, note_id
 
 
-def deliver_to_inbox(main_home_path, item, text):
+def deliver_to_inbox(main_home_path, item, text, reply=False):
     """Deliver a Waiting-on-you answer straight to the MAIN home's captain
     inbox, whatever home the item itself belongs to, and nothing else.
 
@@ -2470,8 +2743,16 @@ def deliver_to_inbox(main_home_path, item, text):
     him: "sent" (the note is durably queued) or "failed" (it never made it,
     so he keeps his words to try again).
     """
-    body = (f"[{item['home']} · {item['id']}] "
-            f"Answer to {item['id']} — {item.get('title') or '(no title)'}:\n{text}")
+    # A reply typed on a MESSAGE is already headed by that message (reply_body)
+    # and stays attributed to it: the item is only where to forward it, never
+    # "Answer to <item>" - his report 2026-10-05, a reply on one message
+    # arrived as the answer to the hold its task happened to carry ("the above
+    # answer i gave against some other ticket").
+    where = " · ".join(f"{label} {item.get(k) or 'not recorded'}"
+                       for label, k in (("project", "project"), ("worktree", "worktree"),
+                                        ("branch", "branch")))
+    body = f"[{item['home']} · {item['id']}] " + (text if reply else
+            f"Answer to {item['id']} — {item.get('title') or '(no title)'} ({where}):\n{text}")
     try:
         outcome, route, detail, note_id = send_note(main_home_path, body)
     except Exception as exc:  # noqa: BLE001 - a failed wake must never look like a lost answer
@@ -2921,7 +3202,7 @@ class Handler(BaseHTTPRequestHandler):
                 if row is not None:
                     row = dict(row, archived=archived_messages(self.records.home).get(msg_id, False),
                                held=read_parked(self.records.home).get(("message", msg_id)) == "held")
-                    row = self.sorter.apply(enrich_messages([row], self.records))[0]
+                    row = self.sorter.apply(label_messages(enrich_messages([row], self.records), self.records))[0]
                 current, archived_total = message_totals(self.records.home)
                 self._send(200, dump({"messages": [row] if row else [],
                                       "more": False, "error": error,
@@ -2944,7 +3225,7 @@ class Handler(BaseHTTPRequestHandler):
                                               before=before, query=query,
                                               archived=archived)
             if not error:
-                rows = self.sorter.apply(enrich_messages(rows, self.records))
+                rows = self.sorter.apply(label_messages(enrich_messages(rows, self.records), self.records))
             # A read that FAILED is not the state of the log: serving it under a
             # change check would answer 304 to every later poll and leave the
             # page saying this record could not be read long after it could.
@@ -2971,11 +3252,16 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/api/work":
             self.work.refresh()
             body = self.work.snapshot()
-            if body is None:
-                self._json(503, {"error": self.work.error
-                                 or "the work board has not been read yet"})
-                return
-            self._send(200, body)
+            # The backlog rows never wait on, or fail with, the slow bearings
+            # read: without it they are served beside its error.
+            board = json.loads(body) if body is not None else {
+                "captains_call": [], "underway": [], "landed": [], "charted": [],
+                "omitted": [], "error": self.work.error
+                or "the work board has not been read yet"}
+            view = self.records.view() if self.records.etag is not None else {}
+            homes = view.get("homes") or [{"id": "main", "path": self.records.home}]
+            board.update(work_board(homes))
+            self._json(200, board)
             return
 
         self._send(404, b"not found", "text/plain; charset=utf-8")
@@ -3132,12 +3418,13 @@ class Handler(BaseHTTPRequestHandler):
                 # Enriched here, behind the acceptance, so naming the work the
                 # message belongs to never slows the click.
                 try:
-                    context = enrich_messages([message], records)[0]
+                    context = label_messages(enrich_messages([message], records), records)[0]
                 except Exception:  # noqa: BLE001 - the recorded fields still name it
                     context = message
                 body = append_image_markers(reply_body(context, text), records.home, images)
                 if item:
-                    outcome, route, detail, note_id = deliver_to_inbox(main_home_path, item, body)
+                    outcome, route, detail, note_id = deliver_to_inbox(
+                        main_home_path, item, body, reply=True)
                     if outcome == "sent":
                         records.invalidate()
                     return {"resolved": "answer", "outcome": outcome,

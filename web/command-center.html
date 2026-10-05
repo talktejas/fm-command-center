@@ -171,8 +171,8 @@
   .f-stuck{background:var(--hot-soft);color:var(--hot)}
   .f-sent{background:var(--ok-soft);color:var(--ok)}
   /* Received dot, beside every reply he sends: white with a black border
-     until firstmate acks the note (yellow), red if the send or the inbox
-     write itself errored. See docs/command-center.md, "Received dot". */
+     until the note is delivered to firstmate's inbox (yellow), red if the send
+     or the inbox write itself errored. See docs/command-center.md, "Received dot". */
   .recv-dot{width:9px;height:9px;border-radius:50%;flex:none;display:inline-block;
     background:#fff;border:1.5px solid #1a1a1a}
   .recv-dot.recv-received{background:#e8c547;border-color:#e8c547}
@@ -348,6 +348,20 @@
   .work-meta{font-size:11px;color:var(--faint);margin-top:5px;display:flex;
     flex-wrap:wrap;gap:5px 9px}
   .work-meta a{color:inherit}
+  .labels{display:inline-flex;flex-wrap:wrap;align-items:center;gap:6px;min-width:0}
+  .item-sub:has(.labels){flex-wrap:wrap}
+  .item-sub .labels,.item-sub .labels span:not(.sep){overflow:visible;white-space:normal}
+  .lbl-miss{color:var(--hot);background:var(--hot-soft);border-radius:4px;padding:0 5px}
+  .work-row .labels{font-size:11.5px;color:var(--dim);margin-bottom:3px}
+  .label-count{padding:8px 16px 14px;font-size:11.5px;color:var(--faint)}
+  .work-bar{display:flex;flex-wrap:wrap;gap:6px;align-items:center;padding:10px 16px 0}
+  .work-chip{border:1px solid var(--line);border-radius:20px;background:none;color:var(--dim);
+    font:inherit;font-size:12px;padding:2px 10px;cursor:pointer}
+  .work-chip[aria-pressed="true"]{color:var(--ink,inherit);border-color:currentColor;font-weight:600}
+  .work-done{margin:2px 0 8px}
+  .work-done summary{font-size:12px;color:var(--dim);cursor:pointer;margin-bottom:6px}
+  .work-link{border:0;background:none;padding:0;font:inherit;color:inherit;
+    text-decoration:underline;cursor:pointer}
   .work-answer{display:flex;gap:6px;margin-top:8px}
   .work-answer input{flex:1;border:1px solid var(--line);border-radius:6px;
     padding:6px 8px;font:inherit;font-size:12.5px}
@@ -378,6 +392,7 @@
         <button class="tab" role="tab" data-tab="info" aria-selected="false" title="Repeats and nothing-new notes, kept so you can check nothing important was ignored">Ignore <span class="n" id="n-info"></span></button>
         <button class="tab" role="tab" data-tab="prs" aria-selected="false" title="Pull requests waiting for your merge word">PRs <span class="n" id="n-prs"></span></button>
         <button class="tab" role="tab" data-tab="work" aria-selected="false" title="Everything active: being worked on, or dormant waiting for you">Work <span class="n" id="n-work"></span></button>
+        <button class="tab" role="tab" data-tab="agents" aria-selected="false" title="Every running worker and second mate, and the work each is on">Agents <span class="n" id="n-agents"></span></button>
         <button class="tab" role="tab" data-tab="archived" aria-selected="false">Archived <span class="n" id="n-archived"></span></button>
         <button class="tab" role="tab" data-tab="hold" aria-selected="false">Hold <span class="n" id="n-hold"></span></button>
       </div>
@@ -584,7 +599,8 @@ const state = {
   msgRead:false, etag:null,
   // The /bearings lavish board's four sections, read on their own slow poll
   // (loadWork below) rather than the item scan's change-driven one.
-  work:{captains_call:[],underway:[],landed:[],charted:[],omitted:[],error:null},
+  work:{captains_call:[],underway:[],landed:[],charted:[],omitted:[],items:[],agents:[],error:null},
+  workSort:'project', workDoneOpen:new Set(),
   workRead:false, workSending:{},
   // The bucket order a Group by view is showing, kept across polls so a new
   // row's time never moves the bucket he is reading - see groupBuckets below.
@@ -661,16 +677,18 @@ const localTime = iso => {
   const t = Date.parse(iso || '');
   return isNaN(t) ? '' : new Date(t).toLocaleString();
 };
-function ageLabel(it){
-  if (!it.since_epoch) return 'no recorded time';
-  const s = Math.max(0, nowSecs() - it.since_epoch);
-  if (s < 3600) return Math.max(1, Math.round(s/60)) + 'm';
-  if (s < 172800) return Math.round(s/3600) + 'h';
-  const d = Math.round(s/86400);
-  return d < 14 ? d + 'd' : Math.round(d/7) + 'w';
-}
-const ageTitle = it => it.since_kind === 'created'
-  ? 'from the date the question was filed'
+// ageWords (web/command-center-state.js): now minus a recorded instant; a
+// date-only record is worded by the day.
+const ageLabel = it => ageWords(it.since_epoch, nowSecs(), it.since_kind);
+// The three labels every card carries, same place, same order (cardLabels).
+const labelsHtml = r => `<span class="labels" title="${esc(cardLabels(r).map(l =>
+    l.missing ? l.text : l.key + ' ' + knownValue(r[l.key])).join(' · '))}">${cardLabels(r).map((l, i) =>
+  (i ? '<span class="sep">·</span>' : '')
+  + `<span class="${l.missing ? 'lbl-miss' : i ? 'mono' : ''}">${esc(l.text)}</span>`).join('')}</span>`;
+const ageTitle = it => it.since_kind === 'hold-set'
+  ? 'from the moment the question was put to you'
+  : it.since_kind === 'created'
+  ? 'from the date the question was filed — no time of day was recorded'
   : it.since_kind === 'status-timestamp'
     ? 'from the moment the worker opened this decision'
     : it.since_kind === 'status-mtime'
@@ -1058,6 +1076,8 @@ const inProject = r => !state.project || projectOf(r) === state.project;
 function renderProjectFilter(){
   const rows = state.tab === 'waiting' ? visible(true)
     : state.tab === 'prs' ? state.prs
+    : state.tab === 'work' ? (state.work.items || [])
+    : state.tab === 'agents' ? (state.work.agents || [])
     : state.tab === 'hold' ? heldItemsList().concat(heldMessagesList(), heldNotes())
     : state.tab === 'archived' ? visibleMessages(true).concat(archivedItemsList(), archivedNotes())
     : visibleMessages(true).concat(state.tab === 'messages' ? listedNotes() : []);
@@ -1077,7 +1097,6 @@ function renderProjectFilter(){
   // dropdown out from under him while he is choosing.
   if (sel.dataset.html !== html){ sel.innerHTML = html; sel.dataset.html = html; }
   sel.value = state.project;
-  sel.disabled = state.tab === 'work';
 }
 
 // STANDING RULE for every notice slot on this page: two independent persistent
@@ -1152,11 +1171,7 @@ function renderWatcher(){
 }
 
 function itemRow(it, mode){
-  const bits = [];
-  if (state.group !== 'project' || FLAT.has(state.group))
-    bits.push(`<span>${esc(projectOf(it))}</span>`);
-  if (it.branch && state.group !== 'branch') bits.push(`<span class="mono">${esc(it.branch)}</span>`);
-  else if (it.branch_state === 'detached' && state.group !== 'branch') bits.push('<span>detached</span>');
+  const bits = [labelsHtml(it)];
   let flag = '';
   if (state.failed[itemKey(it)]) flag = '<span class="flag f-stuck">not sent</span>';
   else if (isStuck(it))   flag = '<span class="flag f-stuck">stuck</span>';
@@ -1164,7 +1179,7 @@ function itemRow(it, mode){
   else if (isDeferred(it)) flag = `<span class="flag f-sent">until ${esc(it.deferred_until)}</span>`;
   else if (it.closed) flag = settledFlag(it);
   else {
-    const answered = state.said.filter(r => r.item_key === itemKey(it)).slice().reverse();
+    const answered = saidOnItem(state.said, itemKey(it)).slice().reverse();
     if (answered.length) flag = threadBadgeHtml(threadStatus(threadEntries(answered)));
   }
   const old = it.since_epoch && (nowSecs() - it.since_epoch) > 86400;
@@ -1187,33 +1202,25 @@ function itemRow(it, mode){
 // Approved proposal sections 3 and 4: the archive and the thread are where a
 // closure can honestly be shown - the server wrote this line as part of the very
 // act that closed the decision, so nothing here is inferred.
-// The received dot's three states, his own ruling 2026-09-22: white with a
-// black border by default (sent, not yet received), yellow once firstmate
-// has acked the note (r.received, folded in from state/inbox/handled/ by
-// bin/command-center.py's read_said), red only for a delivery that is
-// KNOWN to have failed - "unknown" and "given up" are still just unconfirmed,
-// not an error, and stay white rather than falsely claiming a failure.
-function sendDotState(r){
-  if (!r || !r.sid) return null;               // a draft was never sent
-  const s = sendState(r, state.pending);
-  if (s === 'sent') return r.received ? 'received' : 'pending';
-  if (s === 'failed') return 'failed';
-  return 'pending';
-}
+// The dot beside each thing he sent, exactly as designed (his ruling
+// 2026-09-22, kept 2026-10-05 - "I fucking told you to keep dots"): white ring,
+// yellow, red, with the hover title it always had. Only WHEN it turns yellow
+// changed: sendDot (web/command-center-state.js) calls a send delivered the
+// moment it is in firstmate's inbox, not only once firstmate has read it.
+const sendDotState = r => (sendDot(r, state.pending) || {}).state || null;
 function recvDotHtml(r){
-  const st = sendDotState(r);
-  if (!st) return '';
-  const title = st === 'received' ? 'Received by firstmate'
-    : st === 'failed' ? 'Delivery failed' : 'Sent — not yet received';
-  return `<span class="recv-dot ${st === 'pending' ? '' : 'recv-' + st}" title="${esc(title)}"></span>`;
+  const dot = sendDot(r, state.pending);
+  if (!dot) return '';
+  const cls = dot.state === 'failed' ? 'recv-failed' : dot.state === 'going' ? '' : 'recv-received';
+  return `<span class="recv-dot ${cls}" title="${esc(dot.title)}"></span>`;
 }
 // The latest send FOR this row (a message or an item), for the list row's own
 // dot - repliesTo/answered are newest-first already, so this is just [0].
 const latestReplyTo = m => repliesTo(m)[0] || null;
-const latestAnswerFor = it => state.said.find(r => r.item_key === itemKey(it)) || null;
+const latestAnswerFor = it => saidOnItem(state.said, itemKey(it))[0] || null;
 // The opened pane's own Archive button turns the same yellow as the dot,
 // once the send he archived right after sending turns out to have arrived.
-const archiveRecvClass = r => sendDotState(r) === 'received' ? 'recv-received' : '';
+const archiveRecvClass = r => sendDotState(r) === 'read' ? 'recv-received' : '';
 
 function wordOutcome(r){
   if (r.kind === 'draft') return 'Not sent. Kept here so it is not lost.';
@@ -1250,6 +1257,11 @@ function paintList(html){
   const same = sig === listPainted;
   const where = pane.scrollTop;
   pane.innerHTML = html;
+  // Counted off the cards just drawn, so it is exactly what he can see.
+  const lacking = [...pane.querySelectorAll('.row, .work-row')].filter(c =>
+    [...c.querySelectorAll('.lbl-miss')].some(l => !l.textContent.startsWith('project'))).length;
+  pane.insertAdjacentHTML('beforeend', `<div class="label-count">${lacking} item${
+    lacking === 1 ? '' : 's'} without a worktree or branch</div>`);
   listPainted = sig;
   pane.scrollTop = same ? where : 0;
 }
@@ -1336,11 +1348,11 @@ function renderList(){
   // the messages and what he said - opening a row or typing into it touches
   // neither, so this cannot move on its own (see waitingMessages above).
   $('#n-waiting').textContent = waitingCount(items, state.messages, state.said, nowSecs(), state.prs);
-  // The count is what needs his attention right now: a decision waiting on
-  // his call, or work already underway that a "0" badge would hide entirely -
-  // Recently landed and Charted next stay read-only context, not counted.
+  // Every row Work lists unfolded: each item not yet done, plus a call only
+  // Work carries. Finished items sit folded under Done, not counted.
   $('#n-work').textContent = workCalls().length
-    + (state.work.underway || []).length + workDormant().length;
+    + (state.work.items || []).filter(r => r.state !== 'done').length;
+  $('#n-agents').textContent = (state.work.agents || []).length;
   $('#n-prs').textContent = state.prs.length;
   document.querySelectorAll('.tab').forEach(t =>
     t.setAttribute('aria-selected', String(t.dataset.tab === state.tab)));
@@ -1351,6 +1363,7 @@ function renderList(){
   if (state.tab === 'archived'){ renderMessages(true); return; }
   if (state.tab === 'hold'){ renderHold(); return; }
   if (state.tab === 'work'){ renderWork(); return; }
+  if (state.tab === 'agents'){ renderAgents(); return; }
   if (state.tab === 'prs'){ renderPrs(); return; }
 
   const rows = ordered(visible());
@@ -1599,8 +1612,11 @@ function workStatusHtml(id){
 // already carries - in Waiting on you, or archived or held from there - is
 // listed and answered there, with the same box and send as every other row,
 // not here a second time with an inline box of its own.
+// Nor one that is already a Work row of its own (a held backlog item reads
+// "Waiting on you" under its own project): only a call nothing else lists.
 const workCalls = () => (state.work.captains_call || []).filter(r =>
-  !boardItems().some(it => it.id === r.id && (it.key || '') === (r.key || '')));
+  !boardItems().some(it => it.id === r.id && (it.key || '') === (r.key || ''))
+  && !(state.work.items || []).some(it => it.id === r.id));
 function workDecisionRow(r){
   const sending = state.workSending[r.id] === 'Sending…';
   return `<div class="work-row" data-work-id="${esc(r.id)}">
@@ -1614,46 +1630,60 @@ function workDecisionRow(r){
     ${workStatusHtml(r.id)}
   </div>`;
 }
-function workUnderwayRow(r){
-  return `<div class="work-row">
+// One row per piece of work asked for (/api/work's items): its one project,
+// its state in plain words, and its branch and pull request when it has them.
+// About the work, never the worker - that is the Agents tab.
+function workItemRow(r, byState){
+  const bits = [];
+  if (r.base) bits.push('into ' + esc(r.base));
+  if (r.pr) bits.push(`<a href="${esc(r.pr)}" target="_blank" rel="noopener">${esc(r.pr)}</a>`);
+  return `<div class="work-row" id="work-${esc(r.id)}">
+    ${labelsHtml(r)}
     <div class="work-title">${esc(r.title || r.id)}</div>
-    ${(r.doing || r.state) ? `<div class="work-sub">${esc(r.doing || r.state)}</div>` : ''}
-    ${workMetaHtml(r)}
+    <div class="work-sub">${linked(workStateLabel(r, new Date().toLocaleDateString('en-CA')))}</div>
+    ${bits.length ? `<div class="work-meta">${bits.join(' · ')}</div>` : ''}
   </div>`;
 }
-function workLandedRow(r){
+function workGroupHtml(g, byState){
+  const row = r => workItemRow(r, byState);
+  const done = g.done.length ? `<details class="work-done" data-work-done="${esc(g.key)}"
+      ${state.workDoneOpen.has(g.key) ? 'open' : ''}>
+      <summary>Done (${g.done.length})</summary>${g.done.map(row).join('')}</details>` : '';
+  const tally = WORK_STATE_KEYS.map(s => [g.rows.filter(r => r.state === s).length, WORK_STATE_WORDS[s]])
+    .filter(([n]) => n && !byState).map(([n, w]) => `${n} ${w.toLowerCase()}`).join(' · ');
+  return `<div class="worksection"><h3>${esc(g.name)} <span class="n">${g.rows.length}</span>
+    <span style="text-transform:none;letter-spacing:0">${esc(tally)}</span></h3>
+    ${g.rows.map(row).join('')}${done}</div>`;
+}
+const WORK_STATE_KEYS = ['waiting', 'building', 'queued'];
+// One row per running worker or second mate (/api/work's agents, read from
+// each home's state/*.meta): what it is, its project, the work it is on.
+const AGENT_KINDS = { ship: 'Worker', scout: 'Scout', secondmate: 'Second mate' };
+function agentRow(r){
+  const kind = AGENT_KINDS[r.kind] || (r.kind ? 'Worker (' + r.kind + ')' : 'Worker');
+  const on = r.item
+    ? `<button class="work-link" data-goto-work="${esc(r.id)}">${esc(r.title || r.id)}</button>`
+    : r.kind === 'secondmate' ? 'runs its own project’s work' : esc(r.id) + ' (no work item recorded)';
+  const bits = [r.base ? 'into ' + esc(r.base) : '', 'running ' + esc(ageLabel(r))].filter(Boolean);
   return `<div class="work-row">
-    <div class="work-title">${esc(r.title || r.id)}</div>
-    ${workMetaHtml(r)}
+    ${labelsHtml(r)}
+    <div class="work-title">${esc(kind)}</div>
+    <div class="work-sub">On: ${on}</div>
+    <div class="work-sub">${r.status ? linked(r.status) : 'No status line yet.'}</div>
+    <div class="work-meta">${bits.join(' · ')}</div>
   </div>`;
 }
-function workChartedRow(r){
-  const sub = (r.reason && r.reason !== '-') ? r.reason
-    : (r.blocked_by && r.blocked_by !== '-') ? 'blocked by ' + r.blocked_by : '';
-  return `<div class="work-row">
-    <div class="work-title">${esc(r.title || r.id)}</div>
-    ${sub ? `<div class="work-sub">${esc(sub)}</div>` : ''}
-    ${workMetaHtml(r)}
-  </div>`;
-}
-// His ask 2026-10-05: everything active belongs under Work - "being worked on
-// or dormant waiting for my input". Underway is the first half; this is the
-// second: what his Input tab holds and every pull request waiting on his merge
-// word, one plain line each. Read-only here - each is answered on its own tab.
-function workDormant(){
-  const asked = (state.work.captains_call || []).filter(r => !workCalls().includes(r))
-    .map(r => Object.assign({}, r, {doing: 'Waiting for your answer — under Action'}));
-  const prs = state.prs.map(r => Object.assign({}, r, {pr: r.url,
-    doing: 'Pull request open, waiting for your merge word — under PRs'}));
-  return asked.concat(prs);
+function renderAgents(){
+  const rows = (state.work.agents || []).filter(inProject);
+  paintList(workErrorHtml() + workSectionHtml('Running now', rows, agentRow, 'No agent is running.'));
 }
 function prRow(r){
   const asks = prAsks(r, state.messages, state.said, state.view.items);
   const branch = (r.branch || 'branch not recorded') + ' → ' + (r.base || 'base not recorded');
   return `<div class="work-row">
+    ${labelsHtml(r)}
     <div class="work-title">${esc(r.title || r.id)}</div>
-    <div class="work-sub">${esc(r.project || 'Project not recorded')} · ${esc(branch)}
-      · waiting ${esc(ageLabel(r))}</div>
+    <div class="work-sub">${esc(branch)} · waiting ${esc(ageLabel(r))}</div>
     <div class="work-sub"><a href="${esc(r.url)}" target="_blank" rel="noopener">${esc(r.url)}</a></div>
     ${asks.map(m => `<div class="work-sub">${para(m.text || m.title)}</div>`).join('')}
   </div>`;
@@ -1682,19 +1712,34 @@ function workSectionHtml(title, rows, rowFn, emptyText){
     : `<div class="empty">${esc(emptyText)}</div>`;
   return `<div class="worksection"><h3>${esc(title)} <span class="n">${rows.length}</span></h3>${body}</div>`;
 }
-function renderWork(){
+function workErrorHtml(){
   const w = state.work || {};
-  let html = '';
-  if (w.error) html += `<div class="archive-note" style="background:var(--warn-soft)">
+  // Only while there are no rows to show: the items below never wait on the
+  // slower fleet read this error is about.
+  if (w.error && !(w.items || []).length) return `<div class="archive-note" style="background:var(--warn-soft)">
     <b>The work board could not be fully read.</b> ${esc(w.error)}</div>`;
-  else if (!state.workRead) html += `<div class="archive-note">Reading the fleet…</div>`;
-  html += workSectionHtml("Captain’s Call", workCalls(), workDecisionRow,
-    'Nothing is waiting on your call.');
-  html += workSectionHtml('Underway', w.underway || [], workUnderwayRow, 'Nothing is underway.');
-  html += workSectionHtml('Dormant — waiting on you', workDormant(), workUnderwayRow,
-    'Nothing is dormant waiting on you.');
-  html += workSectionHtml('Recently landed', w.landed || [], workLandedRow, 'Nothing landed recently.');
-  html += workSectionHtml('Charted next', w.charted || [], workChartedRow, 'Nothing is charted next.');
+  return state.workRead ? '' : `<div class="archive-note">Reading the fleet…</div>`;
+}
+function renderWork(){
+  const all = state.work.items || [];
+  const counts = new Map();
+  for (const r of all) counts.set(projectOf(r), (counts.get(projectOf(r)) || 0) + 1);
+  const names = [...counts.keys()].sort((a, b) =>
+    (a === NO_PROJECT) - (b === NO_PROJECT) || a.localeCompare(b));
+  const chip = (value, label, n) => `<button class="work-chip" data-work-project="${esc(value)}"
+    aria-pressed="${state.project === value}">${esc(label)} ${n}</button>`;
+  const byState = state.workSort === 'state';
+  let html = workErrorHtml();
+  // The project chips are the rail's Project filter, one click each.
+  html += `<div class="work-bar">${chip('', 'All projects', all.length)}${names.map(n =>
+    chip(n, n === NO_PROJECT ? 'Project unknown' : n, counts.get(n))).join('')}
+    <button class="work-chip" data-work-sort="${byState ? 'project' : 'state'}"
+      style="margin-left:auto">Sorted by ${byState ? 'state' : 'project'} — switch</button></div>`;
+  const calls = workCalls().filter(inProject);
+  if (calls.length) html += workSectionHtml("Captain’s Call", calls, workDecisionRow, '');
+  const groups = workGroups(all.filter(inProject), state.workSort);
+  html += groups.length ? groups.map(g => workGroupHtml(g, byState)).join('')
+    : `<div class="empty">${state.workRead ? 'No work is recorded.' : ''}</div>`;
   paintList(html);
 }
 
@@ -1813,12 +1858,6 @@ function messageRow(m, mode){
   // A recorded answer listed on its own - only when the message it continues
   // is not held here (foldAnswers) - says what it answers (answerFor).
   const answer = answerFor(m, state.said, heldMessages());
-  // Said as not known, never as "none": a blank field is a gap in the record.
-  const where = [
-    m.project || 'project not recorded',
-    m.worktree ? m.worktree.replace(/^.*\//, '') : 'worktree not recorded',
-    m.branch || 'branch not recorded',
-  ];
   // Seen means seen since the newest answer folded into it (answered_by), so a
   // conversation an answer just brought back reads unread again.
   const seen = state.seen[msgKey(m)] && (!m.answered_by || state.seen['msg/' + m.answered_by]);
@@ -1833,11 +1872,7 @@ function messageRow(m, mode){
       <span class="age" title="from the time firstmate sent it">${ageLabel(m)}</span>
       ${recvDotHtml(latestReplyTo(m))}
     </span>
-    <span class="item-sub" title="${esc([(m.project || 'project not recorded') + recordedProject(m),
-        m.worktree || 'worktree not recorded', m.branch || 'branch not recorded'].join(' · '))}">
-      ${where.map((w, i) => (i ? '<span class="sep">·</span>' : '') +
-        `<span class="${i ? 'mono' : ''}">${esc(w)}</span>`).join('')}
-    </span>
+    <span class="item-sub">${labelsHtml(m)}</span>
     ${answer ? `<span class="item-sub"><span>In answer to ${answer.title
       ? `“${esc(answer.title)}”` : 'your note'}</span></span>` : ''}
   </button></div>`;
@@ -1854,7 +1889,7 @@ function noteRow(n){
       <span class="age" title="from the time you sent it">${ageLabel(n)}</span>
       ${recvDotHtml(n.__note)}
     </span>
-    <span class="item-sub"><span class="kind k-decision">your note</span></span>
+    <span class="item-sub">${labelsHtml(n)}<span class="sep">·</span><span class="kind k-decision">your note</span></span>
   </button></div>`;
 }
 
@@ -2041,7 +2076,7 @@ function renderMessagePane(m){
   const entries = threadEntries(replies);
   const status = threadStatus(entries);
   const cell = (label, value, na) =>
-    `<div><dt>${label}</dt><dd class="${value ? '' : 'na'}">${esc(value || na)}</dd></div>`;
+    `<div><dt>${label}</dt><dd>${value ? esc(value) : `<span class="lbl-miss">${esc(na)}</span>`}</dd></div>`;
   // A message firstmate recorded as the answer to something he sent
   // (answerFor) shows that first: the message he replied to, when the page
   // holds it (archived or not), then his query, then this answer.
@@ -2054,9 +2089,9 @@ function renderMessagePane(m){
     </div>
     <h2 class="subject">${esc(m.title)}</h2>
     <div class="where">
-      ${cell('Project', m.project, 'Not recorded')}
-      ${cell('Worktree', m.worktree, 'Not recorded')}
-      ${cell('Branch', m.branch, 'Not recorded')}
+      ${cell('Project', knownValue(m.project), 'project not recorded')}
+      ${cell('Worktree', shortPath(knownValue(m.worktree)), 'worktree not recorded')}
+      ${cell('Branch', knownValue(m.branch), 'branch not recorded')}
     </div>
     ${m.project_by ? `<div class="quiet">Project read from the message by Jev${
       esc(recordedProject(m))}</div>` : ''}
@@ -2112,7 +2147,7 @@ function renderMain(){
   const detail = para(it.detail);
   // What he has said here, oldest first, interleaved with firstmate's answers
   // - the same thread, built the same way, as a message's own pane.
-  const answered = state.said.filter(r => r.item_key === itemKey(it)).slice().reverse();
+  const answered = saidOnItem(state.said, itemKey(it)).slice().reverse();
   const answerEntries = threadEntries(answered);
   const answerStatus = threadStatus(answerEntries);
   // Every answer now reaches firstmate's captain inbox (deliver_to_inbox in
@@ -2121,7 +2156,7 @@ function renderMain(){
     ? 'Firstmate has already settled this, so this reaches it as a note about it.'
     : 'Goes to firstmate as your answer to this decision, and nothing else.';
   const cell = (label, value, na) =>
-    `<div><dt>${label}</dt><dd class="${value ? '' : 'na'}">${esc(value || na)}</dd></div>`;
+    `<div><dt>${label}</dt><dd>${value ? esc(value) : `<span class="lbl-miss">${esc(na)}</span>`}</dd></div>`;
   const deadWarn = it.listen === 'dead' ? `<div class="dead-warn">
       <b>Nobody is listening to this one right now.</b> Your answer is written down and will
       not be lost, but it sits unread until firstmate restarts the worker.</div>` : '';
@@ -2138,9 +2173,9 @@ function renderMain(){
     <div class="listen ${esc(it.listen)}"><span class="lamp ${esc(it.listen)}"></span>
       <span><b>${esc(L.label)}.</b> ${esc(L.say)}</span></div>
     <div class="where">
-      ${cell('Project', it.project, 'No registered project')}
-      ${cell('Worktree', it.worktree, 'Not started')}
-      ${cell('Branch', it.branch, it.branch_state === 'detached' ? 'Detached — no branch' : 'Not started')}
+      ${cell('Project', knownValue(it.project), 'project not recorded')}
+      ${cell('Worktree', shortPath(knownValue(it.worktree)), 'worktree not recorded')}
+      ${cell('Branch', knownValue(it.branch), 'branch not recorded')}
     </div>
     <div class="msg them">
       <div class="msg-who">Firstmate<span class="t">${esc(ageTitle(it))}</span></div>
@@ -2865,8 +2900,23 @@ document.addEventListener('click', async e => {
       searchMessages();
       if (state.tab === 'archived') await loadArchivedMessages();
     }
-    if (state.tab === 'work' && !state.workRead) await loadWork();
+    if ((state.tab === 'work' || state.tab === 'agents') && !state.workRead) await loadWork();
     renderList(); return;
+  }
+  const wchip = e.target.closest('[data-work-project],[data-work-sort]');
+  if (wchip){
+    if ('workSort' in wchip.dataset) state.workSort = wchip.dataset.workSort;
+    else state.project = wchip.dataset.workProject;
+    renderList(); return;
+  }
+  const goto = e.target.closest('[data-goto-work]');
+  if (goto){
+    // The work an agent is on, shown where the work is listed.
+    Object.assign(state, {tab: 'work', project: ''});
+    renderList();
+    const row = document.getElementById('work-' + goto.dataset.gotoWork);
+    if (row){ const fold = row.closest('details'); if (fold) fold.open = true; row.scrollIntoView({block: 'center'}); }
+    return;
   }
   const wsend = e.target.closest('[data-work-send]');
   if (wsend){
@@ -3000,6 +3050,12 @@ document.addEventListener('click', async e => {
 
 $('#grouping').addEventListener('change', e => { state.group = e.target.value; renderList(); });
 $('#statefilter').addEventListener('change', e => { state.sfilter = e.target.value; renderList(); });
+// A folded Done group stays as he left it across the 15-second repaint.
+document.addEventListener('toggle', e => {
+  const key = e.target.dataset && e.target.dataset.workDone;
+  if (key === undefined) return;
+  if (e.target.open) state.workDoneOpen.add(key); else state.workDoneOpen.delete(key);
+}, true);
 $('#projectfilter').addEventListener('change', e => { state.project = e.target.value; renderList(); });
 // Only the Messages list is answered by the server; the other two tabs filter
 // what the page already holds, so typing there asks the log for nothing.

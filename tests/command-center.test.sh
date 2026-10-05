@@ -524,6 +524,106 @@ test_server_serves_the_page_and_the_records() {
   pass "the page and the records are served, and an unchanged poll costs nothing"
 }
 
+# Work lists every backlog item once, under its own one project, with its
+# state in plain words; Agents lists the workers. His ask 2026-10-05: "put all
+# the separate projects separately".
+test_work_lists_each_backlog_item_once_under_its_own_project() {
+  local home port body worktree
+  home="$TMP_ROOT/http-work-items"
+  mkdir -p "$home/data" "$home/state"
+  worktree="$TMP_ROOT/http-work-items-tree"
+  fm_git_init_commit "$worktree"
+  git -C "$worktree" checkout -q -b fm/w-build
+  cat > "$home/data/backlog.md" <<'BACKLOG'
+# Backlog
+
+## In flight
+- [ ] w-build - Build the thing (repo: alpha) (kind: ship) (since 2026-09-01)
+  A body line shaped like prose (repo: beta) is not a task.
+- [ ] w-held - Which colour (repo: beta) (kind: captain) (since 2026-09-01) (hold: Pick a colour (blue or green)) (hold-kind: captain)
+
+## Queued
+- [ ] w-next - Follow-up work blocked-by: w-build, w-done (repo: alpha) (kind: ship) (since 2026-09-02)
+- [ ] w-lost - Work nobody filed a project for (kind: ship) (since 2026-09-02)
+- [ ] w-two - Work naming two projects (repo: alpha, beta) (kind: ship)
+
+## Done
+- [x] w-done - Shipped already https://github.com/o/r/pull/7 (repo: alpha) (kind: ship) (merged 2026-09-03)
+
+## Notes on an old ruling
+- [ ] w-prose - Quoted in a narrative section (repo: alpha) (kind: ship)
+BACKLOG
+  printf 'project=/somewhere/alpha\nworktree=%s\nkind=ship\nbase=develop\nspawn_gen=s1790000000.1.1\n' \
+    "$worktree" > "$home/state/w-build.meta"
+  echo 'working [key=k]: [2026-09-01T00:00:00Z] halfway through the build' > "$home/state/w-build.status"
+  printf 'kind=secondmate\nprojects=beta\nproject=/somewhere/firstmate\n' > "$home/state/mate.meta"
+  start_server "$home" || fail "the server did not start"
+  port=$SERVER_PORT
+  body=$(curl -s -m 90 "http://127.0.0.1:$port/api/work")
+  stop_server
+  assert_equals "w-build|alpha|building|fm/w-build|develop w-held|beta|waiting|| w-next|alpha|queued|| w-lost||queued|| w-two||queued|| w-done|alpha|done||" \
+    "$(jq -r '[.items[] | [.id, .project // "", .state, .branch // "", .base // ""] | join("|")] | join(" ")' <<<"$body")" \
+    "the work rows were not one per backlog item, each with its own project and state"
+  assert_equals "Pick a colour (blue or green)" "$(jq -r '.items[] | select(.id=="w-held") | .detail' <<<"$body")" \
+    "a held item did not say what it waits on him for"
+  assert_equals "w-build" "$(jq -r '[.items[] | select(.id=="w-next") | .waits_on[].id] | join(",")' <<<"$body")" \
+    "a queued item did not name the unfinished item it waits on (and only that one)"
+  assert_equals "https://github.com/o/r/pull/7|2026-09-03|Shipped already" \
+    "$(jq -r '.items[] | select(.id=="w-done") | [.pr, .done_on, .title] | join("|")' <<<"$body")" \
+    "a finished item lost its pull request, its date or its plain title"
+  assert_equals "mate|secondmate|beta|false w-build|ship|alpha|true" \
+    "$(jq -r '[.agents[] | [.id, .kind, .project // "", (.item|tostring)] | join("|")] | sort | join(" ")' <<<"$body")" \
+    "the agents were not one row per running worker or second mate"
+  assert_equals "working|halfway through the build|1790000000" \
+    "$(jq -r '.agents[] | select(.id=="w-build") | [.status_state, .status, (.since_epoch|tostring)] | join("|")' <<<"$body")" \
+    "an agent row lost its last plain status line or its start time"
+  pass "Work serves one row per backlog item under its own project; Agents one per worker"
+}
+
+# His reports 2026-10-05: a hold filed seconds ago read "17h" (its date-only
+# "since" counted from 00:00 UTC), and held cards showed no worktree or branch.
+test_a_hold_carries_its_real_clock_and_its_three_labels() {
+  local home port body note
+  home="$TMP_ROOT/hold-labels"
+  mkdir -p "$home/data" "$home/state"
+  cat > "$home/data/backlog.md" <<'BACKLOG'
+# Backlog
+
+## Queued
+- [ ] h-set - Which database (repo: alpha) (kind: captain) (since 2026-10-05) (hold: Name the database) (hold-kind: captain)
+  project: alpha
+  worktree: ~/wt/alpha/main
+  branch: feature/x
+  Captain hold set: 2026-10-05T16:51:13Z
+- [ ] h-date - Which colour (repo: beta) (kind: captain) (since 2026-10-05) (hold: Pick a colour) (hold-kind: captain)
+- [ ] h-copy - Which font (repo: gamma) (kind: captain) (since 2026-10-05) (hold: Pick a font) (hold-kind: captain)
+BACKLOG
+  cat > "$home/data/projects.md" <<'PROJECTS'
+# Projects
+
+- gamma [direct-PR] - Gamma app; the captain's copy is at /home/someone/p/gamma; active branch is develop, not main (added 2026-09-01)
+PROJECTS
+  start_server "$home" || fail "the server did not start"
+  port=$SERVER_PORT
+  body=$(curl -s -m 30 "http://127.0.0.1:$port/api/items")
+  assert_equals "hold-set|2026-10-05T16:51:13Z|alpha|~/wt/alpha/main|feature/x" \
+    "$(jq -r '.items[] | select(.id=="h-set") | [.since_kind, (.since_epoch|todate), .project, .worktree, .branch] | join("|")' <<<"$body")" \
+    "a hold with a recorded instant and body labels did not carry them"
+  assert_equals "created|2026-10-05T00:00:00Z|beta||" \
+    "$(jq -r '.items[] | select(.id=="h-date") | [.since_kind, (.since_epoch|todate), .project, .worktree // "", .branch // ""] | join("|")' <<<"$body")" \
+    "a hold with only a date was given an instant, or a label nothing recorded"
+  assert_equals "gamma|/home/someone/p/gamma|develop" \
+    "$(jq -r '.items[] | select(.id=="h-copy") | [.project, .worktree, .branch] | join("|")' <<<"$body")" \
+    "a hold with no labels of its own did not fall back to its project's registered copy"
+  post "$port" /api/answer '{"home":"main","id":"h-set","source":"hold","key":"h-set","text":"Use dev."}' >/dev/null
+  wait_for "the answer never reached the inbox" sh -c "cat '$home'/state/inbox/*.note 2>/dev/null | grep -q 'Use dev.'"
+  note=$(cat "$home"/state/inbox/*.note)
+  stop_server
+  assert_contains "$note" "project alpha · worktree ~/wt/alpha/main · branch feature/x" \
+    "an answer did not carry its card's project, worktree and branch to firstmate"
+  pass "a hold carries the instant it was set and its project, worktree and branch"
+}
+
 test_the_work_board_is_served() {
   local home port body
   home="$TMP_ROOT/http-work"
@@ -1177,9 +1277,9 @@ test_the_tabs_are_served_in_the_captains_order() {
   order=$(printf '%s' "$body" | grep -o 'class="tab" role="tab" data-tab="[a-z]*"' \
     | sed 's/.*data-tab="\([a-z]*\)"/\1/' | tr '\n' ' ')
   stop_server
-  assert_equals "waiting messages info prs work archived hold " "$order" \
+  assert_equals "waiting messages info prs work agents archived hold " "$order" \
     "the tabs are not served in the order he asked for"
-  pass "the tabs are served as Action, Info, Ignore, PRs, Work, Archived, Hold"
+  pass "the tabs are served as Action, Info, Ignore, PRs, Work, Agents, Archived, Hold"
 }
 
 # His report 2026-10-05: a message with a Markdown table showed the raw pipes.
@@ -1970,6 +2070,13 @@ test_a_reply_takes_the_answer_route_when_the_task_is_still_waiting() {
     "a reply taking the answer route did not name the message it answers"
   assert_contains "$(cat "$home"/state/inbox/*.note 2>/dev/null)" "task cc-live" \
     "a reply did not name the work the message belongs to"
+  # His report 2026-10-05: a reply typed on a message arrived headed as the
+  # answer to the hold its task carried. The message heads it; the item is
+  # only the forwarding prefix.
+  assert_contains "$(cat "$home"/state/inbox/*.note 2>/dev/null)" "[main · cc-live] Reply to message $id" \
+    "a reply typed on a message was not headed by that message"
+  assert_not_contains "$(cat "$home"/state/inbox/*.note 2>/dev/null)" "Answer to cc-live" \
+    "a reply typed on a message was filed as the answer to its task's own hold"
   pass "a reply about a task still waiting reaches firstmate's inbox as its answer"
 }
 
@@ -4249,6 +4356,8 @@ test_work_scan_reports_the_four_bearings_sections
 test_work_scan_names_a_local_tasks_context
 test_server_serves_the_page_and_the_records
 test_the_work_board_is_served
+test_a_hold_carries_its_real_clock_and_its_three_labels
+test_work_lists_each_backlog_item_once_under_its_own_project
 test_server_refuses_bad_input_before_running_anything
 test_a_server_with_no_scan_yet_refuses_both_the_list_and_a_send
 test_answering_a_hold_records_the_captains_words_and_reaches_the_inbox
