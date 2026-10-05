@@ -2973,7 +2973,7 @@ with open(sys.argv[1], "a", encoding="utf-8") as fh:
                              "title": "progress %d" % i, "text": "still running %d" % i}) + "\n")
 PYEOF
   }
-  printf '%s\n' '{"id":"q-old","at":"2026-09-28T00:00:00Z","title":"Merge the diamond stack?","text":"Merge the diamond stack?"}' \
+  printf '%s\n' '{"id":"q-old","at":"2026-09-28T00:00:00Z","title":"Merge the diamond stack?","text":"Merge the diamond stack?","question":true}' \
     > "$home/data/captain-messages.jsonl"
   newer 0 250
   start_server "$home" || fail "the server did not start"
@@ -3057,8 +3057,8 @@ test_replying_to_one_waiting_row_moves_nothing_else() {
   printf 'blocked [key=ci]: [2026-09-27T02:00:00Z] CI check failing: Behavior portable serial 3 - provider reported failure\n' \
     > "$home/state/t-b.status"
   printf '%s\n' \
-    '{"id":"q-merge","at":"2026-09-27T03:00:00Z","title":"Merge the diamond stack?","text":"Merge the diamond stack?"}' \
-    '{"id":"q-ship","at":"2026-09-27T04:00:00Z","title":"Ship it?","text":"Should I ship the koin build?"}' \
+    '{"id":"q-merge","at":"2026-09-27T03:00:00Z","title":"Merge the diamond stack?","text":"Merge the diamond stack?","question":true}' \
+    '{"id":"q-ship","at":"2026-09-27T04:00:00Z","title":"Ship it?","text":"Should I ship the koin build?","question":true}' \
     '{"id":"n-progress","at":"2026-09-27T05:00:00Z","title":"progress","text":"Deployed to staging."}' \
     > "$home/data/captain-messages.jsonl"
   start_server "$home" || fail "the server did not start"
