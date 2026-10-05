@@ -679,7 +679,7 @@ const localTime = iso => {
 };
 // ageWords (web/command-center-state.js): now minus a recorded instant; a
 // date-only record is worded by the day.
-const ageLabel = it => ageWords(it.since_epoch, nowSecs(), it.since_kind);
+const ageLabel = it => ageWords(it.since_epoch, nowSecs());
 // The three labels every card carries, same place, same order (cardLabels).
 const labelsHtml = r => `<span class="labels" title="${esc(cardLabels(r).map(l =>
     l.missing ? l.text : l.key + ' ' + knownValue(r[l.key])).join(' · '))}">${cardLabels(r).map((l, i) =>
@@ -687,8 +687,12 @@ const labelsHtml = r => `<span class="labels" title="${esc(cardLabels(r).map(l =
   + `<span class="${l.missing ? 'lbl-miss' : i ? 'mono' : ''}">${esc(l.text)}</span>`).join('')}</span>`;
 const ageTitle = it => it.since_kind === 'hold-set'
   ? 'from the moment the question was put to you'
-  : it.since_kind === 'created'
-  ? 'from the date the question was filed — no time of day was recorded'
+  : it.since_kind === 'question'
+  ? 'from the newest question recorded for this task'
+  : it.since_kind === 'recorded'
+  ? 'from the moment it was recorded'
+  : it.since_kind === 'backlog-mtime'
+  ? 'from when its backlog entry was last written - no earlier time was recorded'
   : it.since_kind === 'status-timestamp'
     ? 'from the moment the worker opened this decision'
     : it.since_kind === 'status-mtime'

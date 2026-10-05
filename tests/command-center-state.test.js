@@ -14,7 +14,7 @@ const {
   waitingCount, waitingMessageRows, inMessagesTab, onHisBoard,
   isInfoOnlyMessage, sortedTab, saidTaskId, matchAnswer, threadRows, threadStatus,
   recordedAnswers, answeredSend, answerFor, foldAnswers, noteThreads, noteMomentAnswer,
-  namesPr, mergeAskOnly, prAsks, markRepeats, workGroups, workStateLabel, saidOnItem, sendDot,
+  namesPr, mergeAskOnly, prRowFor, prAsks, markRepeats, workGroups, workStateLabel, saidOnItem, sendDot,
   ageWords, cardLabels, lacksWorkLabel,
 } = require(path.join(__dirname, '..', 'web', 'command-center-state.js'));
 
@@ -1169,16 +1169,15 @@ test('the sent marker follows the record: going, delivered, read, failed', () =>
 // His report 2026-10-05, at 00:05 on his own clock (UTC+7), 17:05 UTC: rows
 // filed seconds earlier read "17h". A hold's "(since 2026-10-05)" is a date,
 // served as that day's 00:00 UTC - the hours since UTC midnight are not an age.
-test('an age is now minus a recorded instant; a date-only record is worded by the day', () => {
+test('an age is now minus a recorded instant, in minutes, hours or days', () => {
   const now = Date.parse('2026-10-05T17:05:00Z') / 1000;       // 2026-10-06 00:05 +07:00
   const filedToday = Date.parse('2026-10-05T00:00:00Z') / 1000; // "(since 2026-10-05)"
-  assert.strictEqual(ageWords(filedToday, now, 'created'), 'today', 'not 17h');
-  assert.strictEqual(ageWords(filedToday - 86400, now, 'created'), '1d');
-  assert.strictEqual(ageWords(filedToday - 5 * 86400, now, 'created'), '6d');
+  assert.strictEqual(ageWords(filedToday, now), '17h', 'no word for a date: hours since its midnight');
+  assert.strictEqual(ageWords(filedToday - 5 * 86400, now), '6d');
   // A real instant keeps its real age on either side of his midnight.
   const set = Date.parse('2026-10-05T16:51:13Z') / 1000;
-  assert.strictEqual(ageWords(set, now, 'hold-set'), '14m');
-  assert.strictEqual(ageWords(set, Date.parse('2026-10-05T16:59:13Z') / 1000, 'hold-set'), '8m');
+  assert.strictEqual(ageWords(set, now), '14m');
+  assert.strictEqual(ageWords(set, Date.parse('2026-10-05T16:59:13Z') / 1000), '8m');
   assert.strictEqual(ageWords(now - 20, now), '1m');
   assert.strictEqual(ageWords(Date.parse('2026-10-05T00:05:00Z') / 1000, now), '17h');
   assert.strictEqual(ageWords(null, now), 'no recorded time');
@@ -1227,4 +1226,23 @@ test('a recorded merge ask on a task with a waiting pull request is never under 
   // Without that pull request in the PRs data, it is a plain recorded question again.
   assert.strictEqual(mergeAskOnly(proof, []), false);
   assert.strictEqual(waitingCount([], [proof], [], 0, []), 1);
+});
+
+// His report 2026-10-05: a merge ask for pull request 38 sat under Action after
+// the pull request merged and its task was cleaned up. The server stamps the
+// ask with its pull request (apply_merge_asks), so it stays a merge ask with no
+// PRs row, never Action, and lands in Messages.
+test('a merge ask stamped by the server stays a merge ask after its pull request is gone', () => {
+  const proof = { id: 'm1', question: true, task: 'fm-jev-wake-triage', at: '2026-10-05T16:48:59Z',
+    title: 'Merge ready (firstmate): pull request 38',
+    text: 'Captain, one merge is ready for your word (firstmate): https://github.com/talktejas/firstmate/pull/38 - say "merge 38".',
+    merge_ask: 'https://github.com/talktejas/firstmate/pull/38' };
+  assert.strictEqual(mergeAskOnly(proof, []), true);
+  assert.strictEqual(waitingCount([], [proof], [], 0, []), 0, 'never under Action');
+  assert.strictEqual(inMessagesTab(proof, [], [], []), true);
+  assert.strictEqual(isInfoOnlyMessage(proof), false, 'never Info');
+  // While its pull request waits, it is shown in that PRs row only.
+  const pr = { id: 'fm-jev-wake-triage', url: proof.merge_ask };
+  assert.strictEqual(prRowFor(proof, [pr]), pr);
+  assert.strictEqual(inMessagesTab(proof, [], [], [pr]), false);
 });
