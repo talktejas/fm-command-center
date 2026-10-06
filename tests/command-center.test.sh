@@ -1638,6 +1638,8 @@ test_action_tab_selects_items_and_messages_for_the_bulk_bar() {
     "Action's list paints no bulk selection bar"
   printf '%s\n' "$body" | sed -n '/^let selectAnchor = null;/,/^async function deleteKeys(/p' \
     | sed '$d' > "$TMP_ROOT/action-select.js"
+  printf '%s\n' "$body" | sed -n '/^function orderFor(key){/,/^\/\/ No dialog: the first click arms Delete/p' \
+    | sed '$d' >> "$TMP_ROOT/action-select.js"
   printf '%s\n' "$body" | sed -n '/^const itemOf = /,/^function bulkHoldSelected(){/p' \
     | sed '$d' >> "$TMP_ROOT/action-select.js"
   printf '%s\n' "$body" | sed -n '/^function bulkHoldSelected(){/,/^}/p' >> "$TMP_ROOT/action-select.js"
@@ -1655,6 +1657,14 @@ test_action_tab_selects_items_and_messages_for_the_bulk_bar() {
     const setItemArchived = (it, a) => { archived.push(it.key); };
     const isItemHeld = it => !!it.held;
     const isItemArchived = it => !!it.archived;
+    const displayOrder = (rows, newest, isMessage, keyFn) => rows.map(keyFn);
+    const visibleMessages = () => [];
+    const listedNotes = () => [];
+    const rowKey = it => it.key;
+    const msgKey = m => "msg/" + m.id;
+    const noteKey = n => "note/" + n.sid;
+    const visible = () => state.view.items;
+    const open = () => {};
     const setMsgHeld = () => {};
     const setNoteHeld = () => {};
     const held = [], archived = [];
