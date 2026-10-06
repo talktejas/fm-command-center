@@ -1839,6 +1839,25 @@ test_archived_and_held_rows_read_from_when_they_were_moved() {
   pass "an Archived or On-hold row reads from when it was moved, falling back to its own time"
 }
 
+# His report 2026-10-06: a reply to a message that is not a question showed
+# "This message was not a question, so this goes to firstmate as a note" (and the
+# settled variant) under the box, as if something had gone wrong. The routing is
+# unchanged; the explanation is no longer shown. Checks the served page.
+test_a_reply_to_a_non_question_shows_no_routing_explanation() {
+  local home port body
+  home="$TMP_ROOT/quiet-routing"
+  seed_home "$home"
+  start_server "$home" || fail "the server did not start"
+  port=$SERVER_PORT
+  body=$(curl -s -m 30 "http://127.0.0.1:$port/")
+  stop_server
+  for text in "goes to firstmate as a note" "Nothing is waiting on that question any more" \
+      "not a question, so this goes"; do
+    case "$body" in *"$text"*) fail "the served page still shows: $text" ;; esac
+  done
+  pass "a reply to a non-question shows no routing explanation to him; the routing is unchanged"
+}
+
 # Enter sends a reply or note box, Shift+Enter is left to type a new line, and
 # an IME's Enter while composing is ignored. Runs the served enterSends in node
 # over a stub textarea and send button: Enter clicks Send only when the box has
@@ -4699,6 +4718,7 @@ test_a_document_is_served_and_a_file_address_to_it_becomes_its_link
 test_clicking_a_linked_url_never_also_triggers_a_delegated_row_action
 test_the_gutter_finds_every_pane_archive_and_hold_button
 test_selection_follows_the_ordinary_convention_and_delete_needs_two_clicks
+test_a_reply_to_a_non_question_shows_no_routing_explanation
 test_archived_and_held_rows_read_from_when_they_were_moved
 test_action_tab_selects_items_and_messages_for_the_bulk_bar
 test_after_an_action_the_pane_moves_to_the_next_row_in_the_filtered_list

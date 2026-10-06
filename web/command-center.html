@@ -2145,11 +2145,9 @@ function renderMessagePane(m){
     : target.kind === 'answer'
     ? `Answers <b>${esc(target.item.title)}</b> — the question this message asked, and
        nothing else.`
-    : target.settled
-    ? 'Nothing is waiting on that question any more, so this goes to firstmate as a note.'
-    : m.source === 'transcript'
-    ? 'Firstmate did not record this message as a question, so this goes to firstmate as a note — never to a worker.'
-    : 'This message was not a question, so this goes to firstmate as a note — never as the answer to another decision.';
+    // Anything else reaches firstmate as a note: the routing is unchanged, but
+    // its explanation is firstmate's business, not a notice shown to him.
+    : '';
   const replies = repliesTo(m).slice().reverse();   // the log is newest first
   const entries = threadEntries(replies);
   const status = threadStatus(entries);
