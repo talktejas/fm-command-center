@@ -144,9 +144,12 @@ function orderRows(rows, group, newestDefault, timeOf = r => r.since_epoch) {
 // When a row was archived (his ask 2026-09-28: the latest archived on top),
 // from the archived_at the server reads off the archive record itself. A row
 // archived before that record was read back falls back to its own time.
+// An answer recorded after he archived a conversation moves it to the top of
+// Archived too (foldAnswers bumps since_epoch to the answer's time), but it
+// never moves the row back to Action.
 function archivedEpoch(r) {
   const at = Math.floor(Date.parse(r.archived_at || '') / 1000);
-  return at || r.since_epoch || null;
+  return Math.max(at || 0, r.since_epoch || 0) || null;
 }
 
 // --- stable group order across polls --------------------------------------------
