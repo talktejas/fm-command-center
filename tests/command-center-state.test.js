@@ -1012,6 +1012,23 @@ test('a sort that arrives on a later poll changes the list signature', () => {
   assert.strictEqual(listSignature(before), listSignature(before.slice()));
 });
 
+// His report 2026-10-06: "nothing has changed in JewelTrek ... waiting for your
+// checks" sat under Action on a task with a hold. Jev read it as a decision at
+// 0.61; "nothing has changed" was not in the opening-words rule, so nothing
+// stopped it. A plain message is Action only when recorded as a question.
+test('a plain nothing-has-changed message on a task with a hold is Info, not Action', () => {
+  const items = [{ home: 'main', source: 'hold', id: 'jt-metals', key: '' }];
+  const text = 'Captain, nothing has changed in **JewelTrek**: the metals app is still up at '
+    + 'http://127.0.0.1:4303 and waiting for your checks.';
+  for (const sort of [undefined, { tab: 'decision', choice: 'decision', confidence: 0.61 }]) {
+    const row = { id: 'cc62c4c0828c5303b', task: 'jt-metals', question: false, text, sort };
+    assert.strictEqual(messageNeedsReply(row, [], items, []), false, 'Action: ' + JSON.stringify(sort));
+    assert.strictEqual(isInfoOnlyMessage(row), true, 'not Info: ' + JSON.stringify(sort));
+  }
+  const asked = { id: 'q2', task: 'jt-metals', question: true, question_key: 'k', text };
+  assert.strictEqual(messageNeedsReply(asked, [], items, []), true, 'a recorded question left Action');
+});
+
 // His replies 2026-10-05, on rows Jev had lifted into Messages: "these are just
 // info why fuck u are putting it in messages instead of in info tab", "Nothing
 // for you, captain all these kind go in info".
