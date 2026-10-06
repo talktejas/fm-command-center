@@ -1622,6 +1622,62 @@ test_selection_follows_the_ordinary_convention_and_delete_needs_two_clicks() {
   pass "selection follows the ordinary convention and Delete needs a second click"
 }
 
+# His report 2026-10-06: on Action, a multi-select showed no bulk bar, and its
+# item rows could not be selected at all. Same node pattern: Action's items and
+# messages select together, the bar is painted on Action, and Hold/Archive
+# over a selection that includes items act on those items.
+test_action_tab_selects_items_and_messages_for_the_bulk_bar() {
+  local home port body
+  home="$TMP_ROOT/action-select"
+  seed_home "$home"
+  start_server "$home" || fail "the server did not start"
+  port=$SERVER_PORT
+  body=$(curl -s -m 30 "http://127.0.0.1:$port/")
+  stop_server
+  assert_contains "$body" "paintList(selectionBarHtml() + partial + rowsHtml(" \
+    "Action's list paints no bulk selection bar"
+  printf '%s\n' "$body" | sed -n '/^let selectAnchor = null;/,/^async function deleteKeys(/p' \
+    | sed '$d' > "$TMP_ROOT/action-select.js"
+  printf '%s\n' "$body" | sed -n '/^const itemOf = /,/^function bulkHoldSelected(){/p' \
+    | sed '$d' >> "$TMP_ROOT/action-select.js"
+  printf '%s\n' "$body" | sed -n '/^function bulkHoldSelected(){/,/^}/p' >> "$TMP_ROOT/action-select.js"
+  node -e '
+    const assert = require("assert");
+    const itemKey = it => it.key;
+    const state = { selected: new Set(), open: null, tab: "waiting", deleteArmed: null, bulkBusy: false,
+      view: { items: [{ key: "home/x/1" }, { key: "home/x/2" }] } };
+    const keys = ["home/x/1", "msg/a", "home/x/2"];
+    const $ = () => ({ querySelectorAll: () => keys.map(key => ({ dataset: { key } })) });
+    const renderList = () => {};
+    const findMessageById = id => ({ id });
+    const findNote = () => null;
+    const setItemHeld = (it, h) => { it.held = h; held.push(it.key); };
+    const setItemArchived = (it, a) => { archived.push(it.key); };
+    const isItemHeld = it => !!it.held;
+    const isItemArchived = it => !!it.archived;
+    const setMsgHeld = () => {};
+    const setNoteHeld = () => {};
+    const held = [], archived = [];
+    eval(require("fs").readFileSync(process.argv[1], "utf8").replace("let selectAnchor", "var selectAnchor"));
+    const sel = () => [...state.selected].sort().join(",");
+    state.open = "home/x/1"; selectAnchor = "home/x/1";
+    toggleMessageSelection("home/x/2", { shiftKey: true });
+    assert.strictEqual(sel(), "home/x/1,home/x/2,msg/a", "shift-click across an item and a message did not select the run");
+    state.tab = "messages";
+    state.selected.clear(); state.open = null; selectAnchor = null;
+    assert.strictEqual(selectable("home/x/1"), false, "an item row became selectable outside Action");
+    assert.strictEqual(selectable("msg/a"), true, "a message stopped being selectable");
+    state.tab = "waiting";
+    state.selected = new Set(["home/x/1", "home/x/2"]);
+    bulkHoldSelected();
+    assert.ok(held.includes("home/x/1") && held.includes("home/x/2"), "bulk Hold did not hold the selected items");
+    assert.ok(!held.includes("msg/a"), "bulk Hold touched a message as an item");
+    process.exit(0);
+  ' "$TMP_ROOT/action-select.js" 2>"$TMP_ROOT/action-select.err" \
+    || fail "$(cat "$TMP_ROOT/action-select.err")"
+  pass "Action's items and messages select together and the bulk bar offers Hold over them"
+}
+
 # Enter sends a reply or note box, Shift+Enter is left to type a new line, and
 # an IME's Enter while composing is ignored. Runs the served enterSends in node
 # over a stub textarea and send button: Enter clicks Send only when the box has
@@ -4482,6 +4538,7 @@ test_a_document_is_served_and_a_file_address_to_it_becomes_its_link
 test_clicking_a_linked_url_never_also_triggers_a_delegated_row_action
 test_the_gutter_finds_every_pane_archive_and_hold_button
 test_selection_follows_the_ordinary_convention_and_delete_needs_two_clicks
+test_action_tab_selects_items_and_messages_for_the_bulk_bar
 test_enter_sends_and_shift_enter_is_a_new_line
 test_a_message_names_the_project_the_worktree_and_the_branch
 test_a_taskless_message_is_matched_to_the_one_task_it_names
