@@ -1574,22 +1574,22 @@ async function armOrDelete(keys = deleteTargets()){
 }
 async function deleteKeys(keys){
   const order = orderFor(keys[0]);
-  state.bulkBusy = true; renderList();
+  // The rows leave at once; only a delete the server refuses brings one back.
+  keys.forEach(k => state.deleted.add(k));
+  state.selected.clear();
+  if (state.deleted.has(state.open)) moveAfterBulk(order, keys);
+  applyArchiveOverride();
+  render();
   let failed = 0;
   await Promise.all(keys.map(async key => {
     const [target, parkKey] = key.startsWith('msg/') ? ['message', key.slice(4)]
       : key.startsWith('note/') ? ['note', key.slice(5)] : ['item', key];
     try {
       const {ok, data} = await post('/api/park', {target, key: parkKey, state: 'deleted'});
-      if (ok && data.ok) state.deleted.add(key); else failed++;
-    } catch (e) { failed++; }
+      if (!(ok && data.ok)) throw new Error('refused');
+    } catch (e) { state.deleted.delete(key); failed++; }
   }));
-  state.bulkBusy = false;
-  state.selected.clear();
-  applyArchiveOverride();
-  if (state.deleted.has(state.open)) moveAfterBulk(order, keys);
-  if (failed) state.openNote = `${failed} could not be deleted - try again.`;
-  render();
+  if (failed){ state.openNote = `${failed} could not be deleted - try again.`; applyArchiveOverride(); render(); }
 }
 
 // An item in the selection is one of Action's item rows (not a message or note).
@@ -2469,22 +2469,21 @@ function findMessageById(id){
 // message in whichever list it was archived out of.
 async function archiveMessageById(id, advance){
   const m = id && findMessageById(id);
-  if (!m || state.archiving) return;
+  if (!m) return;
   const archived = !m.archived;
   const keys = advance && archived ? orderFor(msgKey(m)) : null;
-  state.archiving = m.id;
-  render();
+  const wasOpen = state.open === msgKey(m);
+  // The row moves at once; the server write follows, and only a failure moves it back.
+  moveArchived(m, archived);
+  if (keys && wasOpen) advanceTo(keys, msgKey(m)); else render();
   try {
     const {ok, data} = await post('/api/archive', {msg:m.id, archived});
     if (!ok || !data.ok) throw new Error(data.error || 'the archive record could not be written');
-    moveArchived(m, archived);
-    if (keys && state.open === msgKey(m)){ state.archiving = null; advanceTo(keys, msgKey(m)); return; }
   } catch (e) {
+    moveArchived(m, !archived);
     state.openNote = 'The archive change did not land: ' + (e.message || e);
-  } finally {
-    state.archiving = null;
+    render();
   }
-  render();
 }
 
 // --- talking to the server ---------------------------------------------------
@@ -2940,9 +2939,24 @@ async function sendReply(){
   const it = m ? null : (state.view.items || []).find(i => itemKey(i) === key);
   if (!m && !it) return;
   const text = (state.draft[key] || '').trim();
-  if (!text || state.sending || isSending(key)) return;
+  if (!text || isSending(key)) return;
   const images = (state.images[key] || []).map(im => im.id);
-  state.sending = true; renderMain();
+  // His words leave the box and sit in the thread at once; the server round
+  // trip happens behind that. Only a failure brings them back to the box.
+  const token = 'local-' + Date.now();
+  const at = nowIso();
+  state.pending[token] = {key, item: m ? null : key, text, at: Date.now(), local: true};
+  state.said.unshift(m
+    ? {kind: 'reply', msg: m.id, text, at, sid: token, images: []}
+    : {kind: 'answer', item_key: key, text, at, sid: token, images: []});
+  state.draft[key] = '';
+  save('cc.draft', state.draft);
+  delete state.failed[key];
+  render();
+  const dropLocal = () => {
+    delete state.pending[token];
+    state.said = state.said.filter(r => r.sid !== token);
+  };
   let ok = false, data = {};
   try {
     ({ ok, data } = m
@@ -2954,31 +2968,25 @@ async function sendReply(){
     // captain inbox, so the worst case is a second note, never a second steer
     // landing on a worker - safe to just say it failed and let him try again.
     data = transportFailure(it ? it.source : 'status', String(err.message || err));
-  } finally {
-    state.sending = false;
   }
   if (ok && data.ok){
-    // Accepted, not delivered: his words stay in the box until the outcome row
-    // says the send landed. A reply that took a message's answer route names
-    // the item it answers too, so the send shows on that row as well.
+    // Accepted, not delivered: the outcome row says when it landed.
+    dropLocal();
     state.pending[data.sid] = {key, item: data.item_key || null, text, at: Date.now()};
-    delete state.failed[key];
     delete state.images[key];
     // A reply never archives or removes anything on its own - only his own
     // explicit Archive, Hold or Delete does.
-    save('cc.pending', state.pending); save('cc.failed', state.failed); save('cc.images', state.images);
-    await loadSaid();
+    save('cc.pending', state.pending); save('cc.images', state.images);
+    loadSaid().then(() => render());
     render();
-    const sent = $('#sendnote');
-    if (sent) sent.innerHTML = `Written down and going out now. The outcome appears under
-      <b>What you said back</b> when the command answers.`;
     return;
   }
-  await loadSaid();
+  // Not sent: his words go back in the box, with a plain note saying so.
+  dropLocal();
+  if (!(state.draft[key] || '').trim()){ state.draft[key] = text; save('cc.draft', state.draft); }
+  state.failed[key] = {outcome: 'failed', detail: 'Try again.', kept: 'draft'};
+  save('cc.failed', state.failed);
   render();
-  const note = $('#sendnote');
-  if (note) note.innerHTML = `<b style="color:var(--hot)">Not sent.</b> ${
-    esc(data.error || data.detail || 'the command failed')} — your words are still here.`;
 }
 
 // --- events ------------------------------------------------------------------
