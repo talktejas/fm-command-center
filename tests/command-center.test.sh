@@ -2038,6 +2038,70 @@ PYEOF
   pass "the note body sent to firstmate is exactly what he typed, and the page shows no routing sentence"
 }
 
+# His report 2026-10-07: items he archived or held came back to the live tabs.
+# The server flags are right (checked on a copy); the page reads messages through
+# a cached fold of copies, which kept the old hold after a hold made in place.
+# Runs the served heldMessages/setMsgHeld in node: a hold must show at once.
+test_a_hold_is_seen_at_once_through_the_fold_cache() {
+  local home port body
+  home="$TMP_ROOT/hold-cache"
+  seed_home "$home"
+  start_server "$home" || fail "the server did not start"
+  port=$SERVER_PORT
+  body=$(curl -s -m 30 "http://127.0.0.1:$port/")
+  stop_server
+  printf '%s\n' "$body" | sed -n '/^let twinFold = /,/^function heldMessages(){/p' | sed '$d' > "$TMP_ROOT/hold-cache.js"
+  printf '%s\n' "$body" | sed -n '/^function heldMessages(){/,/^}/p' >> "$TMP_ROOT/hold-cache.js"
+  printf '%s\n' "$body" | sed -n '/^function setMsgHeld(m, held){/,/^}/p' >> "$TMP_ROOT/hold-cache.js"
+  assert_contains "$(cat "$TMP_ROOT/hold-cache.js")" "messagesChanged();" \
+    "the served page does not drop the fold cache when a message is held"
+  node -e '
+    const assert = require("assert");
+    const fs = require("fs");
+    const { foldTwins } = require(process.argv[1]);
+    const state = { messages: [{ id: "m1", at: "2026-10-06T10:00:00Z", text: "x" }], archivedMessages: [] };
+    const nowIso = () => "2026-10-07T00:00:00Z";
+    const park = () => {};
+    eval(fs.readFileSync(process.argv[2], "utf8").replace("let twinFold", "var twinFold") + "\n;globalThis.__h = { heldMessages, setMsgHeld, state: () => state, reset: () => { state.messages = state.messages.slice(); } };");
+    const row = () => __h.heldMessages().find(m => m.id === "m1");
+    assert.ok(!row().held, "a fresh message reads as held");
+    const m = state.messages[0];
+    __h.setMsgHeld(m, true);
+    assert.ok(row().held, "a hold made in place did not show through the fold cache");
+    process.exit(0);
+  ' "$ROOT/web/command-center-state.js" "$TMP_ROOT/hold-cache.js" 2>"$TMP_ROOT/hold-cache.err" \
+    || fail "$(cat "$TMP_ROOT/hold-cache.err")"
+  pass "a hold shows at once through the fold cache"
+}
+
+# His correction 2026-10-07: an item he archived STAYS archived. A firstmate
+# answer recorded after the archive threads into it (and moves it to the top of
+# Archived) but never brings it back to Messages; archiving it again still sticks.
+test_an_answer_to_an_archived_message_stays_archived() {
+  local home port early late body log said
+  home="$TMP_ROOT/archive-answer"
+  seed_home "$home"
+  early=$(say "$home" "Heads up" "Answers now thread.") || fail "the recorder refused the message"
+  late=$(say "$home" "Read already" "Answered before he archived it.") || fail "the recorder refused the message"
+  log="$home/data/captain-messages.jsonl"
+  said="$home/data/command-center/said.jsonl"
+  mkdir -p "$(dirname "$said")"
+  jq -cn --arg m "$early" '{kind:"note",sid:"s1",msg:$m,text:"what if i archived it?",at:"2026-09-28T10:05:00Z"}' >>"$said"
+  jq -cn '{kind:"outcome",of:"s1",note_id:"n1",outcome:"sent",at:"2026-09-28T10:05:01Z"}' >>"$said"
+  jq -cn --arg m "$late" '{kind:"note",sid:"s2",msg:$m,note_id:"n2",outcome:"sent",text:"and this?",at:"2026-09-28T10:05:00Z"}' >>"$said"
+  jq -cn --arg m "$early" '{kind:"archive",of:$m,at:"2026-09-28T10:06:00Z"}' >>"$log"
+  jq -cn '{id:"a1",at:"2026-09-28T10:10:00Z",title:"Answer",text:"It is answered.",answers:"n1"}' >>"$log"
+  jq -cn --arg m "$late" '{kind:"archive",of:$m,at:"2026-09-28T10:20:00Z"}' >>"$log"
+  start_server "$home" || fail "the server did not start"
+  port=$SERVER_PORT
+  body=$(curl -s -m 30 "http://127.0.0.1:$port/api/messages")
+  assert_equals "" "$(printf '%s' "$body" | jq -r --arg m "$early" '.messages[] | select(.id == $m) | .id')"     "an answer brought an archived message back to Messages"
+  assert_equals "$early" "$(curl -s -m 30 "http://127.0.0.1:$port/api/messages?archived=1" | jq -r --arg m "$early" '.messages[] | select(.id == $m) | .id')"     "an answered, archived message left Archived"
+  assert_equals "" "$(jq -r 'select(.kind == "unarchive") | .of' "$log")"     "the server wrote an unarchive for an answered message"
+  stop_server
+  pass "an answer to an archived message threads into it and never brings it back to Messages"
+}
+
 # His report 2026-10-06: firstmate's answer to his reply showed as a separate new
 # row, away from the message and his note. The answer now folds into the one row
 # its reply belongs to - also when that reply was sent against a twin copy - and
@@ -2068,34 +2132,6 @@ test_an_answer_to_a_reply_sent_on_a_twin_threads_into_the_one_row() {
   ' "$ROOT/web/command-center-state.js" 2>&1) || fail "$out"
   assert_contains "$out" "answer-ok" "the answer fold did not run"
   pass "an answer to a reply sent on a twin threads into the one row, and stays with an archived parent"
-}
-
-# His correction 2026-10-07: an item he archived STAYS archived. A firstmate
-# answer recorded after the archive threads into it (and moves it to the top of
-# Archived) but never brings it back to Messages; archiving it again still sticks.
-test_an_answer_to_an_archived_message_stays_archived() {
-  local home port early late body log said
-  home="$TMP_ROOT/archive-answer"
-  seed_home "$home"
-  early=$(say "$home" "Heads up" "Answers now thread.") || fail "the recorder refused the message"
-  late=$(say "$home" "Read already" "Answered before he archived it.") || fail "the recorder refused the message"
-  log="$home/data/captain-messages.jsonl"
-  said="$home/data/command-center/said.jsonl"
-  mkdir -p "$(dirname "$said")"
-  jq -cn --arg m "$early" '{kind:"note",sid:"s1",msg:$m,text:"what if i archived it?",at:"2026-09-28T10:05:00Z"}' >>"$said"
-  jq -cn '{kind:"outcome",of:"s1",note_id:"n1",outcome:"sent",at:"2026-09-28T10:05:01Z"}' >>"$said"
-  jq -cn --arg m "$late" '{kind:"note",sid:"s2",msg:$m,note_id:"n2",outcome:"sent",text:"and this?",at:"2026-09-28T10:05:00Z"}' >>"$said"
-  jq -cn --arg m "$early" '{kind:"archive",of:$m,at:"2026-09-28T10:06:00Z"}' >>"$log"
-  jq -cn '{id:"a1",at:"2026-09-28T10:10:00Z",title:"Answer",text:"It is answered.",answers:"n1"}' >>"$log"
-  jq -cn --arg m "$late" '{kind:"archive",of:$m,at:"2026-09-28T10:20:00Z"}' >>"$log"
-  start_server "$home" || fail "the server did not start"
-  port=$SERVER_PORT
-  body=$(curl -s -m 30 "http://127.0.0.1:$port/api/messages")
-  assert_equals "" "$(printf '%s' "$body" | jq -r --arg m "$early" '.messages[] | select(.id == $m) | .id')"     "an answer brought an archived message back to Messages"
-  assert_equals "$early" "$(curl -s -m 30 "http://127.0.0.1:$port/api/messages?archived=1" | jq -r --arg m "$early" '.messages[] | select(.id == $m) | .id')"     "an answered, archived message left Archived"
-  assert_equals "" "$(jq -r 'select(.kind == "unarchive") | .of' "$log")"     "the server wrote an unarchive for an answered message"
-  stop_server
-  pass "an answer to an archived message threads into it and never brings it back to Messages"
 }
 
 # Enter sends a reply or note box, Shift+Enter is left to type a new line, and
@@ -4828,13 +4864,14 @@ test_every_pane_archives_holds_and_deletes_its_own_row() {
     /^function setNoteArchived\(/,/^}/; /^function setNoteHeld\(/,/^}/;
     /^const nowIso =/; /^const noteKey =/; /^const findNote =/; /^let writing =/;
     /^let deleteArmTimer/; /^async function armOrDelete\(/,/^}/; /^async function deleteKeys\(/,/^}/;
-    /^function deleteTargets\(/,/^}/; /^document.addEventListener\(.click./,/^}\);/' > "$TMP_ROOT/pane.js"
+    /^function deleteTargets\(/,/^}/; /^function orderFor\(/,/^}/; /^function moveAfterBulk\(/,/^}/;
+    /^document.addEventListener\(.click./,/^}\);/' > "$TMP_ROOT/pane.js"
   out=$(node -e '
     const fs = require("fs"), vm = require("vm");
     const [code, base] = process.argv.slice(1);
     const g = globalThis, f = fetch, noop = () => {};
     g.fetch = (u, o) => f(base + u, o);
-    Object.assign(g, {render: noop, renderList: noop, applyArchiveOverride: noop, advanceTo: noop,
+    Object.assign(g, {render: noop, renderList: noop, applyArchiveOverride: noop, advanceTo: noop, open: noop,
       displayOrder: () => [], visibleMessages: () => [], visible: () => [], listedNotes: () => [],
       msgKey: m => "msg/" + m.id, rowKey: k => k, itemKey: k => k, $: () => null});
     let handler = null;
@@ -4918,7 +4955,7 @@ test_a_document_is_served_and_a_file_address_to_it_becomes_its_link
 test_clicking_a_linked_url_never_also_triggers_a_delegated_row_action
 test_the_gutter_finds_every_pane_archive_and_hold_button
 test_selection_follows_the_ordinary_convention_and_delete_needs_two_clicks
-test_an_answer_to_an_archived_message_stays_archived
+test_a_hold_is_seen_at_once_through_the_fold_cache
 test_the_note_body_is_exactly_what_he_typed_and_no_routing_sentence_is_shown
 test_a_reply_to_a_non_question_shows_no_routing_explanation
 test_a_reply_clears_the_box_at_once_and_only_a_failure_returns_it
@@ -4966,6 +5003,8 @@ test_a_reply_that_is_not_a_question_is_sent_even_with_no_scan
 test_every_captured_message_is_reachable_without_serving_them_all
 test_a_message_far_behind_the_window_is_served_by_id
 test_an_archived_message_leaves_messages_and_can_be_restored
+test_an_answer_to_an_archived_message_stays_archived
+test_an_answer_to_a_reply_sent_on_a_twin_threads_into_the_one_row
 test_archived_messages_are_served_latest_archived_first
 test_a_held_message_leaves_the_messages_total_the_way_archiving_does
 test_a_message_with_nothing_known_about_its_work_is_still_served

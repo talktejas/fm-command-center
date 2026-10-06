@@ -758,6 +758,7 @@ function setItemHeld(it, held){
 function setMsgHeld(m, held){
   m.held = held;
   m.held_at = held ? nowIso() : null;
+  messagesChanged();
   park('message', m.id, held ? 'held' : 'none');
 }
 // --- what firstmate SAID -----------------------------------------------------
@@ -786,6 +787,9 @@ const repliesTo = m => { const twins = twinsOf(m);
 // not be found anywhere else on the page either.
 // One fold per change of the two lists, not per row: foldTwins is quadratic.
 let twinFold = {messages: null, archived: null, out: null};
+// The fold holds copies, so a change made in place to a message (a hold, an
+// archive restored in place) must drop it, or the old copy keeps showing it.
+function messagesChanged(){ twinFold = {messages: null, archived: null, out: null}; }
 function heldMessages(){
   if (twinFold.messages !== state.messages || twinFold.archived !== state.archivedMessages){
     const ids = new Set(state.messages.map(m => m.id));
@@ -2440,6 +2444,7 @@ function moveArchived(m, archived){
 // once the write is actually on disk. Once his own click is the last word on
 // an id, no poll's answer may contradict it until the opposite click does.
 function applyArchiveOverride(){
+  messagesChanged();
   if (state.deleted.size){
     const keep = rows => (rows || []).filter(m => !state.deleted.has(msgKey(m)));
     state.messages = keep(state.messages);
