@@ -877,7 +877,7 @@ function visibleMessages(allProjects){
   // One record, one tab (inMessagesTab, bin/command-center-state.js): a
   // message still waiting on him is listed only in Waiting on you, so a batch
   // here can never reach it. Archived rows are never waiting.
-  const listed = archived ? m => !isMsgHeld(m) : m => inMessagesTab(m, state.said, state.view.items, state.prs);
+  const listed = archived ? m => !isMsgHeld(m) : m => inMessagesTab(m, state.said, state.view.items, state.prs, heldMessages());
   // Unsearched, a recorded answer is folded into the conversation it
   // continues (foldAnswers, bin/command-center-state.js) rather than listed on
   // its own; a search shows whatever matched, answers included.
@@ -969,7 +969,7 @@ function waitingMessages(){
   // touches none of those, so that can never shrink this list on its own (his
   // report 2026-09-24: "i had two items in waiting on you... clicked one... now
   // there was only 1"). A reply moves only the message it answers, to Messages.
-  return waitingMessageRows(state.messages, state.said, state.view.items, state.prs)
+  return waitingMessageRows(state.messages, state.said, state.view.items, state.prs, heldMessages())
     .filter(m => !q || haystack(m).includes(q));
 }
 
@@ -1340,7 +1340,7 @@ function renderList(){
   // Both badges are exactly what visibleMessages() would show for that tab,
   // the same window-based rule n-hold already uses.
   const unheldMsgs = foldAnswers(state.messages, state.said, heldMessages())
-    .filter(m => inMessagesTab(m, state.said, state.view.items, state.prs));
+    .filter(m => inMessagesTab(m, state.said, state.view.items, state.prs, heldMessages()));
   const infoCount = unheldMsgs.filter(isInfoOnlyMessage).length;
   $('#n-messages').textContent = unheldMsgs.length - infoCount + listedNotes().length;
   $('#n-info').textContent = infoCount;
@@ -1351,7 +1351,7 @@ function renderList(){
   // waitingCount (bin/command-center-state.js) is pure over the scanned items,
   // the messages and what he said - opening a row or typing into it touches
   // neither, so this cannot move on its own (see waitingMessages above).
-  $('#n-waiting').textContent = waitingCount(items, state.messages, state.said, nowSecs(), state.prs);
+  $('#n-waiting').textContent = waitingCount(items, state.messages, state.said, nowSecs(), state.prs, heldMessages());
   // Every row Work lists unfolded: each item not yet done, plus a call only
   // Work carries. Finished items sit folded under Done, not counted.
   $('#n-work').textContent = workCalls().length
@@ -1682,7 +1682,7 @@ function renderAgents(){
   paintList(workErrorHtml() + workSectionHtml('Running now', rows, agentRow, 'No agent is running.'));
 }
 function prRow(r){
-  const asks = prAsks(r, state.messages, state.said, state.view.items);
+  const asks = prAsks(r, state.messages, state.said, state.view.items, heldMessages());
   const branch = (r.branch || 'branch not recorded') + ' → ' + (r.base || 'base not recorded');
   return `<div class="work-row">
     ${labelsHtml(r)}

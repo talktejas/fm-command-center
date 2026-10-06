@@ -380,24 +380,18 @@ function looksLikeQuestion(text) {
     || /\bmerge\b[^.!]*\?/.test(low) || /\bshould i\b[^.!]*\?/.test(low);
 }
 
-// A reply that only asks firstmate something back is not a decision: his
-// report 2026-09-24 - "an item must never leave Waiting on you because his
-// reply was a QUESTION. Only a reply that decides ... removes it."
-const CLARIFY_PHRASES = ['what do you mean', 'explain', 'more info', 'which one', 'why'];
-function looksLikeClarifyingReply(text) {
-  const t = String(text || '').trim();
-  if (!t) return false;
-  if (t.endsWith('?')) return true;
-  const low = t.toLowerCase();
-  return CLARIFY_PHRASES.some(p => low.includes(p));
+// Waiting on him until firstmate closes it. His own reply never removes it
+// (his report 2026-10-06: a question typed back on an Action row made it vanish,
+// "my unarchived actions going away"): it stays in Action, threaded under it,
+// until he archives it (Archived) or BOTH hold: firstmate recorded an answer to
+// one of his replies to this message (answeredByFirstmate), and the decision it
+// names is closed - its record is gone from the open set or closed (replyTarget).
+// A merge ask leaves through its pull request instead (mergeAskOnly).
+function answeredByFirstmate(message, saidRows, answers) {
+  const sends = (saidRows || []).filter(r => r.msg === message.id && r.note_id);
+  return sends.some(r => (answers || []).some(m => m.answers === r.note_id));
 }
-
-// Waiting on him until it is answered or settled. saidRows is newest first
-// (bin/command-center.py's read_said), so the first row naming this message is
-// his LATEST reply to it - and a latest reply that only asks firstmate
-// something back never counts as the answer, so it stays waiting. A question
-// whose decision firstmate has since closed is settled too (replyTarget).
-function messageNeedsReply(message, saidRows, items) {
+function messageNeedsReply(message, saidRows, items, answers) {
   if (!message) return false;
   // His report 2026-10-05 ("there is no input needed from me that u put such
   // message in waiting on you, these are just simple messages"): only a row
@@ -411,9 +405,8 @@ function messageNeedsReply(message, saidRows, items) {
   if (!message.question && (sortedTab(message) !== 'decision' || message.repeat
       || declaresNothingForHim(message.text || message.title))) return false;
   const named = replyTarget(message, items).item;
-  if (named && named.closed) return false;
-  const latest = (saidRows || []).find(r => r.msg === message.id);
-  return !latest || looksLikeClarifyingReply(latest.text);
+  const closed = !named || named.closed;
+  return !(closed && answeredByFirstmate(message, saidRows, answers));
 }
 
 // --- one record, one tab ----------------------------------------------------------
@@ -426,9 +419,9 @@ function messageNeedsReply(message, saidRows, items) {
 // A merge ask is never Input (mergeAskOnly below): while the pull request it
 // names waits it is shown inside that PRs row and nowhere else; naming none
 // that waits, it is a message to read.
-function inMessagesTab(message, saidRows, items, prs) {
+function inMessagesTab(message, saidRows, items, prs, answers) {
   if (message.held) return false;
-  if (!messageNeedsReply(message, saidRows, items)) return true;
+  if (!messageNeedsReply(message, saidRows, items, answers)) return true;
   return mergeAskOnly(message, prs) ? !prRowFor(message, prs) : false;
 }
 
@@ -479,9 +472,9 @@ function prRowFor(message, prs) {
     : namesPr(message, pr) || (message && message.task === pr.id))
     && mergeAskOnly(message, [pr])) || null;
 }
-function prAsks(pr, messages, saidRows, items) {
+function prAsks(pr, messages, saidRows, items, answers) {
   return (messages || []).filter(m => !m.held && prRowFor(m, [pr]) === pr
-    && messageNeedsReply(m, saidRows, items));
+    && messageNeedsReply(m, saidRows, items, answers || messages));
 }
 
 // --- repeats go to Ignore ---------------------------------------------------------
@@ -874,14 +867,14 @@ function waitingItems(items, nowSecs) {
   return (items || []).filter(it => onHisBoard(it) &&
     !isItemDeferred(it, nowSecs) && !it.archived && !it.held);
 }
-function waitingMessageRows(messages, saidRows, items, prs) {
+function waitingMessageRows(messages, saidRows, items, prs, answers) {
   return (messages || [])
-    .filter(m => !m.held && messageNeedsReply(m, saidRows, items) && !mergeAskOnly(m, prs))
+    .filter(m => !m.held && messageNeedsReply(m, saidRows, items, answers || messages) && !mergeAskOnly(m, prs))
     .map(m => Object.assign({__msg: true}, m));
 }
-function waitingCount(items, messages, saidRows, nowSecs, prs) {
+function waitingCount(items, messages, saidRows, nowSecs, prs, answers) {
   return waitingItems(items, nowSecs).length
-    + waitingMessageRows(messages, saidRows, items, prs).length;
+    + waitingMessageRows(messages, saidRows, items, prs, answers).length;
 }
 
 // --- may the message list claim to be complete? ---------------------------------
@@ -1117,7 +1110,7 @@ if (typeof module === 'object' && module.exports)
                      listSignature, mayRelease, logRead,
                      sendState, sendKeys, sameWords,
                      heldWith, captureBand, handRecordedNote, newestMessageMs, saidDigest, mergeMessages,
-                     isItemDeferred, looksLikeClarifyingReply, inMessagesTab, onHisBoard,
+                     isItemDeferred, inMessagesTab, onHisBoard,
                      waitingItems, waitingMessageRows, waitingCount,
                      namesPr, mergeAskOnly, prAsks, markRepeats,
                      looksLikeInfoOnly, declaresNothingForHim, asksHim, isInfoOnlyMessage, sortedTab,
