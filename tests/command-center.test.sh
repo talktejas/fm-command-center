@@ -4844,13 +4844,14 @@ test_every_pane_archives_holds_and_deletes_its_own_row() {
     /^function setNoteArchived\(/,/^}/; /^function setNoteHeld\(/,/^}/;
     /^const nowIso =/; /^const noteKey =/; /^const findNote =/; /^let writing =/;
     /^let deleteArmTimer/; /^async function armOrDelete\(/,/^}/; /^async function deleteKeys\(/,/^}/;
-    /^function deleteTargets\(/,/^}/; /^document.addEventListener\(.click./,/^}\);/' > "$TMP_ROOT/pane.js"
+    /^function deleteTargets\(/,/^}/; /^function orderFor\(/,/^}/; /^function moveAfterBulk\(/,/^}/;
+    /^document.addEventListener\(.click./,/^}\);/' > "$TMP_ROOT/pane.js"
   out=$(node -e '
     const fs = require("fs"), vm = require("vm");
     const [code, base] = process.argv.slice(1);
     const g = globalThis, f = fetch, noop = () => {};
     g.fetch = (u, o) => f(base + u, o);
-    Object.assign(g, {render: noop, renderList: noop, applyArchiveOverride: noop, advanceTo: noop,
+    Object.assign(g, {render: noop, renderList: noop, applyArchiveOverride: noop, advanceTo: noop, open: noop,
       displayOrder: () => [], visibleMessages: () => [], visible: () => [], listedNotes: () => [],
       msgKey: m => "msg/" + m.id, rowKey: k => k, itemKey: k => k, $: () => null});
     let handler = null;
