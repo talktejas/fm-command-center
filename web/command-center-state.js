@@ -785,7 +785,7 @@ const ROUTINE_MAX = 400;
 // rest of it says and whatever Jev read it as. Only the opening clause counts -
 // "nothing changed" deep in a report declares nothing about the report.
 const NOTHING_FOR_HIM = new RegExp('\\b(' + [
-  'nothing (new|changed)', 'nothing (new |here |in (this|that) )?for (you|the captain)',
+  'nothing (has |have )?(new|changed)', 'nothing (new |here |in (this|that) )?for (you|the captain)',
   'nothing (is )?(needed|required) from (you|the captain)', 'nothing (else )?needs you',
   'nothing to report', 'no change', 'no action (needed|required)',
 ].join('|') + ')\\b(?! will)', 'i');
