@@ -393,17 +393,15 @@ function answeredByFirstmate(message, saidRows, answers) {
 }
 function messageNeedsReply(message, saidRows, items, answers) {
   if (!message) return false;
-  // His report 2026-10-05 ("there is no input needed from me that u put such
-  // message in waiting on you, these are just simple messages"): only a row
-  // RECORDED as a question waits on him. Its words never promote a plain
-  // capture - a status update that ends "?" or recaps "until you say the word"
-  // is a message to read, and looksLikeQuestion now only keeps it out of Info.
-  // The one other way in is Jev reading the message as a decision, at or above
-  // the confidence floor (sortedTab); it leaves the same way, by his reply.
-  // Never for a row that itself says there is nothing for him (rule 0 of
-  // looksLikeInfoOnly): that one is Info whatever Jev read it as.
-  if (!message.question && (sortedTab(message) !== 'decision' || message.repeat
-      || declaresNothingForHim(message.text || message.title))) return false;
+  // A recorded question always waits on him. A plain message waits on him when
+  // it is not Info (isInfoOnlyMessage: nothing-new, repeats, Jev's info) and
+  // either Jev read it as a decision at or above the floor (sortedTab) or it
+  // carries something he must see - finished work, a finding, a failure, a
+  // review ask (mustBeSeen). Question words alone never promote a plain message
+  // (his report 2026-10-05, "these are just simple messages"). Leaves Action by
+  // his reply, as a question does.
+  if (!message.question && (isInfoOnlyMessage(message)
+      || (sortedTab(message) !== 'decision' && !mustBeSeen(message.text || message.title)))) return false;
   const named = replyTarget(message, items).item;
   const closed = !named || named.closed;
   return !(closed && answeredByFirstmate(message, saidRows, answers));
@@ -773,6 +771,11 @@ const NOISE = new RegExp([
   '\\b(is|are) (now )?(running|validating|working on|building|looking into)\\b',
   '\\bgoing through its checks\\b', '\\bleftover alert\\b', '\\bnothing to do\\b', '\\bno message\\b',
 ].join('|'));
+// Finished work, a result, a failure, a review or merge ask: what Action takes
+// up when it is not a question, and what Info never holds (looksLikeInfoOnly).
+function mustBeSeen(text) {
+  return SIGNAL.test(String(text || '').toLowerCase().replace(NEGATED, ''));
+}
 // Routine is short: an ack or a status line. Every message in the real log
 // longer than this that NOISE caught was an explanation, a finding or a plan
 // written back to him ("you're right, and here is why..."), never routine.
@@ -821,7 +824,7 @@ function looksLikeInfoOnly(text) {
   if (!/[a-z0-9]/i.test(asked)) return false;
   if (looksLikeQuestion(asked) || ASKS.some(p => asked.toLowerCase().includes(p))) return false;
   const low = asked.toLowerCase();
-  if (SIGNAL.test(low.replace(NEGATED, ''))) return false;
+  if (mustBeSeen(low)) return false;
   if (t.length > ROUTINE_MAX) return false;
   return NOISE.test(low);
 }
