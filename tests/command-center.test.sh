@@ -3222,11 +3222,11 @@ board_tabs() {  # <port> - {"waiting": row keys in its oldest-first order, "mess
     const {i, m, s} = JSON.parse(process.argv[2]);
     const said = st.foldSaid(s.said), msgs = m.messages.map(st.shapeMessage);
     const rows = st.waitingItems(i.items, Date.now() / 1000)
-      .concat(st.waitingMessageRows(msgs, said, i.items));
+      .concat(st.waitingMessageRows(msgs, said, i.items, undefined, msgs));
     const key = r => r.__msg ? "msg/" + r.id : st.itemKey(r);
     process.stdout.write(JSON.stringify({
       waiting: st.orderRows(rows, "oldest").map(key),
-      messages: msgs.filter(x => st.inMessagesTab(x, said, i.items)).map(x => "msg/" + x.id).sort(),
+      messages: msgs.filter(x => st.inMessagesTab(x, said, i.items, undefined, msgs)).map(x => "msg/" + x.id).sort(),
     }));
   ' "$ROOT/web/command-center-state.js" "$body"
 }

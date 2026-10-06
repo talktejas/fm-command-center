@@ -384,10 +384,37 @@ test('a message needs a reply only when recorded as a question, until he replies
   assert.strictEqual(messageNeedsReply(flagged, []), true);
   assert.strictEqual(messageNeedsReply(worded, []), false, 'its words promoted a plain message');
   assert.strictEqual(messageNeedsReply(plain, []), false);
-  assert.strictEqual(messageNeedsReply(flagged, [{ msg: 'm1' }]), false,
-    'a message he already replied to is no longer waiting on him');
+  // His own reply never removes it, however decisive (AGENTS.md, Action rules).
+  assert.strictEqual(messageNeedsReply(flagged, [{ msg: 'm1' }]), true,
+    'his reply removed a recorded question from Action');
   assert.strictEqual(messageNeedsReply(flagged, [{ msg: 'm9' }]), true,
     'a reply to a different message must not settle this one');
+  // Firstmate's recorded answer to that reply, with the decision closed, settles it.
+  const said = [{ msg: 'm1', note_id: 'n1', text: 'Yes.' }];
+  const answer = { id: 'a1', answers: 'n1', text: 'Done.' };
+  assert.strictEqual(messageNeedsReply(flagged, said, [], [answer]), false);
+  assert.strictEqual(messageNeedsReply(flagged, said, [], []), true,
+    'an answer that is not recorded in the messages must not settle it');
+});
+
+// His report 2026-10-06: "my unarchived actions going away". A question he
+// types back on an Action row (including one that ends without "?") leaves the
+// row exactly where it is; only firstmate closing the decision and recording
+// its answer, or his Archive, moves it.
+test('his reply on a waiting question never removes it, whatever it says', () => {
+  const flagged = { id: 'm1', question: true, task: 't1', question_key: 'k1', text: 'Which shape?' };
+  const open = [Object.assign({}, stopped)];
+  for (const text of ['what the fuck is this about? Also I just asked similar question',
+    'What do you mean by merge here?', 'Why?', 'Yes, merge it.']) {
+    assert.strictEqual(messageNeedsReply(flagged, [{ msg: 'm1', note_id: 'n1', text }], open,
+      [{ id: 'a1', answers: 'n1' }]), true, 'his reply removed it: ' + text);
+  }
+  // Firstmate answered, but the decision it names is still open: still waiting.
+  assert.strictEqual(messageNeedsReply(flagged, [{ msg: 'm1', note_id: 'n1', text: 'Ship it.' }],
+    open, [{ id: 'a1', answers: 'n1' }]), true, 'an open decision left Action');
+  // The decision closed (firstmate released it) with its answer recorded: settled.
+  assert.strictEqual(messageNeedsReply(flagged, [{ msg: 'm1', note_id: 'n1', text: 'Ship it.' }],
+    [Object.assign({}, stopped, { closed: true })], [{ id: 'a1', answers: 'n1' }]), false);
 });
 
 // His report 2026-10-05, the two real rows (captured from the transcript, no
@@ -411,24 +438,6 @@ test('a plain captured message is never in Waiting on you, whatever it says or i
   assert.strictEqual(waitingCount(items, messages, [], 0), 2, 'the hold and the one recorded question');
 });
 
-// His report 2026-09-24: "an item must never leave Waiting on you because his
-// reply was a QUESTION. Only a reply that decides ... removes it." saidRows is
-// newest first, so the first row naming a message is his latest reply to it.
-test('a reply that only asks firstmate something back never settles a waiting message', () => {
-  const flagged = { id: 'm1', question: true, text: 'Merge feature/x into develop?' };
-  assert.strictEqual(messageNeedsReply(flagged, [{ msg: 'm1', text: 'What do you mean by merge here?' }]),
-    true, 'a clarifying reply must not clear Waiting on you');
-  assert.strictEqual(messageNeedsReply(flagged, [{ msg: 'm1', text: 'Why?' }]),
-    true, 'a bare question mark reply must not clear Waiting on you either');
-  assert.strictEqual(messageNeedsReply(flagged, [{ msg: 'm1', text: 'Yes, merge it.' }]),
-    false, 'a decisive reply clears Waiting on you as before');
-  // Newest first: his second, decisive reply supersedes his first, clarifying one.
-  assert.strictEqual(messageNeedsReply(flagged, [
-    { msg: 'm1', text: 'Yes, merge it.' },
-    { msg: 'm1', text: 'Which branch do you mean?' },
-  ]), false, 'the latest reply is what decides, not an earlier clarifying one');
-});
-
 // His ruling 2026-09-28: "If an item is in Waiting for You, don't put the same
 // item in the message tab" - archiving everything in Messages had taken rows
 // out of Waiting on you. A message is in exactly one of the two, and only his
@@ -441,22 +450,24 @@ test('a message is listed in Waiting on you or in Messages, never both', () => {
     { id: 'q3', question: true, task: 't1', question_key: 'k1', text: 'Which shape?' },
     { id: 'n1', text: 'Deployed to staging.' },
     { id: 'h1', text: 'Tabs or spaces?', held: true },
+    { id: 'fa2', text: 'Shipped.', answers: 'n2' },
+    { id: 'fa3', text: 'Shape B is in.', answers: 'n3' },
   ];
-  const said = [{ msg: 'q2', text: 'Ship it.' }];
-  const waiting = waitingMessageRows(messages, said, items).map(m => m.id);
-  const listed = messages.filter(m => inMessagesTab(m, said, items)).map(m => m.id);
+  const said = [{ msg: 'q2', note_id: 'n2', text: 'Ship it.' },
+    { msg: 'q3', note_id: 'n3', text: 'Shape B.' }];
+  const waiting = waitingMessageRows(messages, said, items, undefined, messages).map(m => m.id);
+  const listed = messages.filter(m => inMessagesTab(m, said, items, undefined, messages)).map(m => m.id);
   assert.deepStrictEqual(waiting, ['q1'], 'only the unanswered question waits on him');
-  assert.deepStrictEqual(listed, ['q2', 'q3', 'n1'],
-    'an answered question, one firstmate settled, and a plain message are what Messages lists');
+  assert.deepStrictEqual(listed, ['q2', 'q3', 'n1', 'fa2', 'fa3'],
+    'an answered question, one firstmate settled, and plain messages are what Messages lists');
   assert.strictEqual(waiting.filter(id => listed.includes(id)).length, 0,
     'a message was listed in two tabs at once');
-  assert.strictEqual(waitingCount(items, messages, said, 0) + listed.length, 4,
+  assert.strictEqual(waitingCount(items, messages, said, 0, undefined, messages) + listed.length, 6,
     'the two badges count some message twice, or a held one at all');
-  // A reply to q1 moves q1 and nothing else.
-  const after = [{ msg: 'q1', text: 'Yes, merge it.' }].concat(said);
-  assert.deepStrictEqual(waitingMessageRows(messages, after, items).map(m => m.id), []);
-  assert.deepStrictEqual(messages.filter(m => inMessagesTab(m, after, items)).map(m => m.id),
-    ['q1', 'q2', 'q3', 'n1'], 'a reply moved a message other than the one it answered');
+  // His reply to q1 leaves q1 where it is: no answer from firstmate, nothing closed.
+  const after = [{ msg: 'q1', note_id: 'n9', text: 'Yes, merge it.' }].concat(said);
+  assert.deepStrictEqual(waitingMessageRows(messages, after, items, undefined, messages).map(m => m.id),
+    ['q1'], 'his reply moved q1 out of Waiting on you');
 });
 
 // His ruling 2026-09-28 ("CI check failing: ... provider reported failure" -
@@ -972,11 +983,14 @@ test('a row Jev reads as a decision waits on him, in one tab, until he answers',
   assert.strictEqual(inMessagesTab(row, [], []), false, 'listed in two tabs');
   assert.deepStrictEqual(waitingMessageRows([row], [], []).map(m => m.id), ['j1']);
   assert.strictEqual(waitingCount([], [row], [], NOW), 1);
-  // A reply that only asks back leaves it; one that decides moves it to Messages.
+  // His reply, decisive or not, leaves it; firstmate's recorded answer to it moves it.
+  const decided = [{ msg: 'j1', note_id: 'n9', text: 'Go with the first.' }];
   assert.strictEqual(messageNeedsReply(row, [{ msg: 'j1', text: 'Which one?' }]), true);
-  const decided = [{ msg: 'j1', text: 'Go with the first.' }];
-  assert.strictEqual(messageNeedsReply(row, decided), false);
-  assert.strictEqual(inMessagesTab(row, decided, []), true);
+  assert.strictEqual(messageNeedsReply(row, decided), true);
+  assert.strictEqual(inMessagesTab(row, decided, []), false);
+  const answered = [{ id: 'ja', answers: 'n9' }];
+  assert.strictEqual(messageNeedsReply(row, decided, [], answered), false);
+  assert.strictEqual(inMessagesTab(row, decided, [], undefined, answered), true);
   assert.strictEqual(isInfoOnlyMessage(row), false, 'an answered decision was filed as Info');
 });
 
@@ -1069,10 +1083,10 @@ test('a question that is nothing but a merge ask is shown in its PRs row, never 
   // Its pull request no longer waits (merged): it is a message to read, not lost.
   assert.strictEqual(inMessagesTab(ask, [], [], []), true);
   assert.strictEqual(isInfoOnlyMessage(ask), false);
-  // Answered, it leaves the PRs row for Info like any answered question.
+  // His reply does not move it out of the PRs row: only the pull request does.
   const said = [{ msg: 'q39', text: 'merge it' }];
-  assert.deepStrictEqual(prAsks(pr, all, said, []), []);
-  assert.strictEqual(inMessagesTab(ask, said, [], [pr]), true);
+  assert.deepStrictEqual(prAsks(pr, all, said, []).map(m => m.id), ['q39']);
+  assert.strictEqual(inMessagesTab(ask, said, [], [pr]), false);
   // pull/3 is not pull/39.
   assert.strictEqual(namesPr(ask, { url: 'https://github.com/talktejas/interactp/pull/3' }), false);
 });
