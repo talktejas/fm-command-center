@@ -1955,6 +1955,38 @@ test_archive_moves_the_row_at_once_and_a_refused_write_moves_it_back() {
   pass "Archive moves the row at once, and a refused write moves it back"
 }
 
+# His report 2026-10-06: one message was filed by hand and captured again from
+# its turn under another id (a few words longer), so his reply and his archive
+# landed on different copies and neither looked whole. The reproducing pair is
+# the one from the copy of the records; the hand-filed copy survives, carries
+# the other id as a twin, and a reply to either copy threads under it.
+test_a_hand_filed_message_and_its_captured_twin_are_one_row() {
+  local out
+  out=$(node -e '
+    const assert = require("assert");
+    const { foldTwins, sameTurn } = require(process.argv[1]);
+    const text = "Captain, KaratCraft B2B only. Proposal only: nothing built. 3. Merge pull request 26? Yes or no.";
+    const filed = { id: "m20261006T123856Z-61288", at: "2026-10-06T12:38:56Z", text, project: "b2becom", task: null, question: true };
+    const captured = { id: "c2e6046d1da67c38e", at: "2026-10-06T12:39:05Z", text: text + "\n\nSeparately, in its own item: the clean-up is under way.",
+      source: "transcript", session: "s1", req: "r1", project: null, task: null };
+    assert.ok(sameTurn(filed, captured), "the hand-filed copy and its captured twin are not the same turn");
+    const rows = foldTwins([captured, filed, { id: "other", at: "2026-10-06T12:40:00Z", text: "Unrelated note about something else entirely.", project: "x" }]);
+    assert.strictEqual(rows.length, 2, "the twin pair did not fold to one row");
+    const keep = rows.find(r => r.id === filed.id);
+    assert.ok(keep && keep.twins.includes(captured.id), "the survivor does not carry the twin id");
+    assert.ok(rows.some(r => r.id === "other"), "a record with no twin was dropped");
+    const archivedCopy = Object.assign({}, captured, { archived: true, archived_at: "2026-10-06T12:56:00Z" });
+    const r2 = foldTwins([archivedCopy, filed]);
+    assert.strictEqual(r2.length, 1, "the pair did not fold when only one copy is archived");
+    assert.strictEqual(r2[0].archived, true, "archiving one copy did not archive the row");
+    assert.ok(!sameTurn(filed, { id: "far", at: "2026-10-06T14:00:00Z", text, project: "b2becom" }), "two hours apart were treated as one turn");
+    assert.ok(!sameTurn(Object.assign({}, filed, { task: "t1" }), { id: "other-task", at: filed.at, text, task: "t9", project: "b2becom" }), "a different task was folded");
+    process.stdout.write("pair-ok");
+  ' "$ROOT/web/command-center-state.js" 2>&1) || fail "$out"
+  assert_contains "$out" "pair-ok" "the twin fold did not run"
+  pass "a hand-filed message and its captured twin are one row, and nothing without a twin is dropped"
+}
+
 # Enter sends a reply or note box, Shift+Enter is left to type a new line, and
 # an IME's Enter while composing is ignored. Runs the served enterSends in node
 # over a stub textarea and send button: Enter clicks Send only when the box has
@@ -4818,6 +4850,7 @@ test_selection_follows_the_ordinary_convention_and_delete_needs_two_clicks
 test_a_reply_to_a_non_question_shows_no_routing_explanation
 test_a_reply_clears_the_box_at_once_and_only_a_failure_returns_it
 test_archive_moves_the_row_at_once_and_a_refused_write_moves_it_back
+test_a_hand_filed_message_and_its_captured_twin_are_one_row
 test_archived_and_held_rows_read_from_when_they_were_moved
 test_action_tab_selects_items_and_messages_for_the_bulk_bar
 test_after_an_action_the_pane_moves_to_the_next_row_in_the_filtered_list

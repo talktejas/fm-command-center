@@ -772,7 +772,10 @@ const msgKey = m => 'msg/' + m.id;
 // archive/hold) each row must be keyed the way it actually opens by, or a
 // message next to the archived row gets a bogus itemKey() that opens nothing.
 const rowKey = it => it.__msg ? msgKey(it) : itemKey(it);
-const repliesTo = m => state.said.filter(r => r.msg === m.id);
+// A message's replies: its own, and those sent against a twin copy folded into it.
+const twinsOf = m => ((heldMessages().find(x => x.id === m.id)) || {}).twins || [];
+const repliesTo = m => { const twins = twinsOf(m);
+  return state.said.filter(r => r.msg === m.id || twins.includes(r.msg)); };
 // A conversation's own thread: his replies, oldest first, interleaved with
 // whatever firstmate answer the matching rule attaches to each one
 // (threadRows, bin/command-center-state.js), looked up in every message the
@@ -781,9 +784,15 @@ const repliesTo = m => state.said.filter(r => r.msg === m.id);
 // 2026-09-28, "but what if i have already archived that message?"). An answer
 // that has aged out of both windows simply does not thread, same as it would
 // not be found anywhere else on the page either.
+// One fold per change of the two lists, not per row: foldTwins is quadratic.
+let twinFold = {messages: null, archived: null, out: null};
 function heldMessages(){
-  const ids = new Set(state.messages.map(m => m.id));
-  return state.messages.concat(state.archivedMessages.filter(m => !ids.has(m.id)));
+  if (twinFold.messages !== state.messages || twinFold.archived !== state.archivedMessages){
+    const ids = new Set(state.messages.map(m => m.id));
+    twinFold = {messages: state.messages, archived: state.archivedMessages,
+      out: foldTwins(state.messages.concat(state.archivedMessages.filter(m => !ids.has(m.id))))};
+  }
+  return twinFold.out;
 }
 const threadEntries = repliesOldestFirst => threadRows(repliesOldestFirst, heldMessages());
 // How long a reply has been waiting, in the same units ageLabel already
@@ -889,7 +898,7 @@ function visibleMessages(allProjects){
   // continues (foldAnswers, bin/command-center-state.js) rather than listed on
   // its own; a search shows whatever matched, answers included.
   const rows = !state.q.trim()
-    ? foldAnswers(archived ? state.archivedMessages : state.messages, state.said, heldMessages())
+    ? foldAnswers(heldMessages().filter(m => !!m.archived === archived), state.said, heldMessages())
       .filter(listed)
     : ((archived ? state.archivedFound : state.found) || {}).rows
       ? (archived ? state.archivedFound : state.found).rows.filter(listed)
@@ -976,7 +985,7 @@ function waitingMessages(){
   // touches none of those, so that can never shrink this list on its own (his
   // report 2026-09-24: "i had two items in waiting on you... clicked one... now
   // there was only 1"). A reply moves only the message it answers, to Messages.
-  return waitingMessageRows(state.messages, state.said, state.view.items, state.prs, heldMessages())
+  return waitingMessageRows(heldMessages().filter(m => !m.archived), state.said, state.view.items, state.prs, heldMessages())
     .filter(m => !q || haystack(m).includes(q));
 }
 
@@ -1007,7 +1016,7 @@ function archivedRows(){
 const archivedRowHtml = r => r.__note ? noteRow(r)
   : r.__msg ? messageRow(r, 'archived') : itemRow(r, 'archived');
 const heldItemsList = () => boardItems().filter(isItemHeld);
-const heldMessagesList = () => state.messages.concat(state.archivedMessages)
+const heldMessagesList = () => heldMessages()
   .filter((m, i, all) => all.findIndex(x => x.id === m.id) === i && isMsgHeld(m));
 
 // --- grouping ----------------------------------------------------------------
