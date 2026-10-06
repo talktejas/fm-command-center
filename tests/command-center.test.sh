@@ -1987,6 +1987,57 @@ test_a_hand_filed_message_and_its_captured_twin_are_one_row() {
   pass "a hand-filed message and its captured twin are one row, and nothing without a twin is dropped"
 }
 
+# His report 2026-10-06: "the latest items i archived" were not on top: Archived
+# was grouped by project, so the newest archive sat inside a later group. Archived
+# is now one list, newest archived first, whatever the grouping.
+test_archived_is_one_list_newest_archived_first() {
+  local home port body
+  home="$TMP_ROOT/archived-order"
+  seed_home "$home"
+  start_server "$home" || fail "the server did not start"
+  port=$SERVER_PORT
+  body=$(curl -s -m 30 "http://127.0.0.1:$port/")
+  stop_server
+  assert_contains "$body" "state.tab === 'archived'){" \
+    "Archived is still grouped by project, so the newest archive is not on top"
+  assert_contains "$body" "state.group === 'oldest' ? 'oldest' : 'latest'" \
+    "Archived is still ordered by the grouping instead of by when it was archived"
+  pass "Archived is one list, newest archived first, whatever the grouping"
+}
+
+# His report 2026-10-06: a note firstmate received had the routing explanation as
+# its whole body ("Nothing is waiting on that question any more..."). The page no
+# longer produces those sentences, and the note body sent is exactly his typed text.
+test_the_note_body_is_exactly_what_he_typed_and_no_routing_sentence_is_shown() {
+  local home out body
+  home="$TMP_ROOT/note-body"
+  seed_home "$home"
+  out=$(FM_CC_HOME="$home" python3 - "$SERVER" <<'PYEOF'
+import importlib.util, subprocess, sys, os
+spec = importlib.util.spec_from_file_location("cc", sys.argv[1])
+cc = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(cc)
+sent = []
+real = subprocess.run
+def fake(*a, **k):
+    sent.append(k.get("input"))
+    return subprocess.CompletedProcess(a[0], 0, "queued 333-ghi\n", "")
+subprocess.run = fake
+cc.send_note(os.environ["FM_CC_HOME"], "check the crm gap, then tell me")
+subprocess.run = real
+print(sent[0] == "check the crm gap, then tell me")
+PYEOF
+)
+  assert_equals "True" "$out" "the note body sent to firstmate is not exactly what he typed"
+  start_server "$home" || fail "the server did not start"
+  body=$(curl -s -m 30 "http://127.0.0.1:$SERVER_PORT/")
+  stop_server
+  for text in "as a note about it" "goes to firstmate as a note" "Nothing is waiting on that question"; do
+    case "$body" in *"$text"*) fail "the served page still shows: $text" ;; esac
+  done
+  pass "the note body sent to firstmate is exactly what he typed, and the page shows no routing sentence"
+}
+
 # His report 2026-10-06: firstmate's answer to his reply showed as a separate new
 # row, away from the message and his note. The answer now folds into the one row
 # its reply belongs to - also when that reply was sent against a twin copy - and
@@ -2017,6 +2068,34 @@ test_an_answer_to_a_reply_sent_on_a_twin_threads_into_the_one_row() {
   ' "$ROOT/web/command-center-state.js" 2>&1) || fail "$out"
   assert_contains "$out" "answer-ok" "the answer fold did not run"
   pass "an answer to a reply sent on a twin threads into the one row, and stays with an archived parent"
+}
+
+# His correction 2026-10-07: an item he archived STAYS archived. A firstmate
+# answer recorded after the archive threads into it (and moves it to the top of
+# Archived) but never brings it back to Messages; archiving it again still sticks.
+test_an_answer_to_an_archived_message_stays_archived() {
+  local home port early late body log said
+  home="$TMP_ROOT/archive-answer"
+  seed_home "$home"
+  early=$(say "$home" "Heads up" "Answers now thread.") || fail "the recorder refused the message"
+  late=$(say "$home" "Read already" "Answered before he archived it.") || fail "the recorder refused the message"
+  log="$home/data/captain-messages.jsonl"
+  said="$home/data/command-center/said.jsonl"
+  mkdir -p "$(dirname "$said")"
+  jq -cn --arg m "$early" '{kind:"note",sid:"s1",msg:$m,text:"what if i archived it?",at:"2026-09-28T10:05:00Z"}' >>"$said"
+  jq -cn '{kind:"outcome",of:"s1",note_id:"n1",outcome:"sent",at:"2026-09-28T10:05:01Z"}' >>"$said"
+  jq -cn --arg m "$late" '{kind:"note",sid:"s2",msg:$m,note_id:"n2",outcome:"sent",text:"and this?",at:"2026-09-28T10:05:00Z"}' >>"$said"
+  jq -cn --arg m "$early" '{kind:"archive",of:$m,at:"2026-09-28T10:06:00Z"}' >>"$log"
+  jq -cn '{id:"a1",at:"2026-09-28T10:10:00Z",title:"Answer",text:"It is answered.",answers:"n1"}' >>"$log"
+  jq -cn --arg m "$late" '{kind:"archive",of:$m,at:"2026-09-28T10:20:00Z"}' >>"$log"
+  start_server "$home" || fail "the server did not start"
+  port=$SERVER_PORT
+  body=$(curl -s -m 30 "http://127.0.0.1:$port/api/messages")
+  assert_equals "" "$(printf '%s' "$body" | jq -r --arg m "$early" '.messages[] | select(.id == $m) | .id')"     "an answer brought an archived message back to Messages"
+  assert_equals "$early" "$(curl -s -m 30 "http://127.0.0.1:$port/api/messages?archived=1" | jq -r --arg m "$early" '.messages[] | select(.id == $m) | .id')"     "an answered, archived message left Archived"
+  assert_equals "" "$(jq -r 'select(.kind == "unarchive") | .of' "$log")"     "the server wrote an unarchive for an answered message"
+  stop_server
+  pass "an answer to an archived message threads into it and never brings it back to Messages"
 }
 
 # Enter sends a reply or note box, Shift+Enter is left to type a new line, and
@@ -3204,34 +3283,6 @@ test_an_archived_message_leaves_messages_and_can_be_restored() {
     "a restored message did not return to Messages"
   stop_server
   pass "archiving is durable beside the message and can be restored"
-}
-
-# His correction 2026-10-07: an item he archived STAYS archived. A firstmate
-# answer recorded after the archive threads into it (and moves it to the top of
-# Archived) but never brings it back to Messages; archiving it again still sticks.
-test_an_answer_to_an_archived_message_stays_archived() {
-  local home port early late body log said
-  home="$TMP_ROOT/archive-answer"
-  seed_home "$home"
-  early=$(say "$home" "Heads up" "Answers now thread.") || fail "the recorder refused the message"
-  late=$(say "$home" "Read already" "Answered before he archived it.") || fail "the recorder refused the message"
-  log="$home/data/captain-messages.jsonl"
-  said="$home/data/command-center/said.jsonl"
-  mkdir -p "$(dirname "$said")"
-  jq -cn --arg m "$early" '{kind:"note",sid:"s1",msg:$m,text:"what if i archived it?",at:"2026-09-28T10:05:00Z"}' >>"$said"
-  jq -cn '{kind:"outcome",of:"s1",note_id:"n1",outcome:"sent",at:"2026-09-28T10:05:01Z"}' >>"$said"
-  jq -cn --arg m "$late" '{kind:"note",sid:"s2",msg:$m,note_id:"n2",outcome:"sent",text:"and this?",at:"2026-09-28T10:05:00Z"}' >>"$said"
-  jq -cn --arg m "$early" '{kind:"archive",of:$m,at:"2026-09-28T10:06:00Z"}' >>"$log"
-  jq -cn '{id:"a1",at:"2026-09-28T10:10:00Z",title:"Answer",text:"It is answered.",answers:"n1"}' >>"$log"
-  jq -cn --arg m "$late" '{kind:"archive",of:$m,at:"2026-09-28T10:20:00Z"}' >>"$log"
-  start_server "$home" || fail "the server did not start"
-  port=$SERVER_PORT
-  body=$(curl -s -m 30 "http://127.0.0.1:$port/api/messages")
-  assert_equals "" "$(printf '%s' "$body" | jq -r --arg m "$early" '.messages[] | select(.id == $m) | .id')"     "an answer brought an archived message back to Messages"
-  assert_equals "$early" "$(curl -s -m 30 "http://127.0.0.1:$port/api/messages?archived=1" | jq -r --arg m "$early" '.messages[] | select(.id == $m) | .id')"     "an answered, archived message left Archived"
-  assert_equals "" "$(jq -r 'select(.kind == "unarchive") | .of' "$log")"     "the server wrote an unarchive for an answered message"
-  stop_server
-  pass "an answer to an archived message threads into it and never brings it back to Messages"
 }
 
 # His report 2026-09-28: "the sort order should have the latest archived item
@@ -4867,11 +4918,13 @@ test_a_document_is_served_and_a_file_address_to_it_becomes_its_link
 test_clicking_a_linked_url_never_also_triggers_a_delegated_row_action
 test_the_gutter_finds_every_pane_archive_and_hold_button
 test_selection_follows_the_ordinary_convention_and_delete_needs_two_clicks
+test_an_answer_to_an_archived_message_stays_archived
+test_the_note_body_is_exactly_what_he_typed_and_no_routing_sentence_is_shown
 test_a_reply_to_a_non_question_shows_no_routing_explanation
 test_a_reply_clears_the_box_at_once_and_only_a_failure_returns_it
 test_archive_moves_the_row_at_once_and_a_refused_write_moves_it_back
 test_a_hand_filed_message_and_its_captured_twin_are_one_row
-test_an_answer_to_a_reply_sent_on_a_twin_threads_into_the_one_row
+test_archived_is_one_list_newest_archived_first
 test_archived_and_held_rows_read_from_when_they_were_moved
 test_action_tab_selects_items_and_messages_for_the_bulk_bar
 test_after_an_action_the_pane_moves_to_the_next_row_in_the_filtered_list
@@ -4913,7 +4966,6 @@ test_a_reply_that_is_not_a_question_is_sent_even_with_no_scan
 test_every_captured_message_is_reachable_without_serving_them_all
 test_a_message_far_behind_the_window_is_served_by_id
 test_an_archived_message_leaves_messages_and_can_be_restored
-test_an_answer_to_an_archived_message_stays_archived
 test_archived_messages_are_served_latest_archived_first
 test_a_held_message_leaves_the_messages_total_the_way_archiving_does
 test_a_message_with_nothing_known_about_its_work_is_still_served

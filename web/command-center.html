@@ -1011,7 +1011,8 @@ function archivedRows(){
   const items = archivedItemsList().filter(inProject)
     .filter(it => !q || haystack(it).includes(q));
   const notes = archivedNotes().filter(inProject).filter(n => !q || haystack(n).includes(q));
-  return orderRows(msgs.concat(items, notes), state.group, true, archivedEpoch);
+  // Newest archived first whatever the grouping, except an explicit Oldest.
+  return orderRows(msgs.concat(items, notes), state.group === 'oldest' ? 'oldest' : 'latest', true, archivedEpoch);
 }
 const archivedRowHtml = r => r.__note ? noteRow(r)
   : r.__msg ? messageRow(r, 'archived') : itemRow(r, 'archived');
@@ -1897,7 +1898,10 @@ function rowsHtml(rows, rowFn, emptyText, isMessage, label){
     head = `<div class="hits">${rows.length} match${rows.length === 1 ? '' : 'es'}${
       q ? ` for \u201c${esc(q)}\u201d` : ''}</div>`;
   if (!rows.length) return head + `<div class="empty">${emptyText}</div>`;
-  if (FLAT.has(state.group)){
+  // Archived is one list in the order archived, newest first: grouped, the
+  // newest archive can sit inside a later project's group, not on top (his
+  // report 2026-10-06: "the latest items i archived").
+  if (FLAT.has(state.group) || state.tab === 'archived'){
     const undatedCount = rows.filter(r => !r.since_epoch).length;
     // The flat list makes no ordering claim, so it owes no note about the rows
     // that could not be ordered; the two sorted views do.
@@ -2270,8 +2274,8 @@ function renderMain(){
   const answerStatus = threadStatus(answerEntries);
   // Every answer now reaches firstmate's captain inbox (deliver_to_inbox in
   // command-center.py), whatever the item is.
-  const going = it.closed
-    ? 'Firstmate has already settled this, so this reaches it as a note about it.'
+  // Shown as the answer it is; a settled item's reply says nothing about where it goes.
+  const going = it.closed ? ''
     : 'Goes to firstmate as your answer to this decision, and nothing else.';
   const cell = (label, value, na) =>
     `<div><dt>${label}</dt><dd>${value ? esc(value) : `<span class="lbl-miss">${esc(na)}</span>`}</dd></div>`;
