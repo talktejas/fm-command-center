@@ -1858,6 +1858,103 @@ test_a_reply_to_a_non_question_shows_no_routing_explanation() {
   pass "a reply to a non-question shows no routing explanation to him; the routing is unchanged"
 }
 
+# His report 2026-10-06: after Send the box hung on to his words until the
+# server answered, and the thread waited for a full reload. The reply now clears
+# the box and shows in the thread at once; only a failure puts the words back.
+# Runs the served sendReply in node over stubs, with the POST held open.
+test_a_reply_clears_the_box_at_once_and_only_a_failure_returns_it() {
+  local home port body
+  home="$TMP_ROOT/snappy-send"
+  seed_home "$home"
+  start_server "$home" || fail "the server did not start"
+  port=$SERVER_PORT
+  body=$(curl -s -m 30 "http://127.0.0.1:$port/")
+  stop_server
+  printf '%s\n' "$body" | sed -n '/^async function sendReply(){/,/^}/p' > "$TMP_ROOT/snappy-send.js"
+  assert_contains "$(cat "$TMP_ROOT/snappy-send.js")" "dropLocal()" \
+    "the served sendReply carries no optimistic-send handling"
+  node -e '
+    const assert = require("assert");
+    const fs = require("fs");
+    const msgs = [{ id: "m1" }];
+    let resolvePost, posts = 0;
+    const state = { open: "msg/m1", draft: { "msg/m1": "  yes, go  " }, images: {}, pending: {}, failed: {}, said: [], view: { items: [] } };
+    const openedMessage = () => msgs[0];
+    const nowIso = () => "2026-10-06T00:00:00Z";
+    const save = () => {};
+    const render = () => {};
+    const transportFailure = () => ({ ok: false });
+    const isSending = key => Object.values(state.pending).some(p => p.key === key);
+    const loadSaid = async () => {};
+    const post = () => new Promise(r => { posts++; resolvePost = r; });
+    eval(fs.readFileSync(process.argv[1], "utf8") + "\n;globalThis.__sr = sendReply;");
+    (async () => {
+      const p1 = __sr();
+      // Before the server answers: the box is clear and the reply is in the thread.
+      assert.strictEqual(state.draft["msg/m1"], "", "the box still holds his words while the send is in flight");
+      assert.ok(state.said.some(r => r.msg === "m1" && r.text === "yes, go"), "the reply is not in the thread at once");
+      resolvePost({ ok: true, data: { ok: true, sid: "S1" } });
+      await p1;
+      assert.ok(!state.said.some(r => r.sid && String(r.sid).startsWith("local-")), "the local row was not replaced after the send landed");
+      assert.ok(state.pending.S1, "the accepted send is not tracked by its sid");
+      // A failure puts the words back in the box, with a plain note.
+      delete state.pending.S1;   // the outcome row clears an accepted send
+      state.draft["msg/m1"] = "  yes, go  ";
+      const p2 = __sr();
+      resolvePost({ ok: false, data: { error: "no" } });
+      await p2;
+      assert.strictEqual(state.draft["msg/m1"], "yes, go", "a failed send did not return his words to the box");
+      assert.ok(state.failed["msg/m1"], "a failed send left no note");
+      process.exit(0);
+    })().catch(e => { console.error(e.message); process.exit(1); });
+  ' "$TMP_ROOT/snappy-send.js" 2>"$TMP_ROOT/snappy-send.err" \
+    || fail "$(cat "$TMP_ROOT/snappy-send.err")"
+  pass "a reply clears the box and shows in the thread at once; only a failure returns the words"
+}
+
+# His report 2026-10-06: Archive and Delete waited for the server before the row
+# moved. The row now moves at once; a refused write moves it back. Runs the
+# served archiveMessageById in node with the write held open.
+test_archive_moves_the_row_at_once_and_a_refused_write_moves_it_back() {
+  local home port body
+  home="$TMP_ROOT/snappy-archive"
+  seed_home "$home"
+  start_server "$home" || fail "the server did not start"
+  port=$SERVER_PORT
+  body=$(curl -s -m 30 "http://127.0.0.1:$port/")
+  stop_server
+  printf '%s\n' "$body" | sed -n '/^async function archiveMessageById(id, advance){/,/^}/p' > "$TMP_ROOT/snappy-archive.js"
+  assert_contains "$(cat "$TMP_ROOT/snappy-archive.js")" "moveArchived(m, archived);" \
+    "the served archive does not move the row before the server answers"
+  node -e '
+    const assert = require("assert");
+    const fs = require("fs");
+    const m = { id: "m1", archived: false };
+    const moves = [];
+    let resolvePost;
+    const state = { open: null, openNote: "" };
+    const findMessageById = () => m;
+    const orderFor = () => [];
+    const msgKey = x => "msg/" + x.id;
+    const advanceTo = () => {};
+    const render = () => {};
+    const moveArchived = (row, archived) => { row.archived = archived; moves.push(archived); };
+    const post = () => new Promise(r => { resolvePost = r; });
+    eval(fs.readFileSync(process.argv[1], "utf8") + "\n;globalThis.__a = archiveMessageById;");
+    (async () => {
+      const p1 = __a("m1", false);
+      assert.deepStrictEqual(moves, [true], "the row did not move before the write landed");
+      resolvePost({ ok: false, data: { error: "no" } });
+      await p1;
+      assert.deepStrictEqual(moves, [true, false], "a refused archive did not move the row back");
+      assert.ok(/did not land/.test(state.openNote), "a refused archive gave him no word");
+      process.exit(0);
+    })().catch(e => { console.error(e.message); process.exit(1); });
+  ' "$TMP_ROOT/snappy-archive.js" 2>"$TMP_ROOT/snappy-archive.err" \
+    || fail "$(cat "$TMP_ROOT/snappy-archive.err")"
+  pass "Archive moves the row at once, and a refused write moves it back"
+}
+
 # Enter sends a reply or note box, Shift+Enter is left to type a new line, and
 # an IME's Enter while composing is ignored. Runs the served enterSends in node
 # over a stub textarea and send button: Enter clicks Send only when the box has
@@ -4719,6 +4816,8 @@ test_clicking_a_linked_url_never_also_triggers_a_delegated_row_action
 test_the_gutter_finds_every_pane_archive_and_hold_button
 test_selection_follows_the_ordinary_convention_and_delete_needs_two_clicks
 test_a_reply_to_a_non_question_shows_no_routing_explanation
+test_a_reply_clears_the_box_at_once_and_only_a_failure_returns_it
+test_archive_moves_the_row_at_once_and_a_refused_write_moves_it_back
 test_archived_and_held_rows_read_from_when_they_were_moved
 test_action_tab_selects_items_and_messages_for_the_bulk_bar
 test_after_an_action_the_pane_moves_to_the_next_row_in_the_filtered_list
