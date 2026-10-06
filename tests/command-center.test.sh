@@ -1748,6 +1748,42 @@ test_after_an_action_the_pane_moves_to_the_next_row_in_the_filtered_list() {
   pass "after an action the pane moves to the next row in the filtered list, else the previous, else empty"
 }
 
+# His report 2026-10-06: an item archived (or held) now kept showing its ORIGINAL
+# age, so it read "5h" in Archived and could not be found by when it was moved.
+# An Archived or On-hold row now reads from when it was moved (archived_at /
+# held_at, falling back to its own time), the same as its sort order.
+test_archived_and_held_rows_read_from_when_they_were_moved() {
+  local home port body
+  home="$TMP_ROOT/moved-time"
+  seed_home "$home"
+  start_server "$home" || fail "the server did not start"
+  port=$SERVER_PORT
+  body=$(curl -s -m 30 "http://127.0.0.1:$port/")
+  stop_server
+  printf '%s\n' "$body" | sed -n '/^const shownSince = /,/^const ageTitle = /p' | sed '$d' > "$TMP_ROOT/moved-time.js"
+  assert_contains "$(cat "$TMP_ROOT/moved-time.js")" "shownSince" \
+    "the served page carries no moved-time helper"
+  node -e '
+    const assert = require("assert");
+    const fs = require("fs");
+    const rules = require(process.argv[1]);
+    const now = Math.floor(Date.now() / 1000);
+    const ageWords = (since, n) => rules.ageWords(since, n);
+    const archivedEpoch = rules.archivedEpoch;
+    const shownSince = eval(fs.readFileSync(process.argv[2], "utf8") + "\n;shownSince");
+    const old = { since_epoch: now - 5 * 3600, archived_at: new Date((now - 60) * 1000).toISOString() };
+    assert.strictEqual(ageWords(shownSince(old, "archived"), now), "1m", "an archived row still reads its original age");
+    assert.strictEqual(ageWords(shownSince(old, "list"), now), "5h", "a list row no longer reads its own age");
+    const noStamp = { since_epoch: now - 3 * 3600 };
+    assert.strictEqual(ageWords(shownSince(noStamp, "archived"), now), "3h", "an archived row with no stamp did not fall back to its own time");
+    const held = { since_epoch: now - 5 * 3600, held_at: new Date((now - 120) * 1000).toISOString() };
+    assert.strictEqual(ageWords(shownSince(held, "held"), now), "2m", "a held row still reads its original age");
+    process.exit(0);
+  ' "$ROOT/web/command-center-state.js" "$TMP_ROOT/moved-time.js" 2>"$TMP_ROOT/moved-time.err" \
+    || fail "$(cat "$TMP_ROOT/moved-time.err")"
+  pass "an Archived or On-hold row reads from when it was moved, falling back to its own time"
+}
+
 # Enter sends a reply or note box, Shift+Enter is left to type a new line, and
 # an IME's Enter while composing is ignored. Runs the served enterSends in node
 # over a stub textarea and send button: Enter clicks Send only when the box has
@@ -4608,6 +4644,7 @@ test_a_document_is_served_and_a_file_address_to_it_becomes_its_link
 test_clicking_a_linked_url_never_also_triggers_a_delegated_row_action
 test_the_gutter_finds_every_pane_archive_and_hold_button
 test_selection_follows_the_ordinary_convention_and_delete_needs_two_clicks
+test_archived_and_held_rows_read_from_when_they_were_moved
 test_action_tab_selects_items_and_messages_for_the_bulk_bar
 test_after_an_action_the_pane_moves_to_the_next_row_in_the_filtered_list
 test_enter_sends_and_shift_enter_is_a_new_line

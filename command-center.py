@@ -1311,6 +1311,8 @@ def parked_fields(parked, pair):
               "held": row.get("state") == "held"}
     if fields["archived"]:
         fields["archived_at"] = row.get("at")
+    if fields["held"]:
+        fields["held_at"] = row.get("at")
     return fields
 
 
@@ -2728,7 +2730,8 @@ def read_messages(home, limit=MESSAGE_WINDOW, before=None, query=None, archived=
     mark = b'"' + before.encode() + b'"' if before else b""
     rows = []
     archive_state = {}
-    held = read_parked(home)
+    held_rows = read_parked_rows(home)
+    held = {pair: row["state"] for pair, row in held_rows.items()}
     try:
         with open(message_log(home), "rb") as fh:
             for raw in reversed_lines(fh):
@@ -2764,8 +2767,10 @@ def read_messages(home, limit=MESSAGE_WINDOW, before=None, query=None, archived=
                     # Restored by restore_answered: when, so the page's own
                     # in-flight Archive override yields to it.
                     row = dict(row, restored_at=amendment.get("at"))
+                held_at = (held_rows.get(("message", row["id"])) or {}).get("at")
                 rows.append(dict(row, archived=archived,
-                                  held=held.get(("message", row["id"])) == "held"))
+                                  held=held.get(("message", row["id"])) == "held",
+                                  held_at=held_at))
     except FileNotFoundError:
         return [], False, None
     except OSError as exc:
