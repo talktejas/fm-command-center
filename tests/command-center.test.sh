@@ -1987,6 +1987,24 @@ test_a_hand_filed_message_and_its_captured_twin_are_one_row() {
   pass "a hand-filed message and its captured twin are one row, and nothing without a twin is dropped"
 }
 
+# His report 2026-10-06: "the latest items i archived" were not on top: Archived
+# was grouped by project, so the newest archive sat inside a later group. Archived
+# is now one list, newest archived first, whatever the grouping.
+test_archived_is_one_list_newest_archived_first() {
+  local home port body
+  home="$TMP_ROOT/archived-order"
+  seed_home "$home"
+  start_server "$home" || fail "the server did not start"
+  port=$SERVER_PORT
+  body=$(curl -s -m 30 "http://127.0.0.1:$port/")
+  stop_server
+  assert_contains "$body" "state.tab === 'archived'){" \
+    "Archived is still grouped by project, so the newest archive is not on top"
+  assert_contains "$body" "state.group === 'oldest' ? 'oldest' : 'latest'" \
+    "Archived is still ordered by the grouping instead of by when it was archived"
+  pass "Archived is one list, newest archived first, whatever the grouping"
+}
+
 # Enter sends a reply or note box, Shift+Enter is left to type a new line, and
 # an IME's Enter while composing is ignored. Runs the served enterSends in node
 # over a stub textarea and send button: Enter clicks Send only when the box has
@@ -4851,6 +4869,7 @@ test_a_reply_to_a_non_question_shows_no_routing_explanation
 test_a_reply_clears_the_box_at_once_and_only_a_failure_returns_it
 test_archive_moves_the_row_at_once_and_a_refused_write_moves_it_back
 test_a_hand_filed_message_and_its_captured_twin_are_one_row
+test_archived_is_one_list_newest_archived_first
 test_archived_and_held_rows_read_from_when_they_were_moved
 test_action_tab_selects_items_and_messages_for_the_bulk_bar
 test_after_an_action_the_pane_moves_to_the_next_row_in_the_filtered_list
