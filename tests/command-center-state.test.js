@@ -15,7 +15,7 @@ const {
   isInfoOnlyMessage, sortedTab, saidTaskId, matchAnswer, threadRows, threadStatus,
   recordedAnswers, answeredSend, answerFor, foldAnswers, noteThreads, noteMomentAnswer,
   namesPr, mergeAskOnly, prRowFor, prAsks, markRepeats, workGroups, workStateLabel, saidOnItem, sendDot,
-  ageWords, cardLabels, lacksWorkLabel,
+  ageWords, cardLabels, lacksWorkLabel, watcherStale,
 } = require(path.join(__dirname, '..', 'web', 'command-center-state.js'));
 
 // Quiet on success: tests/command-center.test.sh runs this and reports the
@@ -64,6 +64,15 @@ test('an automatic capture is never Action, even flagged; no twin means Info', (
   assert.strictEqual(isInfoOnlyMessage(cap), false);
 });
 
+// His report 2026-10-06: "firstmate is not watching" during a long turn. Stale
+// only when the beacon AND every other activity sign are old.
+test('a stale beacon with recent activity is not a not-watching state', () => {
+  const t = 1000000;
+  assert.strictEqual(watcherStale({ watcher_beat_epoch: t - 900, activity_epoch: t - 60 }, t), false);
+  assert.strictEqual(watcherStale({ watcher_beat_epoch: t - 900, activity_epoch: t - 900 }, t), true);
+  assert.strictEqual(watcherStale({ watcher_beat_epoch: t - 10 }, t), false);
+  assert.strictEqual(watcherStale({ watcher_beat_epoch: null, activity_epoch: null }, t), true);
+});
 test('an in-flight poll cannot unconfirm a confirmed view', () => {
   const live = { confirmed: true, readAt: NOW - 5, connected: true };
   assert.deepStrictEqual(tense(live, NOW), { past: false, readAt: NOW });

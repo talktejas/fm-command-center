@@ -2165,6 +2165,23 @@ test_answers_to_his_notes_leave_info_and_show_under_my_notes() {
   pass "answers to his notes and item answers leave Info and show under My notes"
 }
 
+# His report 2026-10-06: the not-watching banner came up during a long turn. The
+# scan now reports the newest activity sign for each home (a fresh message, wake,
+# status or handled note), so a stale beacon with recent activity is not stale.
+test_the_scan_reports_the_newest_activity_for_each_home() {
+  local home out
+  home="$TMP_ROOT/activity"
+  seed_home "$home"
+  mkdir -p "$home/state/inbox/handled"
+  printf 'x\n' > "$home/state/inbox/handled/1-note.note"
+  touch -d '@1000' "$home/state/.last-watcher-beat"
+  touch "$home/data/captain-messages.jsonl" "$home/state/inbox/handled/1-note.note"
+  out=$(FM_HOME="$home" FM_FIRSTMATE_ROOT="$FIRSTMATE_ROOT" timeout 90 "$SCAN") || fail "the scan did not run"
+  assert_equals "1" "$(printf '%s' "$out" | jq -r '[.homes[] | select(.id == "main") | (.activity_epoch != null and .activity_epoch > .watcher_beat_epoch)] | map(if . then 1 else 0 end) | add')" \
+    "the scan did not report recent activity for a home whose beacon is stale"
+  pass "the scan reports the newest activity sign, so a stale beacon with recent work is not a not-watching state"
+}
+
 # Enter sends a reply or note box, Shift+Enter is left to type a new line, and
 # an IME's Enter while composing is ignored. Runs the served enterSends in node
 # over a stub textarea and send button: Enter clicks Send only when the box has
@@ -4986,6 +5003,7 @@ test_a_document_is_served_and_a_file_address_to_it_becomes_its_link
 test_clicking_a_linked_url_never_also_triggers_a_delegated_row_action
 test_the_gutter_finds_every_pane_archive_and_hold_button
 test_selection_follows_the_ordinary_convention_and_delete_needs_two_clicks
+test_the_scan_reports_the_newest_activity_for_each_home
 test_answers_to_his_notes_leave_info_and_show_under_my_notes
 test_a_hold_is_seen_at_once_through_the_fold_cache
 test_the_note_body_is_exactly_what_he_typed_and_no_routing_sentence_is_shown

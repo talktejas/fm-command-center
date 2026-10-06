@@ -32,7 +32,7 @@
 # actually moved.
 #
 # Output: one JSON object on stdout.
-#   homes[]  id, name, path, watcher_beat_epoch,
+#   homes[]  id, name, path, watcher_beat_epoch, activity_epoch,
 #            backlog_readable  false ONLY when holds are hidden: an unsupported
 #                              backend, or a backlog file present but unreadable.
 #                              An absent file on the markdown backend is true.
@@ -257,6 +257,18 @@ epoch_of() {  # <file>
   [ -e "$1" ] && stat -c '%Y' "$1" 2>/dev/null || printf ''
 }
 
+# The newest sign that firstmate is alive and working, read without new writes:
+# its message log, its wake queue, its status lines and the newest handled note.
+# A long turn leaves the watcher beacon stale while firstmate still reads replies
+# (his report 2026-10-06: "firstmate is not watching" while it was working).
+newest_activity() {  # <home path>
+  local f
+  for f in "$1"/data/captain-messages.jsonl "$1"/state/.wake-queue \
+      "$1"/state/*.status "$1"/state/inbox/handled/*; do
+    epoch_of "$f"
+  done | sort -n | tail -n 1
+}
+
 # ONE KNOWN MACHINE LINE NEVER REACHES HIS SCREEN. A no-mistakes ask-user gate
 # reports itself as `ask-user findings=<ids> file=<path>` (bin/fm-dod-lib.sh
 # rule 6): ids and a path, with the content deliberately left in the file
@@ -408,10 +420,12 @@ command_scan() {
         readable=true
       fi
       beat=$(epoch_of "$hpath/state/.last-watcher-beat")
+      activity=$(newest_activity "$hpath")
       jq -cn --arg id "$hid" --arg name "$hname" --arg path "$hpath" \
-        --arg beat "$beat" --argjson readable "$readable" \
+        --arg beat "$beat" --arg activity "$activity" --argjson readable "$readable" \
         '{_row:"home",id:$id,name:$name,path:$path,
           watcher_beat_epoch:(if $beat == "" then null else ($beat|tonumber) end),
+          activity_epoch:(if $activity == "" then null else ($activity|tonumber) end),
           backlog_readable:$readable}' || exit 1
       items=$(scan_home "$hid" "$hname" "$hpath") || exit 1
       # The tag is _row, not kind: an item carries a kind of its own and the

@@ -1214,7 +1214,10 @@ function renderWatcher(){
   // inbox regardless of which home an item belongs to, so a second mate's own
   // watcher state is no longer a fact that changes what he can do here.
   const main = homes.find(h => h.id === 'main');
-  const mainStale = main && (!main.watcher_beat_epoch || readAt - main.watcher_beat_epoch > 300);
+  // Stale only when the beacon AND every other sign of activity are old: a long
+  // turn leaves the beacon stale while firstmate still reads replies. Then no
+  // banner at all, not a softer one (watcherStale, bin/command-center-state.js).
+  const mainStale = main && watcherStale(main, readAt);
   if (main && mainStale)
     notices.push(band('warn-soft', 'unknown',
       `<b>Firstmate ${past ? 'was' : 'is'} not watching.</b> ${offline
@@ -1227,7 +1230,7 @@ function renderWatcher(){
     if (!state.unread)
       notices.push(band('warn-soft', 'unknown',
         `<b>No homes read yet.</b> Nothing here is a statement about firstmate's health.`));
-  } else if (main && !mainStale) {
+  } else if (main && main.watcher_beat_epoch && readAt - main.watcher_beat_epoch <= 300) {
     notices.push(`<div class="watcher"${past ? ' style="background:var(--warn-soft)"' : ''}>
       <span class="${past ? 'lamp unknown' : 'beat'}"></span><span><b>Firstmate ${
         past ? 'was' : 'is'} watching</b> (heard ${
