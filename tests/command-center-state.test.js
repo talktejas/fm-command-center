@@ -38,6 +38,31 @@ const NOW = 1_800_000_000;
 
 // A request merely being open is not an answer: a confirmed view stays confirmed
 // until a resolved one says otherwise, and there is no answer kind for "open".
+// His rule 2026-10-07: the tab is decided only by what firstmate recorded.
+test('a recorded question is Action; nothing else ever is', () => {
+  const q = { question: true, title: 'Pick', text: 'Pick one?', at: '2026-10-06T10:00:00Z' };
+  assert.strictEqual(messageNeedsReply(q, [], [], []), true);
+  assert.strictEqual(isInfoOnlyMessage(q), false);
+});
+test('plain progress lines are Info, even when the words sound like a question or a hold', () => {
+  const p = { title: 'KaratCraft: 18 of 36 done', text: 'KaratCraft: 18 of 36 done', at: '2026-10-06T10:00:00Z' };
+  assert.strictEqual(messageNeedsReply(p, [], [], []), false);
+  assert.strictEqual(isInfoOnlyMessage(p), false, 'progress must be Info (messages tab), not Ignore');
+  const held = { title: 'Nothing changed on the task', text: 'Nothing changed on the held task.', at: '2026-10-06T10:00:00Z' };
+  assert.strictEqual(messageNeedsReply(held, [], [{ id: 'x', home: 'main', source: 'hold', key: 'x', held: true }], []), false,
+    'a non-question on a task with a held item must not be Action');
+});
+test('a No change line is Ignore, by title or by opening words', () => {
+  assert.strictEqual(isInfoOnlyMessage({ title: 'No change.', text: 'x', at: '2026-10-06T10:00:00Z' }), true);
+  assert.strictEqual(isInfoOnlyMessage({ title: 'x', text: 'No change since the last report', at: '2026-10-06T10:00:00Z' }), true);
+  assert.strictEqual(isInfoOnlyMessage({ title: 'x', text: 'the report says no change in the build', at: '2026-10-06T10:00:00Z' }), false);
+});
+test('an automatic capture is never Action, even flagged; no twin means Info', () => {
+  const cap = { source: 'transcript', question: true, text: 'Pick one?', at: '2026-10-06T10:00:00Z' };
+  assert.strictEqual(messageNeedsReply(cap, [], [], []), false);
+  assert.strictEqual(isInfoOnlyMessage(cap), false);
+});
+
 test('an in-flight poll cannot unconfirm a confirmed view', () => {
   const live = { confirmed: true, readAt: NOW - 5, connected: true };
   assert.deepStrictEqual(tense(live, NOW), { past: false, readAt: NOW });
@@ -377,28 +402,6 @@ test('a long explanation written back to him is never routine, whatever quiet wo
   assert.strictEqual(isInfoOnlyMessage({ text: long }), false);
 });
 
-test('a message needs a reply only when recorded as a question, until he replies', () => {
-  const flagged = { id: 'm1', question: true, text: 'status update, nothing to decide' };
-  const worded = { id: 'm2', question: false, text: 'Can I merge this branch?' };
-  const plain = { id: 'm3', question: false, text: 'Deployed to staging.' };
-  const status = { id: 'm4', question: false, text: 'Still running, looking into the build.' };
-  assert.strictEqual(messageNeedsReply(flagged, []), true);
-  assert.strictEqual(messageNeedsReply(worded, []), false, 'its words promoted a plain message');
-  assert.strictEqual(messageNeedsReply(plain, []), true, 'finished work is Action');
-  assert.strictEqual(messageNeedsReply(status, []), false, 'a plain status line is Action');
-  // His own reply never removes it, however decisive (AGENTS.md, Action rules).
-  assert.strictEqual(messageNeedsReply(flagged, [{ msg: 'm1' }]), true,
-    'his reply removed a recorded question from Action');
-  assert.strictEqual(messageNeedsReply(flagged, [{ msg: 'm9' }]), true,
-    'a reply to a different message must not settle this one');
-  // Firstmate's recorded answer to that reply, with the decision closed, settles it.
-  const said = [{ msg: 'm1', note_id: 'n1', text: 'Yes.' }];
-  const answer = { id: 'a1', answers: 'n1', text: 'Done.' };
-  assert.strictEqual(messageNeedsReply(flagged, said, [], [answer]), false);
-  assert.strictEqual(messageNeedsReply(flagged, said, [], []), true,
-    'an answer that is not recorded in the messages must not settle it');
-});
-
 // His report 2026-10-06: "my unarchived actions going away". A question he
 // types back on an Action row (including one that ends without "?") leaves the
 // row exactly where it is; only firstmate closing the decision and recording
@@ -444,34 +447,6 @@ test('a plain captured message is never in Waiting on you, whatever it says or i
 // item in the message tab" - archiving everything in Messages had taken rows
 // out of Waiting on you. A message is in exactly one of the two, and only his
 // reply to IT (or firstmate settling its decision) moves it across.
-test('a message is listed in Waiting on you or in Messages, never both', () => {
-  const items = [Object.assign({}, stopped, { closed: true })];
-  const messages = [
-    { id: 'q1', question: true, text: 'Merge feature/x?' },
-    { id: 'q2', question: true, text: 'Should I ship it?' },
-    { id: 'q3', question: true, task: 't1', question_key: 'k1', text: 'Which shape?' },
-    { id: 'n1', text: 'Deployed to staging.' },
-    { id: 'h1', text: 'Tabs or spaces?', held: true },
-    { id: 'fa2', text: 'Shipped.', answers: 'n2' },
-    { id: 'fa3', text: 'Shape B is in.', answers: 'n3' },
-  ];
-  const said = [{ msg: 'q2', note_id: 'n2', text: 'Ship it.' },
-    { msg: 'q3', note_id: 'n3', text: 'Shape B.' }];
-  const waiting = waitingMessageRows(messages, said, items, undefined, messages).map(m => m.id);
-  const listed = messages.filter(m => inMessagesTab(m, said, items, undefined, messages)).map(m => m.id);
-  assert.deepStrictEqual(waiting, ['q1', 'n1', 'fa2', 'fa3'], 'only questions and finished work wait on him');
-  assert.deepStrictEqual(listed, ['q2', 'q3'],
-    'an answered question and one firstmate settled are what Messages lists');
-  assert.strictEqual(waiting.filter(id => listed.includes(id)).length, 0,
-    'a message was listed in two tabs at once');
-  assert.strictEqual(waitingCount(items, messages, said, 0, undefined, messages) + listed.length, 6,
-    'the two badges count some message twice, or a held one at all');
-  // His reply to q1 leaves q1 where it is: no answer from firstmate, nothing closed.
-  const after = [{ msg: 'q1', note_id: 'n9', text: 'Yes, merge it.' }].concat(said);
-  assert.deepStrictEqual(waitingMessageRows(messages, after, items, undefined, messages).map(m => m.id),
-    ['q1', 'n1', 'fa2', 'fa3'], 'his reply moved q1 out of Waiting on you');
-});
-
 // His ruling 2026-09-28 ("CI check failing: ... provider reported failure" -
 // "what the fuck is this?"): only what firstmate put to him is on his board. A
 // worker's own status decision is the worker asking firstmate.
@@ -517,66 +492,12 @@ test('opening a row or typing into it cannot move the Waiting on you count', () 
 // progress/no-change chatter is Info; anything reporting a real outcome, a
 // landed change, a decision or a problem stays in Messages, and a message that
 // plainly asks him something is never info-only.
-test('pure status chatter is info-only; anything with a decision or an outcome is not', () => {
-  assert.strictEqual(isInfoOnlyMessage({ text: 'Nothing new for the captain.' }), true);
-  assert.strictEqual(isInfoOnlyMessage({ text: "That's metals 08, paused for Codex quota. Nothing new for the captain." }), true);
-  assert.strictEqual(isInfoOnlyMessage({ text: 'Still running.' }), true);
-  assert.strictEqual(isInfoOnlyMessage({ text: 'Ack.' }), true);
-  assert.strictEqual(isInfoOnlyMessage({ text: 'The metal chain is finished and verified end to end. Ready for your merge.' }), false,
-    'a landed outcome must stay in Messages even without a question in it');
-  assert.strictEqual(isInfoOnlyMessage({ text: 'Reply 1 or 2. Nothing merges until you decide.' }), false,
-    'a decision ask must never be swallowed by Info, whatever else it says');
-  assert.strictEqual(isInfoOnlyMessage({ question: true, text: 'Nothing new for the captain.' }), false,
-    'a message the recorder marked as a question is never info-only');
-  assert.strictEqual(isInfoOnlyMessage({ text: 'The build failed on the integration branch.' }), false,
-    'a failure stays in Messages');
-});
-
 // His report 2026-09-28: "why the fuck now important message which i need to
 // review is in info instead of fucking message" - firstmate's finding that the
 // cause of his vanishing items was established had been filed as Info. The
 // test is "would he want to know this": results, findings, failures, changes
 // and asks are Messages; only genuine noise is Info, and a message the rules
 // cannot place is Messages. Cases below are real lines from the log.
-test('only genuine noise is Info; any result, finding, failure, change or ask stays in Messages', () => {
-  const info = [
-    'Captain, understood on both counts. Encryption at rest: off. Four now waiting on your word.',
-    'Captain, shipshape. Nothing new — the fleet is quiet and waiting on your three calls.',
-    'Captain, a worker is now looking into it.',
-    'Checks still running, none failing. Nothing new for the captain.',
-    'Captain, shipshape. Same held wait — nothing stuck, nothing new.',
-    'Routine progress. Both are validating. Nothing new for the captain.',
-    "That's a leftover alert from the Codex worker I just stopped on purpose. Nothing new for the captain.",
-    'Captain, on it — the gutter icons are dispatched, the names are being recorded.',
-    '*(No message — nothing for you.)*',
-  ];
-  const messages = [
-    'Captain, the cause of the vanishing items is established — project fm-command-center, repo talktejas/fm-command-center, branch main: 1. **Firstmate closing a decision dropped your items.**',
-    'Captain, three command center problems, all found and now being fixed in one worker: 1. **Slow and unresponsive:** loading the message list takes 108 seconds.',
-    'Captain, I checked `develop` itself, including its history. Facts: 1. On `develop` today, the Diamonds section has exactly two screens.',
-    'Captain, Codex is on hold. Nothing runs on it now, and nothing new will be sent to it until you say otherwise. 1. **Stopped:** the old parked firstmate fix.',
-    'Captain, shipshape. The consignor-statement worker finished and is parked on its pull request.',
-    "Captain, you're right, and it changes. Koin will store 12.34 as 12.34. I'll bring the stack page back for your yes when it's done.",
-    'Already handled and deployed. Nothing new for the captain.',
-    'Captain, the double-tab bug is fixed and live. Refresh the command centre.',
-    'Captain, **pasting images into the command centre is live.**',
-    'Captain, the duplication audit is in. Your metals chain is clean.',
-    'Captain, Koin exists. Project koin, repo talktejas/koin.',
-    'Captain, the Koin technical stack is ready for your yes.',
-    "Captain, you're right, they're still not working: the links fix was written but never merged.",
-    "Captain, pick a name and I'll do the rest. 1. Kofa 2. Pursely",
-    'Captain, plan for Koin. Nothing created until you say go.',
-    'Captain, is this the right branch?',
-  ];
-  for (const text of info) assert.strictEqual(isInfoOnlyMessage({ text }), true, 'should be Info: ' + text);
-  for (const text of messages) assert.strictEqual(isInfoOnlyMessage({ text }), false, 'should be Messages: ' + text);
-  assert.strictEqual(isInfoOnlyMessage({ text: 'Captain, here is how the sort works now.' }), false,
-    'a message no rule places defaults to Messages');
-  const long = 'Captain, I checked it. ' + 'Here is the reasoning. '.repeat(12) + 'The real cause was the window.';
-  assert.strictEqual(isInfoOnlyMessage({ text: long }), false,
-    'a finding anywhere in the text keeps it in Messages, not only in the lead');
-});
-
 // --- two rows, one send --------------------------------------------------------
 // The record carries his words the moment the click is accepted and again when
 // the command answers. The list must show the outcome, not the acceptance.
@@ -961,41 +882,6 @@ test('a note is matched to what firstmate said next, and to nothing after his ne
 const sortedAs = (tab, extra) => Object.assign(
   { id: 'j1', text: 'The audit is in.', sort: { tab, choice: tab, confidence: 0.9 } }, extra);
 
-test('a row Jev has not sorted is placed exactly as before', () => {
-  for (const sort of [undefined, null, {}, { tab: 'elsewhere' }]) {
-    assert.strictEqual(sortedTab({ sort }), null);
-    assert.strictEqual(messageNeedsReply({ id: 'p', text: 'Reply 1 or 2?', sort }, []), false);
-    assert.strictEqual(isInfoOnlyMessage({ text: 'Still running.', sort }), true);
-    assert.strictEqual(isInfoOnlyMessage({ text: 'The audit is in.', sort }), false);
-  }
-});
-
-test('Jev moves an unflagged row between Messages and Info', () => {
-  // Against what the phrase lists alone would say, both ways.
-  assert.strictEqual(isInfoOnlyMessage({ text: 'Still running.', sort: sortedAs('message').sort }), false);
-  assert.strictEqual(isInfoOnlyMessage(sortedAs('info')), true);
-  assert.strictEqual(inMessagesTab(sortedAs('info'), [], []), true, 'Info is still a Messages-side row');
-  assert.strictEqual(messageNeedsReply(sortedAs('info'), []), false);
-  assert.strictEqual(messageNeedsReply(sortedAs('message'), []), true, 'a finding Jev sent to messages is Action');
-});
-
-test('a row Jev reads as a decision waits on him, in one tab, until he answers', () => {
-  const row = sortedAs('decision');
-  assert.strictEqual(messageNeedsReply(row, []), true);
-  assert.strictEqual(inMessagesTab(row, [], []), false, 'listed in two tabs');
-  assert.deepStrictEqual(waitingMessageRows([row], [], []).map(m => m.id), ['j1']);
-  assert.strictEqual(waitingCount([], [row], [], NOW), 1);
-  // His reply, decisive or not, leaves it; firstmate's recorded answer to it moves it.
-  const decided = [{ msg: 'j1', note_id: 'n9', text: 'Go with the first.' }];
-  assert.strictEqual(messageNeedsReply(row, [{ msg: 'j1', text: 'Which one?' }]), true);
-  assert.strictEqual(messageNeedsReply(row, decided), true);
-  assert.strictEqual(inMessagesTab(row, decided, []), false);
-  const answered = [{ id: 'ja', answers: 'n9' }];
-  assert.strictEqual(messageNeedsReply(row, decided, [], answered), false);
-  assert.strictEqual(inMessagesTab(row, decided, [], undefined, answered), true);
-  assert.strictEqual(isInfoOnlyMessage(row), false, 'an answered decision was filed as Info');
-});
-
 test('a recorded question is never Jev\'s to move', () => {
   // The server never sorts one; even a sort that slipped through changes nothing.
   for (const tab of ['info', 'message']) {
@@ -1019,95 +905,11 @@ test('a sort that arrives on a later poll changes the list signature', () => {
 // 0.61; "nothing has changed" was not in the opening-words rule, so nothing
 // stopped it. A plain message that says only nothing changed is Info; a plain
 // message carrying a finding, finished work or a review ask is Action.
-test('a plain nothing-has-changed message on a task with a hold is Info, not Action', () => {
-  const items = [{ home: 'main', source: 'hold', id: 'jt-metals', key: '' }];
-  const text = 'Captain, nothing has changed in **JewelTrek**: the metals app is still up at '
-    + 'http://127.0.0.1:4303 and waiting for your checks.';
-  for (const sort of [undefined, { tab: 'decision', choice: 'decision', confidence: 0.61 }]) {
-    const row = { id: 'cc62c4c0828c5303b', task: 'jt-metals', question: false, text, sort };
-    assert.strictEqual(messageNeedsReply(row, [], items, []), false, 'Action: ' + JSON.stringify(sort));
-    assert.strictEqual(isInfoOnlyMessage(row), true, 'not Info: ' + JSON.stringify(sort));
-  }
-  const asked = { id: 'q2', task: 'jt-metals', question: true, question_key: 'k', text };
-  assert.strictEqual(messageNeedsReply(asked, [], items, []), true, 'a recorded question left Action');
-});
-
 // His report 2026-10-06: action items were filed under Info. The four real
 // records from data/captain-messages.jsonl (copied 2026-10-06), verbatim.
-test('2026-10-06 records: findings and finished work are Action, nothing-changed is Info', () => {
-  const rows = [
-    { id: "m20261006T090756Z-56837", task: null, question: false, project: "b2becom",
-      title: "KaratCraft: portal is up - links, branches, worktrees",
-      text: "Captain, KaratCraft B2B only. It is UP now. Project KaratCraft (b2becom), worktree `~/.treehouse/b2becom-343088/1/b2becom`, branch `develop` as of 2026-10-03, database `b2becom-kk-portal`.\n\n**Links**\n- Storefront: http://localhost:3191/en-US\n- Admin: http://localhost:3191/en-US/admin/login\n- Login: use the one-click role buttons on either login page.\n\n**Open branches:** none. No pull requests are open. 23 old branches remain on the remote; every one is already merged and is only a leftover.\n\n**Worktrees: 7**\n- 5 isolated worker copies under `~/.treehouse/b2becom-343088/1` to `5`, all clean; number 1 is the running portal.\n- 1 team copy on `develop`, clean.\n- Your own copy `/home/tds/p/j/b2becom` on `develop`: behind the latest, with 2 uncommitted files of yours (`ws/fe/src/app/[locale]/layout.tsx`, `ws/native/startup.md`). Untouched.\n\n**One difference to know:** `develop` has moved one commit since 2026-10-03 (container naming only); the running portal does not include it." },
-    { id: "m20261006T091024Z-12883", task: "jt-metals-merge-captain-branch", question: false, project: "jt2627s",
-      title: "JewelTrek metals: diagram link, and alloy grades vs metal classes",
-      text: "Captain, JewelTrek metals only. Project JewelTrek, worktree `~/.treehouse/jt2627s-445362/3/jt2627s`, branch `fm/jt-metals-merge-captain-branch`. Nothing was changed.\n\n**1. The diagram of the whole metal logic** opens in your own Excalidraw, editable:\nhttp://localhost:5010/#url=http://127.0.0.1:5011/metal-logic.excalidraw\n\n**2. Alloy grades versus Metal Classes: they are not connected at all.** They are two separate lists that happen to share words.\n\n- **Metal Classes (Std, Med, High):** three rows, all for gold. Pricing reads their loss and labour figures through the item's metal class. Their formula and \"is selling\" columns are read by nothing.\n- **Alloy grades (Standard, Extended):** stored per alloy. The grade's purity is used by rates and the metal ledger. The grade's premium is stored but no calculation uses it yet.\n- **No link:** no column and no code ties an alloy grade to a metal class.\n\n**3. Your last question - what is in your own `~/wt/jt2627s/metals` that is not here:** the worker is comparing the two now, commit by commit and including any uncommitted files in your copy. It only reads your copy. Answer follows in its own message." },
-    { id: "m20261006T091220Z-27475", task: "jt-metals-merge-captain-branch", question: false, project: "jt2627s",
-      title: "JewelTrek metals: nothing in your own copy is missing here",
-      text: "Captain, JewelTrek metals only. Project JewelTrek, worktree `~/.treehouse/jt2627s-445362/3/jt2627s`, branch `fm/jt-metals-merge-captain-branch`.\n\n**What is in your own metals copy that is not here: nothing.**\n\nYour copy, read without changing it: worktree `~/wt/jt2627s/metals`, branch `feature/metals`.\n\n1. **Code:** your copy is exactly at the pushed `feature/metals`, nothing ahead and nothing behind. Every commit in it is also on the worker's branch. No commit exists only in your copy.\n2. **Uncommitted in your copy:** one file, `ws/.env`, where the database name was changed from `jeweltrek_mc` to `jeweltrek-wt-metals`. That is a settings line, not program content.\n3. **The other direction:** the worker's branch has 32 commits your copy does not have. Those are the added metals work.\n4. **Databases:** your `jeweltrek-wt-metals` has 0 tables, so your own copy shows no data if started. The running `jeweltrek_metals_check` has 520 tables.\n\nAnd you are right about the wrong label: my earlier metals message was stamped with another project's worktree and branch. That was a labelling fault on my side, not where the work is. The worktree and branch at the top of this message are the correct ones." },
-    { id: "cc62c4c0828c5303b", task: "jt-metals-merge-captain-branch", question: false, project: "jt2627s",
-      title: "Captain, nothing has changed in JewelTrek: the metals app on branch…",
-      text: "Captain, nothing has changed in **JewelTrek**: the metals app on branch `fm/jt-metals-merge-captain-branch` is still up at http://127.0.0.1:4303 and waiting for your checks." }
-  ];
-  for (const row of rows.slice(0, 3)) {
-    assert.strictEqual(messageNeedsReply(row, [], [], []), true, 'not Action: ' + row.title);
-    assert.strictEqual(isInfoOnlyMessage(row), false, 'filed as Info: ' + row.title);
-  }
-  const nothing = rows[3];
-  assert.strictEqual(messageNeedsReply(nothing, [], [], []), false, 'nothing-changed is Action');
-  assert.strictEqual(isInfoOnlyMessage(nothing), true, 'nothing-changed is not Info');
-});
-
 // His replies 2026-10-05, on rows Jev had lifted into Messages: "these are just
 // info why fuck u are putting it in messages instead of in info tab", "Nothing
 // for you, captain all these kind go in info".
-test('a message that itself says there is nothing for him is Info always, whatever Jev says', () => {
-  const { declaresNothingForHim, looksLikeInfoOnly } = require('../web/command-center-state.js');
-  const real = [
-    'Nothing for you, captain — another GitHub read timing out from here.',
-    'Nothing for you, captain — the worker had misread why its check was failing; the evidence '
-      + 'says the hand-opened pull request simply never got the pipeline\'s stamp. I sent it the '
-      + 'correction: let the pipeline open its own. Still lands without asking you.',
-    "Held, captain — I've stopped the worker before it binds anything, so it won't fight you "
-      + 'for the ports. It keeps what it built and waits for your word.',
-    'Nothing new, captain — a failed status read on my side; all workers fine.',
-    'Landed, captain, nothing needed from you — the false alarm fix is merged.',
-    'No change. Still running.',
-  ];
-  for (const text of real) {
-    assert.strictEqual(declaresNothingForHim(text), true, text);
-    assert.strictEqual(looksLikeInfoOnly(text), true, 'the rules alone: ' + text);
-    for (const tab of ['decision', 'message', 'info']) {
-      const row = { id: 'n1', text, sort: { tab, choice: tab, confidence: 0.99 } };
-      assert.strictEqual(isInfoOnlyMessage(row), true, tab + ' lifted it out of Info: ' + text);
-      assert.strictEqual(messageNeedsReply(row, []), false, tab + ' put it under Waiting on you');
-    }
-  }
-  // Only the opening words declare it; and what he must answer still waits on him.
-  for (const text of ['JewelTrek metals check app is back up at http://127.0.0.1:4303.',
-    'The audit is in. Nothing changed in billing, but the ledger export is broken.',
-    'Holding pattern explained: the cause is a stale lock, and here is the full finding. '
-      + 'x'.repeat(400)])
-    assert.strictEqual(declaresNothingForHim(text), false, text);
-  // The always-Info rule never fires on a row that also asks him something.
-  const pick = 'Still waiting on your prototype pick — A, B, C or D.';
-  assert.strictEqual(looksLikeInfoOnly(pick), false, 'a pick he owes was filed as Info');
-  assert.strictEqual(isInfoOnlyMessage({ id: 'p0', text: pick }), false);
-  for (const text of ['Nothing new, captain. Still waiting on your prototype pick — A, B, C or D.',
-    'Nothing new for you in that, captain — the mate is back up.\n\nStill yours:\n1. Koin prototype — A, B, C or D.',
-    'Nothing for you, captain — unless you want it faster: say the word and I restart it.',
-    'No change. Which one do you want?']) {
-    assert.strictEqual(declaresNothingForHim(text), false, text);
-    const row = { id: 'p1', text, sort: { tab: 'decision', choice: 'decision', confidence: 0.9 } };
-    assert.strictEqual(isInfoOnlyMessage(row), false, 'an ask was buried in Info: ' + text);
-    assert.strictEqual(messageNeedsReply(row, []), true, 'Jev could not list an ask: ' + text);
-  }
-  const asked = { id: 'q1', question: true, text: 'Nothing new for you, captain — except: A or B?' };
-  assert.strictEqual(isInfoOnlyMessage(asked), false);
-  assert.strictEqual(messageNeedsReply(asked, []), true);
-  assert.strictEqual(isInfoOnlyMessage({ id: 'a1', answers: 'note-1', text: 'Nothing new.' }), false);
-});
-
 // His ruling 2026-10-05: "merge will go in seperate PR tab and not in action
 // tab. action is only where u need my input."
 test('a question that is nothing but a merge ask is shown in its PRs row, never under Input', () => {
@@ -1139,36 +941,6 @@ test('a question that is nothing but a merge ask is shown in its PRs row, never 
 
 // His ask 2026-10-05: "these repeted messages about pr waiting to be merged
 // should not come in command center. should be ignored."
-test('the first report of a pull request is Info; later still-waiting notes and copies are Ignore', () => {
-  const url = 'https://github.com/talktejas/jeweltrek2627-slim/pull/230';
-  const rows = markRepeats([   // newest first, as the page holds them
-    { id: 'm6', text: 'Still waiting on your prototype pick — A, B, C or D.' },
-    { id: 'm5', text: 'Still waiting on your prototype pick — A, B, C or D.' },
-    { id: 'm4', text: 'The metals app is back   up.' },
-    { id: 'm3', text: 'Cert mismatch (PR 230) is still holding for your merge word.' },
-    { id: 'm2', text: 'Captain, ' + url + ' failed its checks after the rebase.' },
-    { id: 'm1', text: 'The metals app is back up.' },
-    { id: 'm0', text: 'The cert-mismatch work is finished and parked on your merge word: ' + url },
-  ]);
-  const by = Object.fromEntries(rows.map(m => [m.id, m]));
-  assert.strictEqual(by.m0.repeat, false, 'the first report of a pull request was ignored');
-  assert.strictEqual(isInfoOnlyMessage(by.m0), false);
-  assert.strictEqual(by.m2.repeat, false, 'news about a known pull request was ignored');
-  assert.strictEqual(by.m3.repeat, true);
-  assert.strictEqual(isInfoOnlyMessage(by.m3), true);
-  assert.strictEqual(by.m4.repeat, true, 'a word-for-word copy was listed twice');
-  assert.strictEqual(by.m1.repeat, false);
-  // A pick he owes is never noise, even repeated (his reply 2026-10-05).
-  assert.strictEqual(by.m6.repeat, false);
-  // Jev cannot lift a repeat into Input or Info; a recorded question is never one.
-  const sorted = Object.assign({}, by.m3, { sort: { tab: 'decision', choice: 'decision', confidence: 0.9 } });
-  assert.strictEqual(messageNeedsReply(sorted, []), false);
-  assert.strictEqual(isInfoOnlyMessage(sorted), true);
-  assert.strictEqual(isInfoOnlyMessage(Object.assign({}, by.m3, { question: true })), false);
-  // A still-waiting note about a pull request never reported is not a repeat.
-  assert.strictEqual(markRepeats([{ id: 'x', text: 'PR 7 is still waiting on your merge word.' }])[0].repeat, false);
-});
-
 // His ask 2026-10-05: "put all the separate projects separately". Work rows
 // group by their own one project; a row with none is its own group, last.
 test('work rows group by their own project, finished ones kept apart', () => {

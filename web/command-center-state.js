@@ -391,17 +391,13 @@ function answeredByFirstmate(message, saidRows, answers) {
   const sends = (saidRows || []).filter(r => r.msg === message.id && r.note_id);
   return sends.some(r => (answers || []).some(m => m.answers === r.note_id));
 }
+// His rule 2026-10-07 (the tenth time): the tab is decided ONLY by what firstmate
+// recorded - no reading of the words, no Jev, no repeat or opening-word rules.
+// Action: a recorded question from firstmate (question or question_key); an
+// automatic capture (source transcript) is never Action.
 function messageNeedsReply(message, saidRows, items, answers) {
   if (!message) return false;
-  // A recorded question always waits on him. A plain message waits on him when
-  // it is not Info (isInfoOnlyMessage: nothing-new, repeats, Jev's info) and
-  // either Jev read it as a decision at or above the floor (sortedTab) or it
-  // carries something he must see - finished work, a finding, a failure, a
-  // review ask (mustBeSeen). Question words alone never promote a plain message
-  // (his report 2026-10-05, "these are just simple messages"). Leaves Action by
-  // his reply, as a question does.
-  if (!message.question && (isInfoOnlyMessage(message)
-      || (sortedTab(message) !== 'decision' && !mustBeSeen(message.text || message.title)))) return false;
+  if (!(message.question || message.question_key) || message.source === 'transcript') return false;
   const named = replyTarget(message, items).item;
   const closed = !named || named.closed;
   return !(closed && answeredByFirstmate(message, saidRows, answers));
@@ -828,21 +824,15 @@ function looksLikeInfoOnly(text) {
   if (t.length > ROUTINE_MAX) return false;
   return NOISE.test(low);
 }
+// Ignore is firstmate's own fixed filler: a title of exactly "No change" (any
+// case, optional trailing period), or a text that starts with "No change".
+// Everything else that is not Action is Info - always.
+const NO_CHANGE_TITLE = /^no change\.?$/i;
 function isInfoOnlyMessage(message) {
   if (!message) return false;
-  if (message.question) return false;
-  // An answer to something he sent is never noise: it is how an answer to a
-  // message he already archived comes back to him (answerFor below).
-  if (message.answers) return false;
-  // Rule first, Jev second: Jev may never lift such a row out of Info.
-  if (declaresNothingForHim(message.text || message.title)) return true;
-  // A repeat of what he was already shown (markRepeats), whatever Jev read.
-  if (message.repeat) return true;
-  // Jev's placement, when there is one, decides Messages vs Info; a row it
-  // read as a decision is in Messages once it no longer waits on him.
-  const tab = sortedTab(message);
-  if (tab) return tab === 'info';
-  return looksLikeInfoOnly(message.text || message.title);
+  if (message.question || message.question_key) return false;
+  return NO_CHANGE_TITLE.test(String(message.title || '').trim())
+    || /^no change/i.test(String(message.text || '').trim());
 }
 
 // --- exactly what Waiting on you counts and lists --------------------------------
