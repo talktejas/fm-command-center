@@ -1519,6 +1519,29 @@ function deleteTargets(){
   if (k.startsWith('note/')) return openedNote() ? [k] : [];
   return (state.view.items || []).some(i => itemKey(i) === k) ? [k] : [];
 }
+// The rows in the order the list he is looking at shows them, so an action on
+// one row moves the pane to the row beside it IN THAT LIST - the Action tab's
+// mixed list (visible) or the message lists, whichever holds the key.
+function orderFor(key){
+  if (!/^(msg|note)\//.test(key) || state.tab === 'waiting')
+    return displayOrder(visible(), false, false, rowKey);
+  return displayOrder(visibleMessages().concat(listedNotes()), true, true,
+    m => m.__note ? noteKey(m.__note) : msgKey(m));
+}
+// After an action on several rows (or one, from a bulk path) the pane moves to
+// the row after the last one acted on, else the one before it, else nothing -
+// the empty state - and only when the open row was among those acted on.
+function moveAfterBulk(order, acted){
+  if (!acted.includes(state.open)) return;
+  const gone = new Set(acted);
+  const left = order.filter(k => !gone.has(k));
+  if (!left.length){ state.open = null; return; }
+  let last = -1;
+  order.forEach((k, i) => { if (gone.has(k)) last = i; });
+  const next = order.slice(last + 1).find(k => !gone.has(k)) || left[left.length - 1];
+  open(next);
+}
+
 // No dialog: the first click arms Delete for exactly what it would delete
 // (a changed selection is a different target, so it never inherits an arm),
 // and only a second click within a few seconds deletes. Every pane carries its
@@ -1543,10 +1566,7 @@ async function armOrDelete(keys = deleteTargets()){
   await deleteKeys(keys);
 }
 async function deleteKeys(keys){
-  const single = keys.length === 1 && keys[0] === state.open && !state.selected.size;
-  const order = !single ? null : state.open.startsWith('msg/')
-    ? displayOrder(visibleMessages(), true, true, msgKey)
-    : displayOrder(visible(), false, false, rowKey);
+  const order = orderFor(keys[0]);
   state.bulkBusy = true; renderList();
   let failed = 0;
   await Promise.all(keys.map(async key => {
@@ -1560,10 +1580,7 @@ async function deleteKeys(keys){
   state.bulkBusy = false;
   state.selected.clear();
   applyArchiveOverride();
-  if (state.deleted.has(state.open)){
-    if (order) { advanceTo(order, state.open); return; }
-    state.open = null;
-  }
+  if (state.deleted.has(state.open)) moveAfterBulk(order, keys);
   if (failed) state.openNote = `${failed} could not be deleted - try again.`;
   render();
 }
@@ -1571,6 +1588,7 @@ async function deleteKeys(keys){
 // An item in the selection is one of Action's item rows (not a message or note).
 const itemOf = key => (state.view.items || []).find(i => itemKey(i) === key) || null;
 async function bulkArchiveSelected(){
+  const acted = [...state.selected], order = orderFor(acted[0]);
   for (const k of state.selected){
     const r = k.startsWith('note/') && findNote(k.slice(5));
     if (r && !r.archived) setNoteArchived(r, true);
@@ -1579,7 +1597,7 @@ async function bulkArchiveSelected(){
   }
   const ms = [...state.selected].filter(k => k.startsWith('msg/'))
     .map(k => findMessageById(k.slice(4))).filter(m => m && !m.archived);
-  if (!ms.length){ state.selected.clear(); renderList(); return; }
+  if (!ms.length){ moveAfterBulk(order, acted); state.selected.clear(); renderList(); return; }
   state.bulkBusy = true; renderList();
   await Promise.all(ms.map(async m => {
     try {
@@ -1587,12 +1605,14 @@ async function bulkArchiveSelected(){
       if (ok && data.ok) moveArchived(m, true);
     } catch (e) { /* next poll reconciles */ }
   }));
+  moveAfterBulk(order, acted);
   state.selected.clear();
   state.bulkBusy = false;
   render();
 }
 
 function bulkHoldSelected(){
+  const acted = [...state.selected], order = orderFor(acted[0]);
   for (const key of state.selected){
     const r = key.startsWith('note/') && findNote(key.slice(5));
     if (r && !r.held) setNoteHeld(r, true);
@@ -1605,6 +1625,7 @@ function bulkHoldSelected(){
     const m = findMessageById(key.slice(4));
     if (m && !m.held) setMsgHeld(m, true);
   }
+  moveAfterBulk(order, acted);
   state.selected.clear();
   renderList();
 }
@@ -2398,8 +2419,7 @@ async function archiveMessageById(id, advance){
   const m = id && findMessageById(id);
   if (!m || state.archiving) return;
   const archived = !m.archived;
-  const keys = advance && archived
-    ? displayOrder(visibleMessages(), true, true, msgKey) : null;
+  const keys = advance && archived ? orderFor(msgKey(m)) : null;
   state.archiving = m.id;
   render();
   try {
@@ -3025,7 +3045,7 @@ document.addEventListener('click', async e => {
     const m = findMessageById(id);
     if (m){
       const toHold = !isMsgHeld(m);
-      const keys = displayOrder(visibleMessages(), true, true, msgKey);
+      const keys = orderFor(msgKey(m));
       setMsgHeld(m, toHold);
       if (toHold && state.open === msgKey(m)) advanceTo(keys, msgKey(m));
     }
