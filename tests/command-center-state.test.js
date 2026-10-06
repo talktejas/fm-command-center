@@ -55,7 +55,8 @@ test('plain progress lines are Info, even when the words sound like a question o
 test('a No change line is Ignore, by title or by opening words', () => {
   assert.strictEqual(isInfoOnlyMessage({ title: 'No change.', text: 'x', at: '2026-10-06T10:00:00Z' }), true);
   assert.strictEqual(isInfoOnlyMessage({ title: 'x', text: 'No change since the last report', at: '2026-10-06T10:00:00Z' }), true);
-  assert.strictEqual(isInfoOnlyMessage({ title: 'x', text: 'the report says no change in the build', at: '2026-10-06T10:00:00Z' }), false);
+  // Before 55 an opening that declares nothing for him was Ignore; that stays (his rule 2026-10-07).
+  assert.strictEqual(isInfoOnlyMessage({ title: 'x', text: 'the report says no change in the build', at: '2026-10-06T10:00:00Z' }), true);
 });
 test('an automatic capture is never Action, even flagged; no twin means Info', () => {
   const cap = { source: 'transcript', question: true, text: 'Pick one?', at: '2026-10-06T10:00:00Z' };

@@ -827,12 +827,23 @@ function looksLikeInfoOnly(text) {
 // Ignore is firstmate's own fixed filler: a title of exactly "No change" (any
 // case, optional trailing period), or a text that starts with "No change".
 // Everything else that is not Action is Info - always.
-const NO_CHANGE_TITLE = /^no change\.?$/i;
 function isInfoOnlyMessage(message) {
   if (!message) return false;
-  if (message.question || message.question_key) return false;
-  return NO_CHANGE_TITLE.test(String(message.title || '').trim())
-    || /^no change/i.test(String(message.text || '').trim());
+  if (message.question) return false;
+  // His rule 2026-10-06: firstmate's fixed filler titled exactly "No change" is Ignore.
+  if (/^no change\.?$/i.test(String(message.title || '').trim())) return true;
+  // An answer to something he sent is never noise: it is how an answer to a
+  // message he already archived comes back to him (answerFor below).
+  if (message.answers) return false;
+  // Rule first, Jev second: Jev may never lift such a row out of Info.
+  if (declaresNothingForHim(message.text || message.title)) return true;
+  // A repeat of what he was already shown (markRepeats), whatever Jev read.
+  if (message.repeat) return true;
+  // Jev's placement, when there is one, decides Messages vs Info; a row it
+  // read as a decision is in Messages once it no longer waits on him.
+  const tab = sortedTab(message);
+  if (tab) return tab === 'info';
+  return looksLikeInfoOnly(message.text || message.title);
 }
 
 // --- exactly what Waiting on you counts and lists --------------------------------
