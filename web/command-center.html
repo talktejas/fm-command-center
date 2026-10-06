@@ -2274,8 +2274,8 @@ function renderMain(){
   const answerStatus = threadStatus(answerEntries);
   // Every answer now reaches firstmate's captain inbox (deliver_to_inbox in
   // command-center.py), whatever the item is.
-  const going = it.closed
-    ? 'Firstmate has already settled this, so this reaches it as a note about it.'
+  // Shown as the answer it is; a settled item's reply says nothing about where it goes.
+  const going = it.closed ? ''
     : 'Goes to firstmate as your answer to this decision, and nothing else.';
   const cell = (label, value, na) =>
     `<div><dt>${label}</dt><dd>${value ? esc(value) : `<span class="lbl-miss">${esc(na)}</span>`}</dd></div>`;

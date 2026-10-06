@@ -2005,6 +2005,39 @@ test_archived_is_one_list_newest_archived_first() {
   pass "Archived is one list, newest archived first, whatever the grouping"
 }
 
+# His report 2026-10-06: a note firstmate received had the routing explanation as
+# its whole body ("Nothing is waiting on that question any more..."). The page no
+# longer produces those sentences, and the note body sent is exactly his typed text.
+test_the_note_body_is_exactly_what_he_typed_and_no_routing_sentence_is_shown() {
+  local home out body
+  home="$TMP_ROOT/note-body"
+  seed_home "$home"
+  out=$(FM_CC_HOME="$home" python3 - "$SERVER" <<'PYEOF'
+import importlib.util, subprocess, sys, os
+spec = importlib.util.spec_from_file_location("cc", sys.argv[1])
+cc = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(cc)
+sent = []
+real = subprocess.run
+def fake(*a, **k):
+    sent.append(k.get("input"))
+    return subprocess.CompletedProcess(a[0], 0, "queued 333-ghi\n", "")
+subprocess.run = fake
+cc.send_note(os.environ["FM_CC_HOME"], "check the crm gap, then tell me")
+subprocess.run = real
+print(sent[0] == "check the crm gap, then tell me")
+PYEOF
+)
+  assert_equals "True" "$out" "the note body sent to firstmate is not exactly what he typed"
+  start_server "$home" || fail "the server did not start"
+  body=$(curl -s -m 30 "http://127.0.0.1:$SERVER_PORT/")
+  stop_server
+  for text in "as a note about it" "goes to firstmate as a note" "Nothing is waiting on that question"; do
+    case "$body" in *"$text"*) fail "the served page still shows: $text" ;; esac
+  done
+  pass "the note body sent to firstmate is exactly what he typed, and the page shows no routing sentence"
+}
+
 # Enter sends a reply or note box, Shift+Enter is left to type a new line, and
 # an IME's Enter while composing is ignored. Runs the served enterSends in node
 # over a stub textarea and send button: Enter clicks Send only when the box has
@@ -4865,6 +4898,7 @@ test_a_document_is_served_and_a_file_address_to_it_becomes_its_link
 test_clicking_a_linked_url_never_also_triggers_a_delegated_row_action
 test_the_gutter_finds_every_pane_archive_and_hold_button
 test_selection_follows_the_ordinary_convention_and_delete_needs_two_clicks
+test_the_note_body_is_exactly_what_he_typed_and_no_routing_sentence_is_shown
 test_a_reply_to_a_non_question_shows_no_routing_explanation
 test_a_reply_clears_the_box_at_once_and_only_a_failure_returns_it
 test_archive_moves_the_row_at_once_and_a_refused_write_moves_it_back
