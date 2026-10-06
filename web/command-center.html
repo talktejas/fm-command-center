@@ -685,6 +685,11 @@ const labelsHtml = r => `<span class="labels" title="${esc(cardLabels(r).map(l =
     l.missing ? l.text : l.key + ' ' + knownValue(r[l.key])).join(' · '))}">${cardLabels(r).map((l, i) =>
   (i ? '<span class="sep">·</span>' : '')
   + `<span class="${l.missing ? 'lbl-miss' : i ? 'mono' : ''}">${esc(l.text)}</span>`).join('')}</span>`;
+// What a row's age reads from: in Archived and On hold, when it was moved there
+// (the amendment's own time, falling back to its message time); elsewhere its own.
+const shownSince = (r, mode) => mode === 'archived' ? archivedEpoch(r)
+  : mode === 'held' ? (Math.floor(Date.parse(r.held_at || '') / 1000) || r.since_epoch || null)
+  : r.since_epoch;
 const ageTitle = it => it.since_kind === 'hold-set'
   ? 'from the moment the question was put to you'
   : it.since_kind === 'question'
@@ -747,10 +752,12 @@ function setItemArchived(it, archived){
 }
 function setItemHeld(it, held){
   it.held = held;
+  it.held_at = held ? nowIso() : null;
   park('item', itemKey(it), held ? 'held' : 'none');
 }
 function setMsgHeld(m, held){
   m.held = held;
+  m.held_at = held ? nowIso() : null;
   park('message', m.id, held ? 'held' : 'none');
 }
 // --- what firstmate SAID -----------------------------------------------------
@@ -1193,7 +1200,7 @@ function itemRow(it, mode){
     <span class="item-top">
       <span class="lamp ${esc(it.listen)}" title="${esc((LISTEN[it.listen]||LISTEN.unknown).label)}"></span>
       <span class="item-title">${esc(it.title)}</span>${flag}
-      <span class="age ${old ? 'old' : ''}" title="${esc(ageTitle(it))}">${ageLabel(it)}</span>
+      <span class="age ${old ? 'old' : ''}" title="${esc(ageTitle(it))}">${ageWords(shownSince(it, mode), nowSecs())}</span>
       ${recvDotHtml(latestAnswerFor(it))}
     </span>
     <span class="item-sub">
@@ -1926,7 +1933,7 @@ function messageRow(m, mode){
       ${state.failed[msgKey(m)] ? '<span class="flag f-stuck">not sent</span>'
         : named && named.closed ? settledFlag(named)
         : threadBadgeHtml(status)}
-      <span class="age" title="from the time firstmate sent it">${ageLabel(m)}</span>
+      <span class="age" title="from the time firstmate sent it">${ageWords(shownSince(m, mode), nowSecs())}</span>
       ${recvDotHtml(latestReplyTo(m))}
     </span>
     <span class="item-sub">${labelsHtml(m)}</span>
