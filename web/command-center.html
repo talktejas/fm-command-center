@@ -1637,8 +1637,11 @@ function workDecisionRow(r){
 // One row per piece of work asked for (/api/work's items): its one project,
 // its state in plain words, and its branch and pull request when it has them.
 // About the work, never the worker - that is the Agents tab.
+// The second mate a row's work runs under, named only off the main home.
+function underMate(r){ return r.home && r.home !== 'main' ? 'under ' + esc(r.home) : ''; }
 function workItemRow(r, byState){
   const bits = [];
+  if (underMate(r)) bits.push(underMate(r));
   if (r.base) bits.push('into ' + esc(r.base));
   if (r.pr) bits.push(`<a href="${esc(r.pr)}" target="_blank" rel="noopener">${esc(r.pr)}</a>`);
   return `<div class="work-row" id="work-${esc(r.id)}">
@@ -1668,7 +1671,7 @@ function agentRow(r){
   const on = r.item
     ? `<button class="work-link" data-goto-work="${esc(r.id)}">${esc(r.title || r.id)}</button>`
     : r.kind === 'secondmate' ? 'runs its own project’s work' : esc(r.id) + ' (no work item recorded)';
-  const bits = [r.base ? 'into ' + esc(r.base) : '', 'running ' + esc(ageLabel(r))].filter(Boolean);
+  const bits = [underMate(r), r.base ? 'into ' + esc(r.base) : '', 'running ' + esc(ageLabel(r))].filter(Boolean);
   return `<div class="work-row">
     ${labelsHtml(r)}
     <div class="work-title">${esc(kind)}</div>

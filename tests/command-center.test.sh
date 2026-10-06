@@ -580,6 +580,46 @@ BACKLOG
   pass "Work serves one row per backlog item under its own project; Agents one per worker"
 }
 
+# A second mate runs its workers under its own home, never the main one. Its
+# running worker and in-flight task must reach Work and Agents with their
+# project, worktree, branch and the second mate's name, and a registered home
+# that is missing must be skipped rather than break the board. A worker in the
+# main home with the SAME task id must not hide the second mate's one.
+test_a_second_mates_running_worker_is_on_the_work_board() {
+  local home mate port body worktree
+  home="$TMP_ROOT/work-second-mate"
+  mate="$TMP_ROOT/work-second-mate-mate"
+  worktree="$TMP_ROOT/work-second-mate-tree"
+  mkdir -p "$home/data" "$home/state" "$mate/data" "$mate/state"
+  fm_git_init_commit "$worktree"
+  git -C "$worktree" checkout -q -b kk/portal
+  printf '# Backlog\n\n## In flight\n- [ ] kk-build - Build the portal (repo: b2becom) (kind: ship) (since 2026-10-05)\n\n## Queued\n\n## Done\n' \
+    > "$mate/data/backlog.md"
+  printf 'project=/somewhere/projects/b2becom\nworktree=%s\nkind=ship\nspawn_gen=s1790000000.1.1\n' \
+    "$worktree" > "$mate/state/kk-build.meta"
+  echo 'working [key=k]: [2026-10-05T10:00:00Z] halfway through the portal' > "$mate/state/kk-build.status"
+  printf '# Backlog\n\n## In flight\n- [ ] kk-build - The main home copy (repo: alpha) (kind: ship) (since 2026-10-05)\n\n## Queued\n\n## Done\n' \
+    > "$home/data/backlog.md"
+  printf 'project=/somewhere/alpha\nkind=ship\nspawn_gen=s1790000000.1.1\n' > "$home/state/kk-build.meta"
+  printf -- '- b2b - synthetic scope (home: %s; scope: portal; projects: b2becom; added 2026-10-05)\n- gone - synthetic scope (home: %s; scope: none; projects: none; added 2026-10-05)\n' \
+    "$mate" "$TMP_ROOT/work-second-mate-missing" > "$home/data/secondmates.md"
+
+  start_server "$home" || fail "the server did not start"
+  port=$SERVER_PORT
+  curl -s -m 60 -o /dev/null "http://127.0.0.1:$port/api/items"
+  body=$(curl -s -m 90 "http://127.0.0.1:$port/api/work")
+  stop_server
+  assert_equals "b2b|b2becom|$worktree|kk/portal" \
+    "$(jq -r '.agents[] | select(.home == "b2b") | [.home, .project, .worktree, .branch] | join("|")' <<<"$body")" \
+    "the second mate's running worker was not read from its own home with its project, worktree and branch"
+  assert_equals "b2b|b2becom|building" \
+    "$(jq -r '.items[] | select(.home == "b2b") | [.home, .project, .state] | join("|")' <<<"$body")" \
+    "the second mate's in-flight task was not on the board under its own project"
+  assert_equals "2" "$(jq '[.agents[] | select(.id == "kk-build")] | length' <<<"$body")" \
+    "a worker sharing a task id with another home was dropped instead of listed under each home"
+  pass "a second mate's running worker is on the work board under its own home, and a missing home is skipped"
+}
+
 # His reports 2026-10-05: a hold filed seconds ago read "17h" (its date-only
 # "since" counted from 00:00 UTC), and held cards showed no worktree or branch.
 test_a_hold_carries_its_real_clock_and_its_three_labels() {
@@ -4417,6 +4457,7 @@ test_server_serves_the_page_and_the_records
 test_the_work_board_is_served
 test_a_hold_carries_its_real_clock_and_its_three_labels
 test_work_lists_each_backlog_item_once_under_its_own_project
+test_a_second_mates_running_worker_is_on_the_work_board
 test_server_refuses_bad_input_before_running_anything
 test_a_server_with_no_scan_yet_refuses_both_the_list_and_a_send
 test_answering_a_hold_records_the_captains_words_and_reaches_the_inbox
