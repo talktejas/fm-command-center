@@ -381,9 +381,11 @@ test('a message needs a reply only when recorded as a question, until he replies
   const flagged = { id: 'm1', question: true, text: 'status update, nothing to decide' };
   const worded = { id: 'm2', question: false, text: 'Can I merge this branch?' };
   const plain = { id: 'm3', question: false, text: 'Deployed to staging.' };
+  const status = { id: 'm4', question: false, text: 'Still running, looking into the build.' };
   assert.strictEqual(messageNeedsReply(flagged, []), true);
   assert.strictEqual(messageNeedsReply(worded, []), false, 'its words promoted a plain message');
-  assert.strictEqual(messageNeedsReply(plain, []), false);
+  assert.strictEqual(messageNeedsReply(plain, []), true, 'finished work is Action');
+  assert.strictEqual(messageNeedsReply(status, []), false, 'a plain status line is Action');
   // His own reply never removes it, however decisive (AGENTS.md, Action rules).
   assert.strictEqual(messageNeedsReply(flagged, [{ msg: 'm1' }]), true,
     'his reply removed a recorded question from Action');
@@ -457,9 +459,9 @@ test('a message is listed in Waiting on you or in Messages, never both', () => {
     { msg: 'q3', note_id: 'n3', text: 'Shape B.' }];
   const waiting = waitingMessageRows(messages, said, items, undefined, messages).map(m => m.id);
   const listed = messages.filter(m => inMessagesTab(m, said, items, undefined, messages)).map(m => m.id);
-  assert.deepStrictEqual(waiting, ['q1'], 'only the unanswered question waits on him');
-  assert.deepStrictEqual(listed, ['q2', 'q3', 'n1', 'fa2', 'fa3'],
-    'an answered question, one firstmate settled, and plain messages are what Messages lists');
+  assert.deepStrictEqual(waiting, ['q1', 'n1', 'fa2', 'fa3'], 'only questions and finished work wait on him');
+  assert.deepStrictEqual(listed, ['q2', 'q3'],
+    'an answered question and one firstmate settled are what Messages lists');
   assert.strictEqual(waiting.filter(id => listed.includes(id)).length, 0,
     'a message was listed in two tabs at once');
   assert.strictEqual(waitingCount(items, messages, said, 0, undefined, messages) + listed.length, 6,
@@ -467,7 +469,7 @@ test('a message is listed in Waiting on you or in Messages, never both', () => {
   // His reply to q1 leaves q1 where it is: no answer from firstmate, nothing closed.
   const after = [{ msg: 'q1', note_id: 'n9', text: 'Yes, merge it.' }].concat(said);
   assert.deepStrictEqual(waitingMessageRows(messages, after, items, undefined, messages).map(m => m.id),
-    ['q1'], 'his reply moved q1 out of Waiting on you');
+    ['q1', 'n1', 'fa2', 'fa3'], 'his reply moved q1 out of Waiting on you');
 });
 
 // His ruling 2026-09-28 ("CI check failing: ... provider reported failure" -
@@ -974,7 +976,7 @@ test('Jev moves an unflagged row between Messages and Info', () => {
   assert.strictEqual(isInfoOnlyMessage(sortedAs('info')), true);
   assert.strictEqual(inMessagesTab(sortedAs('info'), [], []), true, 'Info is still a Messages-side row');
   assert.strictEqual(messageNeedsReply(sortedAs('info'), []), false);
-  assert.strictEqual(messageNeedsReply(sortedAs('message'), []), false);
+  assert.strictEqual(messageNeedsReply(sortedAs('message'), []), true, 'a finding Jev sent to messages is Action');
 });
 
 test('a row Jev reads as a decision waits on him, in one tab, until he answers', () => {
@@ -1015,7 +1017,8 @@ test('a sort that arrives on a later poll changes the list signature', () => {
 // His report 2026-10-06: "nothing has changed in JewelTrek ... waiting for your
 // checks" sat under Action on a task with a hold. Jev read it as a decision at
 // 0.61; "nothing has changed" was not in the opening-words rule, so nothing
-// stopped it. A plain message is Action only when recorded as a question.
+// stopped it. A plain message that says only nothing changed is Info; a plain
+// message carrying a finding, finished work or a review ask is Action.
 test('a plain nothing-has-changed message on a task with a hold is Info, not Action', () => {
   const items = [{ home: 'main', source: 'hold', id: 'jt-metals', key: '' }];
   const text = 'Captain, nothing has changed in **JewelTrek**: the metals app is still up at '
@@ -1027,6 +1030,32 @@ test('a plain nothing-has-changed message on a task with a hold is Info, not Act
   }
   const asked = { id: 'q2', task: 'jt-metals', question: true, question_key: 'k', text };
   assert.strictEqual(messageNeedsReply(asked, [], items, []), true, 'a recorded question left Action');
+});
+
+// His report 2026-10-06: action items were filed under Info. The four real
+// records from data/captain-messages.jsonl (copied 2026-10-06), verbatim.
+test('2026-10-06 records: findings and finished work are Action, nothing-changed is Info', () => {
+  const rows = [
+    { id: "m20261006T090756Z-56837", task: null, question: false, project: "b2becom",
+      title: "KaratCraft: portal is up - links, branches, worktrees",
+      text: "Captain, KaratCraft B2B only. It is UP now. Project KaratCraft (b2becom), worktree `~/.treehouse/b2becom-343088/1/b2becom`, branch `develop` as of 2026-10-03, database `b2becom-kk-portal`.\n\n**Links**\n- Storefront: http://localhost:3191/en-US\n- Admin: http://localhost:3191/en-US/admin/login\n- Login: use the one-click role buttons on either login page.\n\n**Open branches:** none. No pull requests are open. 23 old branches remain on the remote; every one is already merged and is only a leftover.\n\n**Worktrees: 7**\n- 5 isolated worker copies under `~/.treehouse/b2becom-343088/1` to `5`, all clean; number 1 is the running portal.\n- 1 team copy on `develop`, clean.\n- Your own copy `/home/tds/p/j/b2becom` on `develop`: behind the latest, with 2 uncommitted files of yours (`ws/fe/src/app/[locale]/layout.tsx`, `ws/native/startup.md`). Untouched.\n\n**One difference to know:** `develop` has moved one commit since 2026-10-03 (container naming only); the running portal does not include it." },
+    { id: "m20261006T091024Z-12883", task: "jt-metals-merge-captain-branch", question: false, project: "jt2627s",
+      title: "JewelTrek metals: diagram link, and alloy grades vs metal classes",
+      text: "Captain, JewelTrek metals only. Project JewelTrek, worktree `~/.treehouse/jt2627s-445362/3/jt2627s`, branch `fm/jt-metals-merge-captain-branch`. Nothing was changed.\n\n**1. The diagram of the whole metal logic** opens in your own Excalidraw, editable:\nhttp://localhost:5010/#url=http://127.0.0.1:5011/metal-logic.excalidraw\n\n**2. Alloy grades versus Metal Classes: they are not connected at all.** They are two separate lists that happen to share words.\n\n- **Metal Classes (Std, Med, High):** three rows, all for gold. Pricing reads their loss and labour figures through the item's metal class. Their formula and \"is selling\" columns are read by nothing.\n- **Alloy grades (Standard, Extended):** stored per alloy. The grade's purity is used by rates and the metal ledger. The grade's premium is stored but no calculation uses it yet.\n- **No link:** no column and no code ties an alloy grade to a metal class.\n\n**3. Your last question - what is in your own `~/wt/jt2627s/metals` that is not here:** the worker is comparing the two now, commit by commit and including any uncommitted files in your copy. It only reads your copy. Answer follows in its own message." },
+    { id: "m20261006T091220Z-27475", task: "jt-metals-merge-captain-branch", question: false, project: "jt2627s",
+      title: "JewelTrek metals: nothing in your own copy is missing here",
+      text: "Captain, JewelTrek metals only. Project JewelTrek, worktree `~/.treehouse/jt2627s-445362/3/jt2627s`, branch `fm/jt-metals-merge-captain-branch`.\n\n**What is in your own metals copy that is not here: nothing.**\n\nYour copy, read without changing it: worktree `~/wt/jt2627s/metals`, branch `feature/metals`.\n\n1. **Code:** your copy is exactly at the pushed `feature/metals`, nothing ahead and nothing behind. Every commit in it is also on the worker's branch. No commit exists only in your copy.\n2. **Uncommitted in your copy:** one file, `ws/.env`, where the database name was changed from `jeweltrek_mc` to `jeweltrek-wt-metals`. That is a settings line, not program content.\n3. **The other direction:** the worker's branch has 32 commits your copy does not have. Those are the added metals work.\n4. **Databases:** your `jeweltrek-wt-metals` has 0 tables, so your own copy shows no data if started. The running `jeweltrek_metals_check` has 520 tables.\n\nAnd you are right about the wrong label: my earlier metals message was stamped with another project's worktree and branch. That was a labelling fault on my side, not where the work is. The worktree and branch at the top of this message are the correct ones." },
+    { id: "cc62c4c0828c5303b", task: "jt-metals-merge-captain-branch", question: false, project: "jt2627s",
+      title: "Captain, nothing has changed in JewelTrek: the metals app on branch…",
+      text: "Captain, nothing has changed in **JewelTrek**: the metals app on branch `fm/jt-metals-merge-captain-branch` is still up at http://127.0.0.1:4303 and waiting for your checks." }
+  ];
+  for (const row of rows.slice(0, 3)) {
+    assert.strictEqual(messageNeedsReply(row, [], [], []), true, 'not Action: ' + row.title);
+    assert.strictEqual(isInfoOnlyMessage(row), false, 'filed as Info: ' + row.title);
+  }
+  const nothing = rows[3];
+  assert.strictEqual(messageNeedsReply(nothing, [], [], []), false, 'nothing-changed is Action');
+  assert.strictEqual(isInfoOnlyMessage(nothing), true, 'nothing-changed is not Info');
 });
 
 // His replies 2026-10-05, on rows Jev had lifted into Messages: "these are just
