@@ -1748,6 +1748,61 @@ test_after_an_action_the_pane_moves_to_the_next_row_in_the_filtered_list() {
   pass "after an action the pane moves to the next row in the filtered list, else the previous, else empty"
 }
 
+# His report 2026-10-06: Work and Agents rows could not be selected or opened,
+# unlike every other tab. Each row now carries its own key and the shared .item
+# selection, and its pane is read-only detail plus the messages recorded for its
+# task, with no Hold, Archive or Delete. Runs the served key helpers and pane in
+# node over stubs.
+test_work_and_agents_rows_select_and_open_like_the_other_tabs() {
+  local home port body
+  home="$TMP_ROOT/work-select"
+  seed_home "$home"
+  start_server "$home" || fail "the server did not start"
+  port=$SERVER_PORT
+  body=$(curl -s -m 30 "http://127.0.0.1:$port/")
+  stop_server
+  assert_contains "$body" 'data-key="${esc(workKey(r))}"' \
+    "a Work row carries no key, so the shared click cannot select it"
+  assert_contains "$body" 'data-key="${esc(agentKey(r))}"' \
+    "an Agents row carries no key, so the shared click cannot select it"
+  printf '%s\n' "$body" | sed -n '/^const workKey = /,/^function workItemRow(/p' | sed '$d' > "$TMP_ROOT/work-select.js"
+  printf '%s\n' "$body" | sed -n '/^function renderWorkPane(key){/,/^function renderMain(){/p' | sed '$d' >> "$TMP_ROOT/work-select.js"
+  printf '%s\n' "$body" | sed -n '/^function selectable(key){/,/^}/p' >> "$TMP_ROOT/work-select.js"
+  node -e '
+    const assert = require("assert");
+    const fs = require("fs");
+    let painted = null;
+    const state = { open: null, work: { items: [{ home: "main", id: "t1", title: "Task one", detail: "waiting", pr: null }],
+      agents: [{ home: "main", id: "t1", kind: "ship", item: true, status: "building" }] }, tab: "work" };
+    const msgs = [{ id: "m1", task: "t1" }, { id: "m2", task: "t9" }, { id: "m3", task: "t1" }];
+    const esc = s => String(s);
+    const labelsHtml = () => ""; const linked = t => t; const ageLabel = () => "";
+    const ordered = rows => rows; const messageRow = m => `<msg ${m.id}>`;
+    const AGENT_KINDS = { ship: "Worker" }; const workStateLabel = () => "Waiting";
+    const underMate = () => ""; const heldMessagesList = () => msgs;
+    const paintMain = (k, h) => { painted = h; };
+    const $ = () => ({ querySelectorAll: () => [] });
+    const selectAnchor = null;
+    eval(fs.readFileSync(process.argv[1], "utf8") + "\n;globalThis.__w = { workKey, agentKey, isWorkKey, selectable, renderWorkPane };");
+    assert.strictEqual(__w.workKey(state.work.items[0]), "work/main/t1");
+    assert.strictEqual(__w.agentKey(state.work.agents[0]), "agent/main/t1");
+    assert.ok(__w.isWorkKey("agent/main/t1") && !__w.isWorkKey("msg/m1"), "a Work/Agents key is not recognised");
+    assert.strictEqual(__w.selectable("work/main/t1"), false, "a Work row became multi-selectable");
+    state.open = "work/main/t1";
+    __w.renderWorkPane("work/main/t1");
+    assert.ok(painted.includes("Task one"), "the Work pane does not show the row");
+    assert.ok(painted.includes("<msg m1>") && painted.includes("<msg m3>"), "the task messages are missing from the pane");
+    assert.ok(!painted.includes("<msg m2>"), "a message for another task is listed");
+    assert.ok(!/archive|hold|delete/i.test(painted), "the Work pane offers Hold, Archive or Delete");
+    state.open = "agent/main/t1";
+    __w.renderWorkPane("agent/main/t1");
+    assert.ok(painted.includes("Worker") && painted.includes("building"), "the Agents pane does not show the agent");
+    process.exit(0);
+  ' "$TMP_ROOT/work-select.js" 2>"$TMP_ROOT/work-select.err" \
+    || fail "$(cat "$TMP_ROOT/work-select.err")"
+  pass "Work and Agents rows select and open like the other tabs, with a read-only pane and no Hold/Archive/Delete"
+}
+
 # His report 2026-10-06: an item archived (or held) now kept showing its ORIGINAL
 # age, so it read "5h" in Archived and could not be found by when it was moved.
 # An Archived or On-hold row now reads from when it was moved (archived_at /
@@ -4647,6 +4702,7 @@ test_selection_follows_the_ordinary_convention_and_delete_needs_two_clicks
 test_archived_and_held_rows_read_from_when_they_were_moved
 test_action_tab_selects_items_and_messages_for_the_bulk_bar
 test_after_an_action_the_pane_moves_to_the_next_row_in_the_filtered_list
+test_work_and_agents_rows_select_and_open_like_the_other_tabs
 test_enter_sends_and_shift_enter_is_a_new_line
 test_a_message_names_the_project_the_worktree_and_the_branch
 test_a_taskless_message_is_matched_to_the_one_task_it_names

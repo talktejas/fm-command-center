@@ -1283,7 +1283,7 @@ function paintList(html){
 // is something to act on (an open pane, or a selection even with no pane
 // open, e.g. after Ctrl-clicking a row without opening it).
 function renderGutter(){
-  const has = state.selected.size > 0 || !!state.open;
+  const has = state.selected.size > 0 || (!!state.open && !isWorkKey(state.open));
   $('#gutter-archive').disabled = !has;
   $('#gutter-hold').disabled = !has;
   const del = deleteTargets();
@@ -1682,12 +1682,25 @@ function workDecisionRow(r){
 // About the work, never the worker - that is the Agents tab.
 // The second mate a row's work runs under, named only off the main home.
 function underMate(r){ return r.home && r.home !== 'main' ? 'under ' + esc(r.home) : ''; }
+// A Work or Agents row is selected and opened by its own key, like an Action
+// row; its pane is read-only detail plus the messages recorded for its task.
+// Hold, Archive and Delete are message actions, so they never appear there.
+const workKey = r => 'work/' + r.home + '/' + r.id;
+const agentKey = r => 'agent/' + r.home + '/' + r.id;
+const isWorkKey = key => /^(work|agent)\//.test(String(key || ''));
+function workRecord(key){
+  const m = /^(work|agent)\/([^/]+)\/(.+)$/.exec(String(key || ''));
+  if (!m) return null;
+  const list = m[1] === 'agent' ? (state.work.agents || []) : (state.work.items || []);
+  return list.find(r => r.home === m[2] && r.id === m[3]) || null;
+}
 function workItemRow(r, byState){
   const bits = [];
   if (underMate(r)) bits.push(underMate(r));
   if (r.base) bits.push('into ' + esc(r.base));
   if (r.pr) bits.push(`<a href="${esc(r.pr)}" target="_blank" rel="noopener">${esc(r.pr)}</a>`);
-  return `<div class="work-row" id="work-${esc(r.id)}">
+  return `<div class="work-row item${state.open === workKey(r) ? ' selected' : ''}" id="work-${esc(r.id)}"
+      data-key="${esc(workKey(r))}" aria-current="${state.open === workKey(r)}">
     ${labelsHtml(r)}
     <div class="work-title">${esc(r.title || r.id)}</div>
     <div class="work-sub">${linked(workStateLabel(r, new Date().toLocaleDateString('en-CA')))}</div>
@@ -1715,7 +1728,8 @@ function agentRow(r){
     ? `<button class="work-link" data-goto-work="${esc(r.id)}">${esc(r.title || r.id)}</button>`
     : r.kind === 'secondmate' ? 'runs its own project’s work' : esc(r.id) + ' (no work item recorded)';
   const bits = [underMate(r), r.base ? 'into ' + esc(r.base) : '', 'running ' + esc(ageLabel(r))].filter(Boolean);
-  return `<div class="work-row">
+  return `<div class="work-row item${state.open === agentKey(r) ? ' selected' : ''}"
+      data-key="${esc(agentKey(r))}" aria-current="${state.open === agentKey(r)}">
     ${labelsHtml(r)}
     <div class="work-title">${esc(kind)}</div>
     <div class="work-sub">On: ${on}</div>
@@ -2183,7 +2197,40 @@ function renderMessagePane(m){
   wireReplyBox(key);
 }
 
+// Read-only detail of one Work or Agents row, then the messages recorded for
+// its task (each a normal message row, opening the message pane with reply).
+function renderWorkPane(key){
+  const r = workRecord(key);
+  if (!r){
+    paintMain('', `<div class="blank"><strong>Pick something on the left.</strong></div>`);
+    return;
+  }
+  const agent = key.startsWith('agent/');
+  const task = agent ? (r.item ? r.id : null) : r.id;
+  const seen = new Set();
+  const msgs = heldMessagesList().filter(m => {
+    if (!task || m.task !== task || seen.has(m.id)) return false;
+    seen.add(m.id); return true;
+  });
+  const bits = [underMate(r), r.base ? 'into ' + esc(r.base) : '', r.pr
+    ? `<a href="${esc(r.pr)}" target="_blank" rel="noopener">${esc(r.pr)}</a>` : ''].filter(Boolean);
+  const status = agent ? (r.status ? linked(r.status) : 'No status line yet.')
+    : (r.detail ? linked(r.detail) : '');
+  const who = agent ? (AGENT_KINDS[r.kind] || 'Worker') : workStateLabel(r, new Date().toLocaleDateString('en-CA'));
+  paintMain(key, `<div class="work-pane">
+    <h2>${esc(r.title || r.id)}</h2>
+    <div class="work-sub">${labelsHtml(r)}</div>
+    <div class="work-sub">${esc(who)}${agent && r.since_epoch ? ' · running ' + esc(ageLabel(r)) : ''}</div>
+    ${bits.length ? `<div class="work-meta">${bits.join(' · ')}</div>` : ''}
+    ${status ? `<div class="work-sub">${status}</div>` : ''}
+    <h3>Messages for this task <span class="n">${msgs.length}</span></h3>
+    ${msgs.length ? ordered(msgs, true).map(m => messageRow(m, 'list')).join('')
+      : `<div class="empty">Firstmate has not written to you about this task.</div>`}
+  </div>`);
+}
+
 function renderMain(){
+  if (isWorkKey(state.open)){ renderWorkPane(state.open); return; }
   if (String(state.open || '').startsWith('note/')){
     const n = openedNote();
     if (n){ renderNotePane(n); return; }
