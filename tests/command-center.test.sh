@@ -1622,6 +1622,66 @@ test_selection_follows_the_ordinary_convention_and_delete_needs_two_clicks() {
   pass "selection follows the ordinary convention and Delete needs a second click"
 }
 
+# His report 2026-10-06: after Delete, Archive or Hold on the selection the pane
+# must move to the next row IN THE LIST HE IS LOOKING AT (the filtered Action
+# list), the previous one when that was the last, and the empty state only when
+# nothing is left. Runs the served orderFor and moveAfterBulk in node over a
+# stubbed filtered Action list.
+test_after_an_action_the_pane_moves_to_the_next_row_in_the_filtered_list() {
+  local home port body
+  home="$TMP_ROOT/next-row"
+  seed_home "$home"
+  start_server "$home" || fail "the server did not start"
+  port=$SERVER_PORT
+  body=$(curl -s -m 30 "http://127.0.0.1:$port/")
+  stop_server
+  printf '%s\n' "$body" | sed -n '/^function orderFor(key){/,/^\/\/ No dialog: the first click arms Delete/p' \
+    | sed '$d' > "$TMP_ROOT/next-row.js"
+  assert_contains "$(cat "$TMP_ROOT/next-row.js")" "function moveAfterBulk(" \
+    "the served page carries no shared next-row move"
+  node -e '
+    const assert = require("assert");
+    const fs = require("fs");
+    const rowKey = r => r.key;
+    const msgKey = m => "msg/" + m.id;
+    const noteKey = n => "note/" + n.sid;
+    const displayOrder = (rows, newest, isMessage, keyFn) => rows.map(keyFn);
+    // The filtered Action list: "m2" is hidden by the project filter, so it is not in view.
+    let shown = [{ key: "home/x/1" }, { key: "msg/m1", id: "m1" }, { key: "home/x/2" }, { key: "home/x/3" }];
+    const state = { tab: "waiting", open: null, selected: new Set() };
+    const visible = () => shown;
+    const visibleMessages = () => [];
+    const listedNotes = () => [];
+    const opened = [];
+    const open = k => { opened.push(k); state.open = k; };
+    eval(require("fs").readFileSync(process.argv[1], "utf8"));
+    const order = () => orderFor("home/x/2");
+    assert.deepStrictEqual(order(), ["home/x/1", "msg/m1", "home/x/2", "home/x/3"], "Action order is not the on-screen one");
+    // Delete the open row in the middle: the row after it opens.
+    state.open = "home/x/2";
+    moveAfterBulk(order(), ["home/x/2"]);
+    assert.strictEqual(state.open, "home/x/3", "the row after the acted-on one did not open");
+    // Bulk: the last acted-on row is home/x/3 (the last one): the row before it opens.
+    shown = shown.filter(r => r.key !== "home/x/2");
+    state.open = "home/x/3";
+    moveAfterBulk(order(), ["home/x/1", "home/x/3"]);
+    assert.strictEqual(state.open, "msg/m1", "the row before the last acted-on one did not open");
+    // Nothing left: the empty state.
+    shown = [{ key: "home/x/9" }];
+    state.open = "home/x/9";
+    moveAfterBulk(order(), ["home/x/9"]);
+    assert.strictEqual(state.open, null, "an empty filtered list did not reach the empty state");
+    // An action on a row that is not the open one leaves the pane alone.
+    shown = [{ key: "home/x/4" }, { key: "home/x/5" }];
+    state.open = "home/x/5";
+    moveAfterBulk(order(), ["home/x/4"]);
+    assert.strictEqual(state.open, "home/x/5", "an action on another row moved the open pane");
+    process.exit(0);
+  ' "$TMP_ROOT/next-row.js" 2>"$TMP_ROOT/next-row.err" \
+    || fail "$(cat "$TMP_ROOT/next-row.err")"
+  pass "after an action the pane moves to the next row in the filtered list, else the previous, else empty"
+}
+
 # Enter sends a reply or note box, Shift+Enter is left to type a new line, and
 # an IME's Enter while composing is ignored. Runs the served enterSends in node
 # over a stub textarea and send button: Enter clicks Send only when the box has
@@ -4482,6 +4542,7 @@ test_a_document_is_served_and_a_file_address_to_it_becomes_its_link
 test_clicking_a_linked_url_never_also_triggers_a_delegated_row_action
 test_the_gutter_finds_every_pane_archive_and_hold_button
 test_selection_follows_the_ordinary_convention_and_delete_needs_two_clicks
+test_after_an_action_the_pane_moves_to_the_next_row_in_the_filtered_list
 test_enter_sends_and_shift_enter_is_a_new_line
 test_a_message_names_the_project_the_worktree_and_the_branch
 test_a_taskless_message_is_matched_to_the_one_task_it_names
