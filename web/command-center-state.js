@@ -144,9 +144,12 @@ function orderRows(rows, group, newestDefault, timeOf = r => r.since_epoch) {
 // When a row was archived (his ask 2026-09-28: the latest archived on top),
 // from the archived_at the server reads off the archive record itself. A row
 // archived before that record was read back falls back to its own time.
+// An answer recorded after he archived a conversation moves it to the top of
+// Archived too (foldAnswers bumps since_epoch to the answer's time), but it
+// never moves the row back to Action.
 function archivedEpoch(r) {
   const at = Math.floor(Date.parse(r.archived_at || '') / 1000);
-  return at || r.since_epoch || null;
+  return Math.max(at || 0, r.since_epoch || 0) || null;
 }
 
 // --- stable group order across polls --------------------------------------------
@@ -601,7 +604,8 @@ function answeredSend(message, saidRows) {
 function answerFor(message, saidRows, messages) {
   const send = answeredSend(message, saidRows);
   if (!send) return null;
-  const original = send.msg ? (messages || []).find(m => m.id === send.msg) || null : null;
+  const original = send.msg ? (messages || []).find(m => m.id === send.msg
+    || (m.twins || []).includes(send.msg)) || null : null;
   return { send, original, title: (original && original.title) || send.title || null };
 }
 
@@ -614,13 +618,20 @@ function answerFor(message, saidRows, messages) {
 // whose message `allMessages` does not hold - aged out of every window the
 // page has - stays a row of its own, since there is nowhere else to show it.
 function foldAnswers(rows, saidRows, allMessages) {
-  const held = new Set((allMessages || []).map(m => m.id));
+  // A reply sent against a twin copy (foldTwins) continues the message it is
+  // folded into: owner maps every copy's id to the one row the page shows.
+  const owner = {};
+  for (const m of allMessages || []) {
+    owner[m.id] = m.id;
+    for (const t of m.twins || []) owner[t] = m.id;
+  }
+  const held = new Set(Object.keys(owner));
   const latest = {};
   const folded = new Set();
   for (const m of allMessages || []) {
     const a = answerFor(m, saidRows, allMessages);
-    const of = a && a.send.msg;
-    if (!of || of === m.id || !held.has(of)) continue;
+    const of = a && a.send.msg && owner[a.send.msg];
+    if (!of || of === m.id || !held.has(a.send.msg)) continue;
     folded.add(m.id);
     const at = Date.parse(m.at || '');
     if (!isNaN(at) && !(latest[of] && latest[of].at >= at)) latest[of] = { at, id: m.id };

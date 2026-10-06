@@ -2074,6 +2074,66 @@ test_a_hold_is_seen_at_once_through_the_fold_cache() {
   pass "a hold shows at once through the fold cache"
 }
 
+# His correction 2026-10-07: an item he archived STAYS archived. A firstmate
+# answer recorded after the archive threads into it (and moves it to the top of
+# Archived) but never brings it back to Messages; archiving it again still sticks.
+test_an_answer_to_an_archived_message_stays_archived() {
+  local home port early late body log said
+  home="$TMP_ROOT/archive-answer"
+  seed_home "$home"
+  early=$(say "$home" "Heads up" "Answers now thread.") || fail "the recorder refused the message"
+  late=$(say "$home" "Read already" "Answered before he archived it.") || fail "the recorder refused the message"
+  log="$home/data/captain-messages.jsonl"
+  said="$home/data/command-center/said.jsonl"
+  mkdir -p "$(dirname "$said")"
+  jq -cn --arg m "$early" '{kind:"note",sid:"s1",msg:$m,text:"what if i archived it?",at:"2026-09-28T10:05:00Z"}' >>"$said"
+  jq -cn '{kind:"outcome",of:"s1",note_id:"n1",outcome:"sent",at:"2026-09-28T10:05:01Z"}' >>"$said"
+  jq -cn --arg m "$late" '{kind:"note",sid:"s2",msg:$m,note_id:"n2",outcome:"sent",text:"and this?",at:"2026-09-28T10:05:00Z"}' >>"$said"
+  jq -cn --arg m "$early" '{kind:"archive",of:$m,at:"2026-09-28T10:06:00Z"}' >>"$log"
+  jq -cn '{id:"a1",at:"2026-09-28T10:10:00Z",title:"Answer",text:"It is answered.",answers:"n1"}' >>"$log"
+  jq -cn --arg m "$late" '{kind:"archive",of:$m,at:"2026-09-28T10:20:00Z"}' >>"$log"
+  start_server "$home" || fail "the server did not start"
+  port=$SERVER_PORT
+  body=$(curl -s -m 30 "http://127.0.0.1:$port/api/messages")
+  assert_equals "" "$(printf '%s' "$body" | jq -r --arg m "$early" '.messages[] | select(.id == $m) | .id')"     "an answer brought an archived message back to Messages"
+  assert_equals "$early" "$(curl -s -m 30 "http://127.0.0.1:$port/api/messages?archived=1" | jq -r --arg m "$early" '.messages[] | select(.id == $m) | .id')"     "an answered, archived message left Archived"
+  assert_equals "" "$(jq -r 'select(.kind == "unarchive") | .of' "$log")"     "the server wrote an unarchive for an answered message"
+  stop_server
+  pass "an answer to an archived message threads into it and never brings it back to Messages"
+}
+
+# His report 2026-10-06: firstmate's answer to his reply showed as a separate new
+# row, away from the message and his note. The answer now folds into the one row
+# its reply belongs to - also when that reply was sent against a twin copy - and
+# that row moves up to the answer's time; the thread stays with an archived parent.
+test_an_answer_to_a_reply_sent_on_a_twin_threads_into_the_one_row() {
+  local out
+  out=$(node -e '
+    const assert = require("assert");
+    const { foldAnswers, threadRows } = require(process.argv[1]);
+    const text = "Captain, merge pull request 26? Yes or no. Also the clean-up is under way.";
+    const filed = { id: "m-filed", at: "2026-10-06T12:38:56Z", text, project: "b2becom", question: true, twins: ["m-captured"] };
+    const answer = { id: "m-answer", at: "2026-10-06T13:10:00Z", text: "Done - PR 26 merged.", answers: "note-1", archived: false };
+    const said = [
+      { kind: "reply", msg: "m-captured", text: "yes", at: "2026-10-06T12:53:25Z", sid: "reply-1", note_id: "note-1" },
+      { kind: "note", note_id: "note-1", text: "yes", at: "2026-10-06T12:53:25Z", sid: "reply-1" },
+    ];
+    const pool = [filed, answer];
+    const rows = foldAnswers([filed, answer], said, pool);
+    assert.strictEqual(rows.length, 1, "the answer is still a separate row");
+    assert.strictEqual(rows[0].id, "m-filed", "the parent is not the row shown");
+    assert.strictEqual(rows[0].answered_by, "m-answer", "the parent does not carry its answer");
+    const thread = threadRows(said.filter(r => r.msg === "m-captured" || (filed.twins || []).includes(r.msg)), pool);
+    assert.ok(thread.some(e => e.kind === "firstmate" && e.row.id === "m-answer"), "the answer is not in the thread");
+    const archivedParent = Object.assign({}, filed, { archived: true });
+    const r2 = foldAnswers([archivedParent, answer], said, [archivedParent, answer]);
+    assert.strictEqual(r2.length, 1, "an answer to an archived parent came back as a row");
+    process.stdout.write("answer-ok");
+  ' "$ROOT/web/command-center-state.js" 2>&1) || fail "$out"
+  assert_contains "$out" "answer-ok" "the answer fold did not run"
+  pass "an answer to a reply sent on a twin threads into the one row, and stays with an archived parent"
+}
+
 # Enter sends a reply or note box, Shift+Enter is left to type a new line, and
 # an IME's Enter while composing is ignored. Runs the served enterSends in node
 # over a stub textarea and send button: Enter clicks Send only when the box has
@@ -3259,46 +3319,6 @@ test_an_archived_message_leaves_messages_and_can_be_restored() {
     "a restored message did not return to Messages"
   stop_server
   pass "archiving is durable beside the message and can be restored"
-}
-
-# His ruling 2026-09-28 ("i think u unarchive that and continue the thread"):
-# an answer recorded after he archived the message it answers brings that
-# message back to Messages; one he archived after the answer stays archived,
-# and archiving the restored one again sticks.
-test_an_answer_to_an_archived_message_unarchives_it() {
-  local home port early late body log said
-  home="$TMP_ROOT/archive-answer"
-  seed_home "$home"
-  early=$(say "$home" "Heads up" "Answers now thread.") || fail "the recorder refused the message"
-  late=$(say "$home" "Read already" "Answered before he archived it.") || fail "the recorder refused the message"
-  log="$home/data/captain-messages.jsonl"
-  said="$home/data/command-center/said.jsonl"
-  mkdir -p "$(dirname "$said")"
-  jq -cn --arg m "$early" '{kind:"note",sid:"s1",msg:$m,text:"what if i archived it?",at:"2026-09-28T10:05:00Z"}' >>"$said"
-  jq -cn '{kind:"outcome",of:"s1",note_id:"n1",outcome:"sent",at:"2026-09-28T10:05:01Z"}' >>"$said"
-  jq -cn --arg m "$late" '{kind:"note",sid:"s2",msg:$m,note_id:"n2",outcome:"sent",text:"and this?",at:"2026-09-28T10:05:00Z"}' >>"$said"
-  jq -cn --arg m "$early" '{kind:"archive",of:$m,at:"2026-09-28T10:06:00Z"}' >>"$log"
-  jq -cn '{id:"a1",at:"2026-09-28T10:10:00Z",title:"Comes back",text:"It comes back.",answers:"n1"}' >>"$log"
-  jq -cn '{id:"a2",at:"2026-09-28T10:11:00Z",title:"Stays",text:"Read before archiving.",answers:"n2"}' >>"$log"
-  jq -cn --arg m "$late" '{kind:"archive",of:$m,at:"2026-09-28T10:20:00Z"}' >>"$log"
-  start_server "$home" || fail "the server did not start"
-  port=$SERVER_PORT
-  body=$(curl -s -m 30 "http://127.0.0.1:$port/api/messages")
-  assert_equals "$early" "$(printf '%s' "$body" | jq -r --arg m "$early" '.messages[] | select(.id == $m) | .id')" \
-    "an answer to an archived message did not bring it back to Messages"
-  assert_equals true "$(printf '%s' "$body" | jq --arg m "$early" '[.messages[] | select(.id == $m)][0].restored_at != null')" \
-    "the restored message did not say it was restored"
-  assert_equals "" "$(printf '%s' "$body" | jq -r --arg m "$late" '.messages[] | select(.id == $m) | .id')" \
-    "a message he archived after its answer came back anyway"
-  assert_equals a1 "$(jq -r 'select(.kind == "unarchive") | .answer' "$log")" \
-    "the restore was not an ordinary unarchive amendment naming its answer"
-  body=$(post "$port" /api/archive "$(jq -cn --arg m "$early" '{msg:$m,archived:true}')")
-  assert_contains "$body" '"ok":true' "archiving the restored message was not accepted"
-  curl -s -m 30 "http://127.0.0.1:$port/api/messages" >/dev/null
-  assert_equals "" "$(curl -s -m 30 "http://127.0.0.1:$port/api/messages" | jq -r --arg m "$early" '.messages[] | select(.id == $m) | .id')" \
-    "archiving the restored message again did not stick"
-  stop_server
-  pass "an answer to an archived message unarchives it, once"
 }
 
 # His report 2026-09-28: "the sort order should have the latest archived item
@@ -4983,7 +5003,8 @@ test_a_reply_that_is_not_a_question_is_sent_even_with_no_scan
 test_every_captured_message_is_reachable_without_serving_them_all
 test_a_message_far_behind_the_window_is_served_by_id
 test_an_archived_message_leaves_messages_and_can_be_restored
-test_an_answer_to_an_archived_message_unarchives_it
+test_an_answer_to_an_archived_message_stays_archived
+test_an_answer_to_a_reply_sent_on_a_twin_threads_into_the_one_row
 test_archived_messages_are_served_latest_archived_first
 test_a_held_message_leaves_the_messages_total_the_way_archiving_does
 test_a_message_with_nothing_known_about_its_work_is_still_served
