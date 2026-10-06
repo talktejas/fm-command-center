@@ -846,6 +846,16 @@ function looksLikeInfoOnly(text) {
 // Ignore is firstmate's own fixed filler: a title of exactly "No change" (any
 // case, optional trailing period), or a text that starts with "No change".
 // Everything else that is not Action is Info - always.
+// Firstmate counts as not watching only when its beacon is old AND no other
+// activity sign (activity_epoch: the newest message, wake, status or handled note)
+// is within WATCH_ACTIVE_SECS of the read.
+const WATCH_ACTIVE_SECS = 300, WATCH_ACTIVE_RECENT_SECS = 600;
+function watcherStale(home, readAt) {
+  const beatOld = !home.watcher_beat_epoch || readAt - home.watcher_beat_epoch > WATCH_ACTIVE_SECS;
+  if (!beatOld) return false;
+  const activity = home.activity_epoch;
+  return !(activity && readAt - activity <= WATCH_ACTIVE_RECENT_SECS);
+}
 function isInfoOnlyMessage(message) {
   if (!message) return false;
   if (message.question) return false;
@@ -1168,7 +1178,7 @@ function workGroups(items, sort){
 }
 
 if (typeof module === 'object' && module.exports)
-  module.exports = { knownValue, pollFacts, tense, transportFailure, verdictFor,
+  module.exports = { knownValue, pollFacts, tense, transportFailure, verdictFor, watcherStale,
                      releaseVerdicts, itemKey, shapeMessage, orderRows, archivedEpoch, sameTurn, foldTwins,
                      stableGroupOrder, looksLikeQuestion, messageNeedsReply,
                      replyTarget, foldSaid, wordsAfter,
