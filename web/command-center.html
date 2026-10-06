@@ -1187,7 +1187,8 @@ function itemRow(it, mode){
     if (answered.length) flag = threadBadgeHtml(threadStatus(threadEntries(answered)));
   }
   const old = it.since_epoch && (nowSecs() - it.since_epoch) > 86400;
-  return `<div class="row"><button class="item ${isUnread(it) ? '' : 'answered'} ${state.flash === itemKey(it) ? 'fresh' : ''}"
+  return `<div class="row"><button class="item ${isUnread(it) ? '' : 'answered'} ${state.flash === itemKey(it) ? 'fresh' : ''}${
+      state.selected.has(itemKey(it)) ? ' selected' : ''}"
       data-key="${esc(itemKey(it))}" aria-current="${state.open === itemKey(it)}">
     <span class="item-top">
       <span class="lamp ${esc(it.listen)}" title="${esc((LISTEN[it.listen]||LISTEN.unknown).label)}"></span>
@@ -1379,7 +1380,7 @@ function renderList(){
   const partial = state.more ? `<div class="archive-note" style="background:var(--warn-soft)">
     Older messages have not all been read yet, so a question further back may be
     missing here — it is still in the log, and every poll tries again.</div>` : '';
-  paintList(partial + rowsHtml(rows, it => it.__msg ? messageRow(it, 'list') : itemRow(it, 'list'), empty));
+  paintList(selectionBarHtml() + partial + rowsHtml(rows, it => it.__msg ? messageRow(it, 'list') : itemRow(it, 'list'), empty));
 }
 
 // On hold is only ever his own parking - nothing here was ever sent to
@@ -1477,13 +1478,18 @@ function selectionBarHtml(){
 // row open in the pane counts as selected when a multi-select starts from
 // it. Not persisted: an anchor means nothing once the page reloads.
 let selectAnchor = null;
+// Messages and his notes on the message lists; on Action (his report
+// 2026-10-06) its items too, alongside the messages it also lists.
+function selectable(key){
+  return /^(msg|note)\//.test(key) || (state.tab === 'waiting' && !!key);
+}
 function toggleMessageSelection(key, e){
-  if (!state.selected.size && state.open && /^(msg|note)\//.test(state.open)){
+  if (!state.selected.size && state.open && selectable(state.open)){
     state.selected.add(state.open);
     selectAnchor = selectAnchor || state.open;
   }
-  const domKeys = [...$('#list').querySelectorAll('[data-key^="msg/"], [data-key^="note/"]')]
-    .map(el => el.dataset.key);
+  const domKeys = [...$('#list').querySelectorAll('[data-key]')]
+    .map(el => el.dataset.key).filter(selectable);
   const i = domKeys.indexOf(selectAnchor), j = domKeys.indexOf(key);
   if (e.shiftKey && i >= 0 && j >= 0){
     const [lo, hi] = i < j ? [i, j] : [j, i];
@@ -1562,10 +1568,14 @@ async function deleteKeys(keys){
   render();
 }
 
+// An item in the selection is one of Action's item rows (not a message or note).
+const itemOf = key => (state.view.items || []).find(i => itemKey(i) === key) || null;
 async function bulkArchiveSelected(){
   for (const k of state.selected){
     const r = k.startsWith('note/') && findNote(k.slice(5));
     if (r && !r.archived) setNoteArchived(r, true);
+    const it = k.startsWith('msg/') || k.startsWith('note/') ? null : itemOf(k);
+    if (it && !isItemArchived(it)) setItemArchived(it, true);
   }
   const ms = [...state.selected].filter(k => k.startsWith('msg/'))
     .map(k => findMessageById(k.slice(4))).filter(m => m && !m.archived);
@@ -1586,7 +1596,12 @@ function bulkHoldSelected(){
   for (const key of state.selected){
     const r = key.startsWith('note/') && findNote(key.slice(5));
     if (r && !r.held) setNoteHeld(r, true);
-    if (!key.startsWith('msg/')) continue;
+    if (key.startsWith('note/')) continue;
+    if (!key.startsWith('msg/')){
+      const it = itemOf(key);
+      if (it && !isItemHeld(it)) setItemHeld(it, true);
+      continue;
+    }
     const m = findMessageById(key.slice(4));
     if (m && !m.held) setMsgHeld(m, true);
   }
@@ -3029,7 +3044,7 @@ document.addEventListener('click', async e => {
   const row = e.target.closest('.item');
   if (row){
     const key = row.dataset.key;
-    if (key && /^(msg|note)\//.test(key) && (e.shiftKey || e.ctrlKey || e.metaKey)){
+    if (key && selectable(key) && (e.shiftKey || e.ctrlKey || e.metaKey)){
       toggleMessageSelection(key, e);
       return;
     }
