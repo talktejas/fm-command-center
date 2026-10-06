@@ -1978,7 +1978,21 @@ function wireReplyBox(key){
     $('#send').disabled = !ta.value.trim() || state.sending || isSending(key)
       || !!SEND_VERDICT[(state.outcome[key] || {}).outcome];
   });
+  enterSends(ta, () => $('#send'));
   wireAttach($('.reply'), key);
+}
+
+// Enter sends a reply box, Shift+Enter a new line (and Enter while an input
+// method is still composing is left alone). It only clicks that box's own Send
+// button, so an empty, disabled or in-flight box sends nothing, exactly as the
+// button does. Every reply and note box goes through this one function.
+function enterSends(ta, sendButton){
+  ta.addEventListener('keydown', e => {
+    if (e.key !== 'Enter' || e.shiftKey || e.isComposing) return;
+    e.preventDefault();
+    const b = sendButton();
+    if (ta.value.trim() && b && !b.disabled) b.click();
+  });
 }
 
 // A note's own pane: his note, then every answer firstmate recorded against
@@ -3085,6 +3099,7 @@ $('#note-text').value = state.note;
 $('#note-text').addEventListener('input', e => {
   state.note = e.target.value; save('cc.note', state.note);
 });
+enterSends($('#note-text'), () => $('#note-dlg button[value="send"]'));
 wireAttach($('#note-dlg'), 'note');
 renderAttachStrip('note');
 

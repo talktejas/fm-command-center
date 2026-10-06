@@ -1582,6 +1582,61 @@ test_selection_follows_the_ordinary_convention_and_delete_needs_two_clicks() {
   pass "selection follows the ordinary convention and Delete needs a second click"
 }
 
+# Enter sends a reply or note box, Shift+Enter is left to type a new line, and
+# an IME's Enter while composing is ignored. Runs the served enterSends in node
+# over a stub textarea and send button: Enter clicks Send only when the box has
+# words and Send is enabled, and every reply/note box is wired through it.
+test_enter_sends_and_shift_enter_is_a_new_line() {
+  local home port body
+  home="$TMP_ROOT/enter"
+  seed_home "$home"
+  start_server "$home" || fail "the server did not start"
+  port=$SERVER_PORT
+  body=$(curl -s -m 30 "http://127.0.0.1:$port/")
+  stop_server
+  printf '%s\n' "$body" | sed -n '/^function enterSends(/,/^}/p' > "$TMP_ROOT/enter.js"
+  assert_contains "$(cat "$TMP_ROOT/enter.js")" "function enterSends(" \
+    "the served page carries no enterSends function"
+  assert_contains "$body" "enterSends(ta, () => \$('#send'));" \
+    "the reply box is not wired through enterSends"
+  assert_contains "$body" "enterSends(\$('#note-text')" \
+    "the note box is not wired through enterSends"
+  node -e '
+    const assert = require("assert");
+    let clicks = 0, disabled = false, listener = null;
+    const ta = { value: "", addEventListener: (t, f) => { listener = f; } };
+    const send = () => ({ get disabled(){ return disabled; }, click: () => { clicks++; } });
+    eval(require("fs").readFileSync(process.argv[1], "utf8"));
+    enterSends(ta, send);
+    const press = (key, extra = {}) => {
+      const ev = { key, shiftKey: false, isComposing: false, prevented: false,
+                   preventDefault() { this.prevented = true; }, ...extra };
+      listener(ev);
+      return ev;
+    };
+    ta.value = "hello";
+    let ev = press("Enter");
+    assert.strictEqual(clicks, 1, "Enter did not send the reply");
+    assert.ok(ev.prevented, "Enter still inserted a newline");
+    ev = press("Enter", { shiftKey: true });
+    assert.strictEqual(clicks, 1, "Shift+Enter sent instead of making a new line");
+    assert.ok(!ev.prevented, "Shift+Enter was blocked from making a new line");
+    press("Enter", { isComposing: true });
+    assert.strictEqual(clicks, 1, "Enter during an IME composition sent");
+    press("a");
+    assert.strictEqual(clicks, 1, "an ordinary key sent");
+    ta.value = "   ";
+    press("Enter");
+    assert.strictEqual(clicks, 1, "an empty reply was sent");
+    ta.value = "hi"; disabled = true;
+    press("Enter");
+    assert.strictEqual(clicks, 1, "Enter sent through a disabled Send button");
+    process.exit(0);
+  ' "$TMP_ROOT/enter.js" 2>"$TMP_ROOT/enter.err" \
+    || fail "$(cat "$TMP_ROOT/enter.err")"
+  pass "Enter sends a reply or note box, Shift+Enter makes a new line, and an empty or composing box sends nothing"
+}
+
 # The page's decision rules live in web/command-center-state.js because they are
 # what got the rules wrong twice; these execute that file itself.
 test_the_pages_decision_rules_hold() {
@@ -4386,6 +4441,7 @@ test_a_document_is_served_and_a_file_address_to_it_becomes_its_link
 test_clicking_a_linked_url_never_also_triggers_a_delegated_row_action
 test_the_gutter_finds_every_pane_archive_and_hold_button
 test_selection_follows_the_ordinary_convention_and_delete_needs_two_clicks
+test_enter_sends_and_shift_enter_is_a_new_line
 test_a_message_names_the_project_the_worktree_and_the_branch
 test_a_taskless_message_is_matched_to_the_one_task_it_names
 test_a_message_naming_two_tasks_is_left_blank_rather_than_guessed
