@@ -617,7 +617,7 @@ function answerFor(message, saidRows, messages) {
 // (the newest answer's id) so the page can show it unread again. An answer
 // whose message `allMessages` does not hold - aged out of every window the
 // page has - stays a row of its own, since there is nowhere else to show it.
-function foldAnswers(rows, saidRows, allMessages) {
+function foldAnswers(rows, saidRows, allMessages, openItemKeys) {
   // A reply sent against a twin copy (foldTwins) continues the message it is
   // folded into: owner maps every copy's id to the one row the page shows.
   const owner = {};
@@ -630,6 +630,14 @@ function foldAnswers(rows, saidRows, allMessages) {
   const folded = new Set();
   for (const m of allMessages || []) {
     const a = answerFor(m, saidRows, allMessages);
+    // An answer to one of his notes shows under that note in My notes; an
+    // answer to one of his item answers shows in that item's own thread (while
+    // the item is listed). Neither is a row of Info or Action.
+    if (a && !a.send.msg && (a.send.kind === 'note' && a.send.answerable
+        || (a.send.item_key && openItemKeys && openItemKeys.has(a.send.item_key)))){
+      folded.add(m.id);
+      continue;
+    }
     const of = a && a.send.msg && owner[a.send.msg];
     if (!of || of === m.id || !held.has(a.send.msg)) continue;
     folded.add(m.id);

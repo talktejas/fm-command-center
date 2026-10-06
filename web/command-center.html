@@ -87,7 +87,8 @@
 
   mark{background:#fff2a8;color:inherit;border-radius:2px;padding:0 1px}
 
-  .tabs{display:flex;gap:4px;margin-bottom:9px}
+  .tabs{display:flex;flex-wrap:wrap;gap:4px;margin-bottom:9px}
+  .tabs .tabbreak{flex-basis:100%;height:0}
   .tab{border:0;background:transparent;border-radius:6px;padding:5px 10px;font-size:13px;
     color:var(--dim);cursor:pointer}
   .tab:hover{background:var(--line2)}
@@ -393,6 +394,8 @@
         <button class="tab" role="tab" data-tab="prs" aria-selected="false" title="Pull requests waiting for your merge word">PRs <span class="n" id="n-prs"></span></button>
         <button class="tab" role="tab" data-tab="work" aria-selected="false" title="Everything active: being worked on, or dormant waiting for you">Work <span class="n" id="n-work"></span></button>
         <button class="tab" role="tab" data-tab="agents" aria-selected="false" title="Every running worker and second mate, and the work each is on">Agents <span class="n" id="n-agents"></span></button>
+        <span class="tabbreak"></span>
+        <button class="tab" role="tab" data-tab="mynotes" aria-selected="false" title="Every note and reply you typed, with firstmate's answer under it">My notes <span class="n" id="n-mynotes"></span></button>
         <button class="tab" role="tab" data-tab="archived" aria-selected="false">Archived <span class="n" id="n-archived"></span></button>
         <button class="tab" role="tab" data-tab="hold" aria-selected="false">Hold <span class="n" id="n-hold"></span></button>
       </div>
@@ -902,7 +905,7 @@ function visibleMessages(allProjects){
   // continues (foldAnswers, bin/command-center-state.js) rather than listed on
   // its own; a search shows whatever matched, answers included.
   const rows = !state.q.trim()
-    ? foldAnswers(heldMessages().filter(m => !!m.archived === archived), state.said, heldMessages())
+    ? foldAnswers(heldMessages().filter(m => !!m.archived === archived), state.said, heldMessages(), openItemKeys())
       .filter(listed)
     : ((archived ? state.archivedFound : state.found) || {}).rows
       ? (archived ? state.archivedFound : state.found).rows.filter(listed)
@@ -993,6 +996,44 @@ function waitingMessages(){
     .filter(m => !q || haystack(m).includes(q));
 }
 
+// Keys of the items the page lists, so an answer to one can thread into it.
+const openItemKeys = () => new Set((state.view.items || []).map(itemKey));
+// My notes: every note, reply and item answer he typed, newest first. Each row
+// says what it was about, and firstmate's answer shows under it.
+function myNoteRows(){
+  const out = [];
+  for (const r of state.said || []){
+    if (r.deleted || !r.at) continue;
+    let key = null, about = null;
+    if (r.kind === 'note' && r.answerable && r.sid){ key = noteKey(r); about = 'your note'; }
+    else if (r.kind === 'reply' && r.msg){
+      const m = findMessageById(r.msg);
+      key = 'msg/' + r.msg; about = m ? m.title : 'a message';
+    }
+    else if (r.kind === 'answer' && r.item_key){
+      const it = (state.view.items || []).find(i => itemKey(i) === r.item_key);
+      key = r.item_key; about = it ? it.title : 'an item';
+    }
+    if (key) out.push({r, key, about, at: Date.parse(r.at)});
+  }
+  return out.sort((a, b) => b.at - a.at);
+}
+function myNoteRow(x){
+  const first = String(x.r.text || '').split('\n')[0].slice(0, 140) || '(empty)';
+  const ans = recordedAnswers(x.r, heldMessages())[0];
+  return `<div class="row"><button class="item" data-key="${esc(x.key)}" aria-current="${state.open === x.key}">
+    <span class="item-top"><span class="item-title">${esc(first)}</span>
+      <span class="age" title="from the time you sent it">${ageWords(Math.floor(x.at / 1000), nowSecs())}</span></span>
+    <span class="item-sub"><span>${esc(x.about)}</span>${ans
+      ? `<span class="sep">·</span><span>Firstmate: ${esc(ans.title || 'answered')}</span>` : ''}</span>
+  </button></div>`;
+}
+function renderMyNotes(){
+  const rows = myNoteRows();
+  $('#n-mynotes').textContent = rows.length;
+  paintList(rows.length ? rows.map(myNoteRow).join('')
+    : `<div class="empty">Nothing typed yet.</div>`);
+}
 function visible(allProjects){
   const q = state.q.trim().toLowerCase();
   const items = (state.view.items || []).filter(it => onHisBoard(it) &&
@@ -1361,7 +1402,7 @@ function renderList(){
   // classification only exists client-side, over whatever window is loaded.
   // Both badges are exactly what visibleMessages() would show for that tab,
   // the same window-based rule n-hold already uses.
-  const unheldMsgs = foldAnswers(state.messages, state.said, heldMessages())
+  const unheldMsgs = foldAnswers(state.messages, state.said, heldMessages(), openItemKeys())
     .filter(m => inMessagesTab(m, state.said, state.view.items, state.prs, heldMessages()));
   const infoCount = unheldMsgs.filter(isInfoOnlyMessage).length;
   $('#n-messages').textContent = unheldMsgs.length - infoCount + listedNotes().length;
@@ -1387,6 +1428,7 @@ function renderList(){
   renderProjectFilter(); renderWatcher(); paintCaptureNote();
   if (state.tab === 'messages' || state.tab === 'info'){ renderMessages(); return; }
   if (state.tab === 'archived'){ renderMessages(true); return; }
+  if (state.tab === 'mynotes'){ renderMyNotes(); return; }
   if (state.tab === 'hold'){ renderHold(); return; }
   if (state.tab === 'work'){ renderWork(); return; }
   if (state.tab === 'agents'){ renderAgents(); return; }

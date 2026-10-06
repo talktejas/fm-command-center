@@ -1321,9 +1321,9 @@ test_the_tabs_are_served_in_the_captains_order() {
   order=$(printf '%s' "$body" | grep -o 'class="tab" role="tab" data-tab="[a-z]*"' \
     | sed 's/.*data-tab="\([a-z]*\)"/\1/' | tr '\n' ' ')
   stop_server
-  assert_equals "waiting messages info prs work agents archived hold " "$order" \
+  assert_equals "waiting messages info prs work agents mynotes archived hold " "$order" \
     "the tabs are not served in the order he asked for"
-  pass "the tabs are served as Action, Info, Ignore, PRs, Work, Agents, Archived, Hold"
+  pass "the tabs are served as Action, Info, Ignore, PRs, Work, Agents, My notes, Archived, Hold"
 }
 
 # His report 2026-10-05: a message with a Markdown table showed the raw pipes.
@@ -2132,6 +2132,37 @@ test_an_answer_to_a_reply_sent_on_a_twin_threads_into_the_one_row() {
   ' "$ROOT/web/command-center-state.js" 2>&1) || fail "$out"
   assert_contains "$out" "answer-ok" "the answer fold did not run"
   pass "an answer to a reply sent on a twin threads into the one row, and stays with an archived parent"
+}
+
+# His report 2026-10-07 ("my note in info"): firstmate's answers to his notes and
+# to his item answers were separate Info rows. They now fold out of Info and show
+# under his note in My notes, a tab of its own laid out in a second row.
+test_answers_to_his_notes_leave_info_and_show_under_my_notes() {
+  local home port body out
+  home="$TMP_ROOT/my-notes"
+  seed_home "$home"
+  start_server "$home" || fail "the server did not start"
+  port=$SERVER_PORT
+  body=$(curl -s -m 30 "http://127.0.0.1:$port/")
+  stop_server
+  assert_contains "$body" 'data-tab="mynotes"' "the My notes tab is missing"
+  assert_contains "$body" 'class="tabbreak"' "the tab bar is not laid out in two rows"
+  out=$(node -e '
+    const assert = require("assert");
+    const { foldAnswers } = require(process.argv[1]);
+    const note = { kind: "note", sid: "s1", answerable: true, note_id: "n1", text: "is flutter open source?", at: "2026-09-28T10:00:00Z" };
+    const answer = { id: "a1", at: "2026-09-28T10:05:00Z", title: "Yes - Flutter is open source", answers: "n1" };
+    const itemAnswer = { id: "a2", at: "2026-09-28T10:06:00Z", title: "Done", answers: "n2" };
+    // read_said folds the outcome of each send into its row, so the row carries note_id.
+    const said = [note, { kind: "answer", item_key: "home/x/1", sid: "s2", note_id: "n2", at: "2026-09-28T10:03:00Z", text: "fix it" }];
+    const rows = foldAnswers([answer, itemAnswer], said, [answer, itemAnswer], new Set(["home/x/1"]));
+    assert.strictEqual(rows.length, 0, "an answer to his note or item answer is still a separate row");
+    const kept = foldAnswers([answer], said, [answer], new Set());
+    assert.strictEqual(kept.length, 0, "an answer to a note that is listed is still a row");
+    process.stdout.write("fold-ok");
+  ' "$ROOT/web/command-center-state.js" 2>&1) || fail "$out"
+  assert_contains "$out" "fold-ok" "the answer fold did not run"
+  pass "answers to his notes and item answers leave Info and show under My notes"
 }
 
 # Enter sends a reply or note box, Shift+Enter is left to type a new line, and
@@ -4955,6 +4986,7 @@ test_a_document_is_served_and_a_file_address_to_it_becomes_its_link
 test_clicking_a_linked_url_never_also_triggers_a_delegated_row_action
 test_the_gutter_finds_every_pane_archive_and_hold_button
 test_selection_follows_the_ordinary_convention_and_delete_needs_two_clicks
+test_answers_to_his_notes_leave_info_and_show_under_my_notes
 test_a_hold_is_seen_at_once_through_the_fold_cache
 test_the_note_body_is_exactly_what_he_typed_and_no_routing_sentence_is_shown
 test_a_reply_to_a_non_question_shows_no_routing_explanation
