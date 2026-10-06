@@ -907,7 +907,11 @@ def last_status(state_dir, task_id):
 
 
 def work_board(homes):
-    """{"items": one row per backlog item, "agents": one row per live worker}."""
+    """{"items": one row per backlog item, "agents": one row per live worker}.
+
+    Every home is read the same way - the main one and each registered second
+    mate's - and a task is identified by its home AND its id: two homes can hold
+    the same task id, and keying by id alone silently dropped one of the two."""
     agents, backlog = {}, []
     for home in homes:
         path = home.get("path") or ""
@@ -931,7 +935,7 @@ def work_board(homes):
                 since = None
             word, text = last_status(state_dir, task_id)
             pr = meta.get("pr", "").strip()
-            agents.setdefault(task_id, {
+            agents.setdefault((home.get("id"), task_id), {
                 "id": task_id, "home": home.get("id"), "kind": meta.get("kind") or None,
                 "project": one_project(meta.get("projects") if second else meta.get("project")),
                 "worktree": worktree, "branch": worktree_branch(worktree),
@@ -940,13 +944,15 @@ def work_board(homes):
                 "pr": pr if re.match(r"^https?://\S+$", pr) else None,
                 "merged": os.path.exists(os.path.join(state_dir, task_id + ".pr-poll-merge-notified")),
             })
-    by_id = {r["id"]: r for r in backlog}
+    by_id = {(r["home"], r["id"]): r for r in backlog}
     is_done = lambda r: r["checked"] or r["section"] == "done"
     items = []
     for row in backlog:
-        agent = agents.get(row["id"])
-        waits = [{"id": b, "title": by_id[b]["title"] if b in by_id else None}
-                 for b in row["blocked_by"] if not (b in by_id and is_done(by_id[b]))]
+        # blocked-by names tasks of the same home only: an id is local to its home.
+        agent = agents.get((row["home"], row["id"]))
+        waits = [{"id": b, "title": by_id[(row["home"], b)]["title"] if (row["home"], b) in by_id else None}
+                 for b in row["blocked_by"]
+                 if not ((row["home"], b) in by_id and is_done(by_id[(row["home"], b)]))]
         detail = None
         if is_done(row):
             state = "done"
@@ -970,7 +976,7 @@ def work_board(homes):
             "pr": (agent or {}).get("pr") or row["pr"],
         })
     for agent in agents.values():
-        item = by_id.get(agent["id"])
+        item = by_id.get((agent["home"], agent["id"]))
         agent["title"] = item["title"] if item else None
         agent["item"] = bool(item)
         # The work's own project first: a scout's meta names where it was
