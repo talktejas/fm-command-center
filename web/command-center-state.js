@@ -982,6 +982,48 @@ function mergeMessages(fresh, held) {
   return rows.concat(kept);
 }
 
+// Two records are one message when a hand-filed record and an automatic capture
+// of the same turn both hold it (his report 2026-10-06: one message, two ids, so
+// his reply and the archive landed on different copies). Same session and
+// request id when both carry them; otherwise no conflicting task or project,
+// within two minutes, and one text inside the other or near-identical.
+const normText = t => String(t || '').replace(/\s+/g, ' ').trim().toLowerCase();
+function sameTurn(a, b) {
+  if (!a || !b || a.id === b.id) return false;
+  if (a.session && b.session && a.req && b.req) return a.session === b.session && a.req === b.req;
+  if (a.task && b.task && a.task !== b.task) return false;
+  if (a.project && b.project && a.project !== b.project) return false;
+  const gap = Math.abs(Date.parse(a.at || '') - Date.parse(b.at || ''));
+  if (!(gap <= 120000)) return false;
+  const na = normText(a.text), nb = normText(b.text);
+  const [short, long] = na.length <= nb.length ? [na, nb] : [nb, na];
+  if (short.length < 40) return false;
+  return long.includes(short) || (short.slice(0, 300) === long.slice(0, 300) && short.length >= 0.9 * long.length);
+}
+// One row per message: the hand-filed record is the survivor, and it carries the
+// other copy's id (twins), its reply thread (repliesTo) and the later of the two
+// archive/hold states and their times, so either copy's actions act on the row.
+function foldTwins(rows) {
+  const list = (rows || []).map(m => Object.assign({}, m));
+  const gone = new Set();
+  for (const a of list) {
+    if (gone.has(a.id)) continue;
+    for (const b of list) {
+      if (b === a || gone.has(b.id) || gone.has(a.id) || !sameTurn(a, b)) continue;
+      const keep = b.source === 'transcript' ? a : (a.source === 'transcript' ? b : a);
+      const lose = keep === a ? b : a;
+      keep.twins = (keep.twins || []).concat([lose.id], lose.twins || []);
+      keep.archived = !!(keep.archived || lose.archived);
+      keep.held = !!(keep.held || lose.held);
+      keep.archived_at = keep.archived_at || lose.archived_at || null;
+      keep.held_at = keep.held_at || lose.held_at || null;
+      gone.add(lose.id);
+      if (keep !== a) break;
+    }
+  }
+  return list.filter(m => !gone.has(m.id));
+}
+
 // The identity the server uses too (item_key in bin/command-center.py).
 function itemKey(it) {
   return [it.home, it.source, it.id, it.key || ''].join('/');
@@ -1107,7 +1149,7 @@ function workGroups(items, sort){
 
 if (typeof module === 'object' && module.exports)
   module.exports = { knownValue, pollFacts, tense, transportFailure, verdictFor,
-                     releaseVerdicts, itemKey, shapeMessage, orderRows, archivedEpoch,
+                     releaseVerdicts, itemKey, shapeMessage, orderRows, archivedEpoch, sameTurn, foldTwins,
                      stableGroupOrder, looksLikeQuestion, messageNeedsReply,
                      replyTarget, foldSaid, wordsAfter,
                      listSignature, mayRelease, logRead,
