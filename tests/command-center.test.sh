@@ -2038,6 +2038,42 @@ PYEOF
   pass "the note body sent to firstmate is exactly what he typed, and the page shows no routing sentence"
 }
 
+# His report 2026-10-07: items he archived or held came back to the live tabs.
+# The server flags are right (checked on a copy); the page reads messages through
+# a cached fold of copies, which kept the old hold after a hold made in place.
+# Runs the served heldMessages/setMsgHeld in node: a hold must show at once.
+test_a_hold_is_seen_at_once_through_the_fold_cache() {
+  local home port body
+  home="$TMP_ROOT/hold-cache"
+  seed_home "$home"
+  start_server "$home" || fail "the server did not start"
+  port=$SERVER_PORT
+  body=$(curl -s -m 30 "http://127.0.0.1:$port/")
+  stop_server
+  printf '%s\n' "$body" | sed -n '/^let twinFold = /,/^function heldMessages(){/p' | sed '$d' > "$TMP_ROOT/hold-cache.js"
+  printf '%s\n' "$body" | sed -n '/^function heldMessages(){/,/^}/p' >> "$TMP_ROOT/hold-cache.js"
+  printf '%s\n' "$body" | sed -n '/^function setMsgHeld(m, held){/,/^}/p' >> "$TMP_ROOT/hold-cache.js"
+  assert_contains "$(cat "$TMP_ROOT/hold-cache.js")" "messagesChanged();" \
+    "the served page does not drop the fold cache when a message is held"
+  node -e '
+    const assert = require("assert");
+    const fs = require("fs");
+    const { foldTwins } = require(process.argv[1]);
+    const state = { messages: [{ id: "m1", at: "2026-10-06T10:00:00Z", text: "x" }], archivedMessages: [] };
+    const nowIso = () => "2026-10-07T00:00:00Z";
+    const park = () => {};
+    eval(fs.readFileSync(process.argv[2], "utf8").replace("let twinFold", "var twinFold") + "\n;globalThis.__h = { heldMessages, setMsgHeld, state: () => state, reset: () => { state.messages = state.messages.slice(); } };");
+    const row = () => __h.heldMessages().find(m => m.id === "m1");
+    assert.ok(!row().held, "a fresh message reads as held");
+    const m = state.messages[0];
+    __h.setMsgHeld(m, true);
+    assert.ok(row().held, "a hold made in place did not show through the fold cache");
+    process.exit(0);
+  ' "$ROOT/web/command-center-state.js" "$TMP_ROOT/hold-cache.js" 2>"$TMP_ROOT/hold-cache.err" \
+    || fail "$(cat "$TMP_ROOT/hold-cache.err")"
+  pass "a hold shows at once through the fold cache"
+}
+
 # Enter sends a reply or note box, Shift+Enter is left to type a new line, and
 # an IME's Enter while composing is ignored. Runs the served enterSends in node
 # over a stub textarea and send button: Enter clicks Send only when the box has
@@ -4898,6 +4934,7 @@ test_a_document_is_served_and_a_file_address_to_it_becomes_its_link
 test_clicking_a_linked_url_never_also_triggers_a_delegated_row_action
 test_the_gutter_finds_every_pane_archive_and_hold_button
 test_selection_follows_the_ordinary_convention_and_delete_needs_two_clicks
+test_a_hold_is_seen_at_once_through_the_fold_cache
 test_the_note_body_is_exactly_what_he_typed_and_no_routing_sentence_is_shown
 test_a_reply_to_a_non_question_shows_no_routing_explanation
 test_a_reply_clears_the_box_at_once_and_only_a_failure_returns_it
