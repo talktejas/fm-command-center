@@ -1987,6 +1987,38 @@ test_a_hand_filed_message_and_its_captured_twin_are_one_row() {
   pass "a hand-filed message and its captured twin are one row, and nothing without a twin is dropped"
 }
 
+# His report 2026-10-06: firstmate's answer to his reply showed as a separate new
+# row, away from the message and his note. The answer now folds into the one row
+# its reply belongs to - also when that reply was sent against a twin copy - and
+# that row moves up to the answer's time; the thread stays with an archived parent.
+test_an_answer_to_a_reply_sent_on_a_twin_threads_into_the_one_row() {
+  local out
+  out=$(node -e '
+    const assert = require("assert");
+    const { foldAnswers, threadRows } = require(process.argv[1]);
+    const text = "Captain, merge pull request 26? Yes or no. Also the clean-up is under way.";
+    const filed = { id: "m-filed", at: "2026-10-06T12:38:56Z", text, project: "b2becom", question: true, twins: ["m-captured"] };
+    const answer = { id: "m-answer", at: "2026-10-06T13:10:00Z", text: "Done - PR 26 merged.", answers: "note-1", archived: false };
+    const said = [
+      { kind: "reply", msg: "m-captured", text: "yes", at: "2026-10-06T12:53:25Z", sid: "reply-1", note_id: "note-1" },
+      { kind: "note", note_id: "note-1", text: "yes", at: "2026-10-06T12:53:25Z", sid: "reply-1" },
+    ];
+    const pool = [filed, answer];
+    const rows = foldAnswers([filed, answer], said, pool);
+    assert.strictEqual(rows.length, 1, "the answer is still a separate row");
+    assert.strictEqual(rows[0].id, "m-filed", "the parent is not the row shown");
+    assert.strictEqual(rows[0].answered_by, "m-answer", "the parent does not carry its answer");
+    const thread = threadRows(said.filter(r => r.msg === "m-captured" || (filed.twins || []).includes(r.msg)), pool);
+    assert.ok(thread.some(e => e.kind === "firstmate" && e.row.id === "m-answer"), "the answer is not in the thread");
+    const archivedParent = Object.assign({}, filed, { archived: true });
+    const r2 = foldAnswers([archivedParent, answer], said, [archivedParent, answer]);
+    assert.strictEqual(r2.length, 1, "an answer to an archived parent came back as a row");
+    process.stdout.write("answer-ok");
+  ' "$ROOT/web/command-center-state.js" 2>&1) || fail "$out"
+  assert_contains "$out" "answer-ok" "the answer fold did not run"
+  pass "an answer to a reply sent on a twin threads into the one row, and stays with an archived parent"
+}
+
 # Enter sends a reply or note box, Shift+Enter is left to type a new line, and
 # an IME's Enter while composing is ignored. Runs the served enterSends in node
 # over a stub textarea and send button: Enter clicks Send only when the box has
@@ -4851,6 +4883,7 @@ test_a_reply_to_a_non_question_shows_no_routing_explanation
 test_a_reply_clears_the_box_at_once_and_only_a_failure_returns_it
 test_archive_moves_the_row_at_once_and_a_refused_write_moves_it_back
 test_a_hand_filed_message_and_its_captured_twin_are_one_row
+test_an_answer_to_a_reply_sent_on_a_twin_threads_into_the_one_row
 test_archived_and_held_rows_read_from_when_they_were_moved
 test_action_tab_selects_items_and_messages_for_the_bulk_bar
 test_after_an_action_the_pane_moves_to_the_next_row_in_the_filtered_list

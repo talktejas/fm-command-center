@@ -605,7 +605,8 @@ function answeredSend(message, saidRows) {
 function answerFor(message, saidRows, messages) {
   const send = answeredSend(message, saidRows);
   if (!send) return null;
-  const original = send.msg ? (messages || []).find(m => m.id === send.msg) || null : null;
+  const original = send.msg ? (messages || []).find(m => m.id === send.msg
+    || (m.twins || []).includes(send.msg)) || null : null;
   return { send, original, title: (original && original.title) || send.title || null };
 }
 
@@ -618,13 +619,20 @@ function answerFor(message, saidRows, messages) {
 // whose message `allMessages` does not hold - aged out of every window the
 // page has - stays a row of its own, since there is nowhere else to show it.
 function foldAnswers(rows, saidRows, allMessages) {
-  const held = new Set((allMessages || []).map(m => m.id));
+  // A reply sent against a twin copy (foldTwins) continues the message it is
+  // folded into: owner maps every copy's id to the one row the page shows.
+  const owner = {};
+  for (const m of allMessages || []) {
+    owner[m.id] = m.id;
+    for (const t of m.twins || []) owner[t] = m.id;
+  }
+  const held = new Set(Object.keys(owner));
   const latest = {};
   const folded = new Set();
   for (const m of allMessages || []) {
     const a = answerFor(m, saidRows, allMessages);
-    const of = a && a.send.msg;
-    if (!of || of === m.id || !held.has(of)) continue;
+    const of = a && a.send.msg && owner[a.send.msg];
+    if (!of || of === m.id || !held.has(a.send.msg)) continue;
     folded.add(m.id);
     const at = Date.parse(m.at || '');
     if (!isNaN(at) && !(latest[of] && latest[of].at >= at)) latest[of] = { at, id: m.id };
