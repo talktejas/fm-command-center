@@ -383,27 +383,20 @@ function looksLikeQuestion(text) {
     || /\bmerge\b[^.!]*\?/.test(low) || /\bshould i\b[^.!]*\?/.test(low);
 }
 
-// Waiting on him until firstmate closes it. His own reply never removes it
-// (his report 2026-10-06: a question typed back on an Action row made it vanish,
-// "my unarchived actions going away"): it stays in Action, threaded under it,
-// until he archives it (Archived) or BOTH hold: firstmate recorded an answer to
-// one of his replies to this message (answeredByFirstmate), and the decision it
-// names is closed - its record is gone from the open set or closed (replyTarget).
-// A merge ask leaves through its pull request instead (mergeAskOnly).
-function answeredByFirstmate(message, saidRows, answers) {
-  const sends = (saidRows || []).filter(r => r.msg === message.id && r.note_id);
-  return sends.some(r => (answers || []).some(m => m.answers === r.note_id));
-}
+// Waiting on him until HE settles it. His own reply never removes it (his
+// report 2026-10-06: a question typed back on an Action row made it vanish,
+// "my unarchived actions going away"); nor does firstmate's own threaded
+// answer, even once the decision it names is closed (his report 2026-10-07,
+// the branch "goes out of list in action" the moment he is answered) - a
+// conversation leaves its tab only by his own Archive, Hold or Delete. A merge
+// ask leaves through its pull request instead (mergeAskOnly).
 // His rule 2026-10-07 (the tenth time): the tab is decided ONLY by what firstmate
 // recorded - no reading of the words, no Jev, no repeat or opening-word rules.
 // Action: a recorded question from firstmate (question or question_key); an
 // automatic capture (source transcript) is never Action.
-function messageNeedsReply(message, saidRows, items, answers) {
+function messageNeedsReply(message) {
   if (!message) return false;
-  if (!(message.question || message.question_key) || message.source === 'transcript') return false;
-  const named = replyTarget(message, items).item;
-  const closed = !named || named.closed;
-  return !(closed && answeredByFirstmate(message, saidRows, answers));
+  return Boolean((message.question || message.question_key) && message.source !== 'transcript');
 }
 
 // --- one record, one tab ----------------------------------------------------------
