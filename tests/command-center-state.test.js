@@ -414,22 +414,25 @@ test('a long explanation written back to him is never routine, whatever quiet wo
 
 // His report 2026-10-06: "my unarchived actions going away". A question he
 // types back on an Action row (including one that ends without "?") leaves the
-// row exactly where it is; only firstmate closing the decision and recording
-// its answer, or his Archive, moves it.
+// row exactly where it is. His report 2026-10-07, the branch "goes out of list
+// in action" the moment he is answered: not even firstmate closing the decision
+// and recording an answer moves it any more - only his own Archive/Hold/Delete
+// does (the reply-auto-archives rule is removed).
 test('his reply on a waiting question never removes it, whatever it says', () => {
   const flagged = { id: 'm1', question: true, task: 't1', question_key: 'k1', text: 'Which shape?' };
-  const open = [Object.assign({}, stopped)];
   for (const text of ['what the fuck is this about? Also I just asked similar question',
     'What do you mean by merge here?', 'Why?', 'Yes, merge it.']) {
-    assert.strictEqual(messageNeedsReply(flagged, [{ msg: 'm1', note_id: 'n1', text }], open,
-      [{ id: 'a1', answers: 'n1' }]), true, 'his reply removed it: ' + text);
+    assert.strictEqual(messageNeedsReply(flagged, [{ msg: 'm1', note_id: 'n1', text }],
+      [Object.assign({}, stopped)], [{ id: 'a1', answers: 'n1' }]), true, 'his reply removed it: ' + text);
   }
-  // Firstmate answered, but the decision it names is still open: still waiting.
+  // Firstmate answered, the decision it names still open: still waiting.
   assert.strictEqual(messageNeedsReply(flagged, [{ msg: 'm1', note_id: 'n1', text: 'Ship it.' }],
-    open, [{ id: 'a1', answers: 'n1' }]), true, 'an open decision left Action');
-  // The decision closed (firstmate released it) with its answer recorded: settled.
+    [Object.assign({}, stopped)], [{ id: 'a1', answers: 'n1' }]), true, 'an open decision left Action');
+  // The decision closed (firstmate released it) with its answer recorded: still
+  // Action - closing the decision is not his own Archive/Hold/Delete.
   assert.strictEqual(messageNeedsReply(flagged, [{ msg: 'm1', note_id: 'n1', text: 'Ship it.' }],
-    [Object.assign({}, stopped, { closed: true })], [{ id: 'a1', answers: 'n1' }]), false);
+    [Object.assign({}, stopped, { closed: true })], [{ id: 'a1', answers: 'n1' }]), true,
+    'a closed-and-answered decision left Action on its own, with no Archive/Hold/Delete');
 });
 
 // His report 2026-10-05, the two real rows (captured from the transcript, no
@@ -859,6 +862,30 @@ test('an answer continues the conversation it answers instead of a row of its ow
     .map(e => e.kind + ':' + (e.row.id || e.row.text)), ['you:' + send.text, 'firstmate:a1']);
 });
 
+test('a thread in Action stays in Action, folding every recorded answer into it, through a reply chain', () => {
+  // His report 2026-10-07, "why the fuck when i am chatting with something in
+  // action branch and reply goes to info" - a firstmate answer recorded
+  // against his reply must thread under the Action row, never show as its
+  // own row in Info/Messages, and must not move the row out of Action either.
+  const items = [{ home: 'main', id: 't1', source: 'hold', key: '', closed: false }];
+  const m = shapeMessage({ id: 'm1', task: 't1', question: true, text: 'Pick A or B?',
+    at: '2026-10-07T10:00:00Z' });
+  const said = [
+    { kind: 'reply', msg: 'm1', note_id: 'n1', at: '2026-10-07T10:01:00Z', sid: 's1' },
+    { kind: 'reply', msg: 'm1', note_id: 'n2', at: '2026-10-07T10:03:00Z', sid: 's2' },
+  ];
+  const a1 = shapeMessage({ id: 'a1', answers: 'n1', text: 'Picked A.', at: '2026-10-07T10:02:00Z' });
+  const a2 = shapeMessage({ id: 'a2', answers: 'n2', text: 'Confirmed A.', at: '2026-10-07T10:04:00Z' });
+  const all = [m, a1, a2];
+  assert.strictEqual(messageNeedsReply(m), true, 'the question stays in Action');
+  // Neither answer is a row of its own, in Action or anywhere else.
+  assert.deepStrictEqual(foldAnswers(all, said, all).map(r => r.id), ['m1']);
+  assert.strictEqual(isInfoOnlyMessage(a1), false);
+  assert.strictEqual(isInfoOnlyMessage(a2), false);
+  // Both rounds of the chain thread in order under the one Action row.
+  assert.deepStrictEqual(threadRows(said, all).map(e => e.kind + ':' + (e.row.id || e.row.sid)),
+    ['you:s1', 'firstmate:a1', 'you:s2', 'firstmate:a2']);
+});
 
 // His report 2026-09-28: a note read "Firstmate has not recorded an answer"
 // while firstmate had answered it in ordinary conversation, which names no
