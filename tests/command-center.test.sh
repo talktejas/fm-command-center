@@ -649,13 +649,17 @@ PROJECTS
   assert_equals "hold-set|2026-10-05T16:51:13Z|alpha|~/wt/alpha/main|feature/x" \
     "$(jq -r '.items[] | select(.id=="h-set") | [.since_kind, (.since_epoch|todate), .project, .worktree, .branch] | join("|")' <<<"$body")" \
     "a hold with a recorded instant and body labels did not carry them"
-  # A date is never an instant: the backlog file's own clock stands in for it.
-  assert_equals "backlog-mtime|beta||" \
+  # A date is never an instant, and none is invented in its place: the shared
+  # backlog file's own mtime moves on every unrelated task's edit, so it is
+  # never used as this task's clock either (his report 2026-10-09: an old,
+  # untouched hold read as freshly touched whenever anything else in the same
+  # backlog file changed).
+  assert_equals "none|beta||" \
     "$(jq -r '.items[] | select(.id=="h-date") | [.since_kind, .project, .worktree // "", .branch // ""] | join("|")' <<<"$body")" \
-    "a hold with only a date was not given a real instant, or a label nothing recorded"
-  assert_equals "true" \
-    "$(jq -r '.items[] | select(.id=="h-date") | .since_epoch != 1791158400' <<<"$body")" \
-    "a hold with only a date was aged from its midnight"
+    "a hold with only a date was not left with no instant, or a label nothing recorded"
+  assert_equals "null" \
+    "$(jq -r '.items[] | select(.id=="h-date") | .since_epoch' <<<"$body")" \
+    "a hold with only a date was given an instant that is not its own"
   assert_equals "gamma|/home/someone/p/gamma|develop" \
     "$(jq -r '.items[] | select(.id=="h-copy") | [.project, .worktree, .branch] | join("|")' <<<"$body")" \
     "a hold with no labels of its own did not fall back to its project's registered copy"

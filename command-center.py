@@ -1088,8 +1088,13 @@ def hold_clock(item, sources, home_path):
     "(since YYYY-MM-DD)" - a DATE - so it is replaced by the first of: the
     backlog's "Captain hold set:" instant (bin/fm-captain-hold.sh writes it on
     every hold), the newest question message recorded for that task, the first
-    status line's own stamp, the backlog file's modification time. A bare date
-    is never used as an instant, so no hold is ever aged as midnight."""
+    status line's own stamp. A bare date is never used as an instant, so no
+    hold is ever aged as midnight - and when none of the three names a real
+    instant for THIS task, none is invented either: the shared backlog file's
+    own mtime moves on every unrelated task's edit, which read a task that has
+    gone quiet (or closed) as freshly touched every time something else in the
+    same file changed (his report 2026-10-09: an old hold sorting as the
+    newest under Latest first)."""
     if item.get("source") != "hold" or item.get("since_kind") != "created":
         return item
     task_id = item.get("id")
@@ -1099,9 +1104,6 @@ def hold_clock(item, sources, home_path):
     found = latest_question_at(home_path, task_id) or first_status_stamp(home_path, task_id)
     if found:
         return dict(item, since_epoch=int(found[0]), since_kind=found[1])
-    mtime = backlog_mtime(home_path)
-    if mtime:
-        return dict(item, since_epoch=int(mtime), since_kind="backlog-mtime")
     return dict(item, since_epoch=None, since_kind="none")
 
 
@@ -1135,14 +1137,6 @@ def first_status_stamp(home_path, task_id):
     except OSError:
         pass
     return None
-
-
-def backlog_mtime(home_path):
-    try:
-        return os.path.getmtime(os.path.join(
-            home_path, _tasks_toml_backlog_rel(FIRSTMATE_ROOT) or "data/backlog.md"))
-    except OSError:
-        return None
 
 
 def label_messages(rows, records):
