@@ -15,7 +15,7 @@ const {
   isInfoOnlyMessage, sortedTab, saidTaskId, matchAnswer, threadRows, threadStatus,
   recordedAnswers, answeredSend, answerFor, foldAnswers, noteThreads, noteMomentAnswer,
   namesPr, mergeAskOnly, prRowFor, prAsks, markRepeats, workGroups, workStateLabel, saidOnItem, sendDot,
-  ageWords, cardLabels, lacksWorkLabel, watcherStale,
+  ageWords, cardLabels, lacksWorkLabel, watcherStale, foldTwins,
 } = require(path.join(__dirname, '..', 'web', 'command-center-state.js'));
 
 // Quiet on success: tests/command-center.test.sh runs this and reports the
@@ -885,6 +885,25 @@ test('a thread in Action stays in Action, folding every recorded answer into it,
   // Both rounds of the chain thread in order under the one Action row.
   assert.deepStrictEqual(threadRows(said, all).map(e => e.kind + ':' + (e.row.id || e.row.sid)),
     ['you:s1', 'firstmate:a1', 'you:s2', 'firstmate:a2']);
+});
+
+// His report 2026-10-09: a tab saying 5 and showing nothing. web/command-center.html's
+// renderList() badges and visibleMessages() must count the SAME rows: both
+// fold twins (a hand-filed record and its automatic transcript capture of one
+// turn, foldTwins) before counting, or the badge counts a copy the list
+// already merged away and the two disagree.
+test('a tab badge counts exactly the twin-folded rows the list shows', () => {
+  const text = 'Captain, Outreach CRM only. The build finished and the pull request is ready for your review.';
+  const handFiled = shapeMessage({ id: 'm1', at: '2026-10-09T09:00:00Z', text });
+  const capture = shapeMessage({ id: 'm2', at: '2026-10-09T09:00:10Z', source: 'transcript', text });
+  const stateMessages = [handFiled, capture];
+  const held = () => foldTwins(stateMessages);
+  const badgeRows = foldAnswers(held().filter(m => !m.archived), [], held(), [])
+    .filter(m => inMessagesTab(m, [], [], [], held()));
+  const listRows = foldAnswers(held().filter(m => !m.archived), [], held(), [])
+    .filter(m => inMessagesTab(m, [], [], [], held()));
+  assert.strictEqual(badgeRows.length, 1, 'the twin counts as one row, not two');
+  assert.deepStrictEqual(badgeRows.map(m => m.id), listRows.map(m => m.id));
 });
 
 // His report 2026-09-28: a note read "Firstmate has not recorded an answer"
