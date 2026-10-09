@@ -1374,6 +1374,26 @@ test_a_markdown_table_in_a_message_renders_as_a_table() {
   pass "a Markdown table in a message renders as a table, with its text still escaped"
 }
 
+test_the_info_and_ignore_badges_count_the_same_rows_as_the_list() {
+  # His report 2026-10-09: Info showed 5 and Ignore showed 1, but opening
+  # either listed nothing. renderList()'s badge counted state.messages raw,
+  # while visibleMessages() lists heldMessages() (twin-folded: a hand-filed
+  # record and its automatic transcript capture of one turn become one row) -
+  # so a page with any such twin counted both copies but listed one. Pinned
+  # here as a source check since the badge math runs only in the browser.
+  local home port body
+  home="$TMP_ROOT/badge-twin"
+  seed_home "$home"
+  start_server "$home" || fail "the server did not start"
+  port=$SERVER_PORT
+  body=$(curl -s -m 30 "http://127.0.0.1:$port/")
+  stop_server
+  assert_contains "$body" \
+    "foldAnswers(heldMessages().filter(m => !m.archived), state.said, heldMessages(), openItemKeys())" \
+    "the Info/Ignore badge no longer counts the same twin-folded rows visibleMessages() lists"
+  pass "the Info/Ignore badge counts the same twin-folded rows the list shows"
+}
+
 test_a_url_becomes_a_real_link_on_every_surface_that_shows_free_text() {
   local home port body helpers out
   home="$TMP_ROOT/linkify"
@@ -5003,6 +5023,7 @@ test_the_server_serves_the_pages_decision_rules
 test_a_url_becomes_a_real_link_on_every_surface_that_shows_free_text
 test_the_tabs_are_served_in_the_captains_order
 test_a_markdown_table_in_a_message_renders_as_a_table
+test_the_info_and_ignore_badges_count_the_same_rows_as_the_list
 test_a_document_is_served_and_a_file_address_to_it_becomes_its_link
 test_clicking_a_linked_url_never_also_triggers_a_delegated_row_action
 test_the_gutter_finds_every_pane_archive_and_hold_button

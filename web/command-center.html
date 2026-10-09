@@ -1404,8 +1404,13 @@ function renderList(){
   // whole-log total can no longer be the badge for either half - text
   // classification only exists client-side, over whatever window is loaded.
   // Both badges are exactly what visibleMessages() would show for that tab,
-  // the same window-based rule n-hold already uses.
-  const unheldMsgs = foldAnswers(state.messages, state.said, heldMessages(), openItemKeys())
+  // the same window-based rule n-hold already uses - which means the same
+  // base rows too: visibleMessages() folds twins (heldMessages(), a hand-filed
+  // record and its automatic transcript capture of the same turn) before
+  // counting, so the badge must fold them the same way or it counts both
+  // copies of a turn the list shows as one row (his report 2026-10-09: a tab
+  // saying 5 and showing nothing).
+  const unheldMsgs = foldAnswers(heldMessages().filter(m => !m.archived), state.said, heldMessages(), openItemKeys())
     .filter(m => inMessagesTab(m, state.said, state.view.items, state.prs, heldMessages()));
   const infoCount = unheldMsgs.filter(isInfoOnlyMessage).length;
   $('#n-messages').textContent = unheldMsgs.length - infoCount + listedNotes().length;
