@@ -116,7 +116,6 @@ MAX_TEXT = 8192
 ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 SCAN_TIMEOUT = 240
 SEND_TIMEOUT = 120
-SCAN_WAIT = 30
 
 # Pasted/dropped images on a reply. Common types only, a sensible per-image
 # cap, and a hard count so one reply cannot carry an unbounded attachment.
@@ -218,6 +217,11 @@ class Records:
         # a thread that cannot take this serves the snapshot instead of forking
         # its own jq-per-item scan beside the one already running.
         self.scan = threading.Lock()
+        # view() used to re-parse the whole body on every call - cheap once,
+        # ruinous when a caller (read_said's per-row resolve_send_home) does it
+        # once per row. Cached against the body it was parsed from.
+        self._view_cache = None
+        self._view_cache_etag = object()  # never equal to a real etag
 
     def snapshot(self):
         with self.lock:
@@ -239,15 +243,28 @@ class Records:
     def refresh(self, min_interval=1.0):
         if self.etag is not None and time.monotonic() - self.checked < min_interval:
             return
-        if self.scan.acquire(blocking=False):
-            try:
-                self._refresh_locked(min_interval)
-            finally:
-                self.scan.release()
+        if not self.scan.acquire(blocking=False):
+            # Someone is already scanning these very records: this poll shows
+            # what stands rather than starting a second scan beside it or
+            # waiting on it - a fleet-wide scan can run for tens of seconds
+            # under load, and a click must never queue behind one.
             return
-        # Someone is already scanning these very records: wait for THEIR result
-        # rather than starting a second scan beside it or repeating it after.
-        if self.scan.acquire(timeout=SCAN_WAIT):
+        # The shell-out beneath this (command-center-scan.sh, across every
+        # home) can likewise run long under load; only the FIRST scan ever
+        # (no snapshot yet) is worth making a request wait for.
+        if self.etag is not None:
+            threading.Thread(target=self._refresh_release, args=(min_interval,),
+                             daemon=True).start()
+            return
+        try:
+            self._refresh_locked(min_interval)
+        finally:
+            self.scan.release()
+
+    def _refresh_release(self, min_interval):
+        try:
+            self._refresh_locked(min_interval)
+        finally:
             self.scan.release()
 
     def _refresh_locked(self, min_interval):
@@ -294,7 +311,11 @@ class Records:
             self.body = dump(data)
 
     def view(self):
-        return json.loads(self.body)
+        with self.lock:
+            if self._view_cache_etag != self.etag:
+                self._view_cache = json.loads(self.body)
+                self._view_cache_etag = self.etag
+            return self._view_cache
 
     def home_path(self, home_id):
         for home in self.view().get("homes", []):
