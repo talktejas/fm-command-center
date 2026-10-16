@@ -1011,11 +1011,20 @@ function mergeMessages(fresh, held) {
 // request id when both carry them; otherwise no conflicting task or project,
 // within two minutes, and one text inside the other or near-identical.
 const normText = t => String(t || '').replace(/\s+/g, ' ').trim().toLowerCase();
+// Only a project the RECORD carries can tell two turns apart. Jev's label and
+// the page's own "several projects" marker (project_ambiguous) are read off
+// the words, per id, minutes apart - they landed on one copy of a turn and not
+// the other, the pair stopped folding, and the copy he had just archived came
+// back as its own row (his report 2026-10-16: "i am trying to archive one
+// message and tha message and anothre 40 m old message omes bak in list").
+const turnProject = m => m.project_ambiguous ? ''
+  : knownValue(m.project_by === 'jev' ? m.project_recorded : m.project) || '';
 function sameTurn(a, b) {
   if (!a || !b || a.id === b.id) return false;
   if (a.session && b.session && a.req && b.req) return a.session === b.session && a.req === b.req;
   if (a.task && b.task && a.task !== b.task) return false;
-  if (a.project && b.project && a.project !== b.project) return false;
+  const pa = turnProject(a), pb = turnProject(b);
+  if (pa && pb && pa !== pb) return false;
   const gap = Math.abs(Date.parse(a.at || '') - Date.parse(b.at || ''));
   if (!(gap <= 120000)) return false;
   const na = normText(a.text), nb = normText(b.text);
