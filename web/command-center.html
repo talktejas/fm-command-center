@@ -1671,9 +1671,11 @@ async function bulkArchiveSelected(){
   if (!ms.length){ moveAfterBulk(order, acted); state.selected.clear(); renderList(); return; }
   state.bulkBusy = true; renderList();
   await Promise.all(ms.map(async m => {
+    // Every record of the same turn, exactly as one row's own Archive does.
+    const copies = turnCopies(m, true);
     try {
-      const {ok, data} = await post('/api/archive', {msg:m.id, archived:true});
-      if (ok && data.ok) moveArchived(m, true);
+      await postArchive(copies, true);
+      copies.forEach(c => moveArchived(c, true));
     } catch (e) { /* next poll reconciles */ }
   }));
   moveAfterBulk(order, acted);
@@ -2532,23 +2534,44 @@ function findMessageById(id){
     || (state.openMsg && state.openMsg.id === id ? state.openMsg : null);
 }
 
+// One row is every record of the same turn (twinsOf, foldTwins): the archive
+// has to reach ALL of them, or the copy left behind returns as its own row the
+// moment anything breaks the fold - a project label landing on one copy and
+// not the other was enough (his report 2026-10-16: "i am trying to archive one
+// message and tha message and anothre 40 m old message omes bak in list in
+// info"). Only the copies that still need the change, so a repeated id in a
+// bulk selection cannot move the counts twice.
+const turnCopies = (m, archived) => [m]
+  .concat(twinsOf(m).map(findMessageById).filter(Boolean))
+  .filter(c => !!c.archived !== archived);
+async function postArchive(copies, archived){
+  for (const c of copies){
+    const {ok, data} = await post('/api/archive', {msg:c.id, archived});
+    if (!ok || !data.ok) throw new Error((data && data.error) || 'the archive record could not be written');
+  }
+}
+
 // `advance` is true only from a row's own Archive button or the pane's -
 // never from a plain state refresh - so the pane moves on to the next
 // message in whichever list it was archived out of.
 async function archiveMessageById(id, advance){
   const m = id && findMessageById(id);
   if (!m) return;
-  const archived = !m.archived;
+  // What he clicked is the folded row, whose state is the whole turn's (either
+  // copy archived reads archived), so the click is read off that rather than
+  // off whichever copy of the turn this id's own record happens to be - a pair
+  // left half-archived by an older build restores on Restore, never archives.
+  const archived = !(heldMessages().find(x => x.id === m.id) || m).archived;
   const keys = advance && archived ? orderFor(msgKey(m)) : null;
   const wasOpen = state.open === msgKey(m);
+  const copies = turnCopies(m, archived);
   // The row moves at once; the server write follows, and only a failure moves it back.
-  moveArchived(m, archived);
+  copies.forEach(c => moveArchived(c, archived));
   if (keys && wasOpen) advanceTo(keys, msgKey(m)); else render();
   try {
-    const {ok, data} = await post('/api/archive', {msg:m.id, archived});
-    if (!ok || !data.ok) throw new Error(data.error || 'the archive record could not be written');
+    await postArchive(copies, archived);
   } catch (e) {
-    moveArchived(m, !archived);
+    copies.forEach(c => moveArchived(c, !archived));
     state.openNote = 'The archive change did not land: ' + (e.message || e);
     render();
   }

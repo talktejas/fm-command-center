@@ -906,6 +906,29 @@ test('a tab badge counts exactly the twin-folded rows the list shows', () => {
   assert.deepStrictEqual(badgeRows.map(m => m.id), listRows.map(m => m.id));
 });
 
+// His report 2026-10-16: "i am trying to archive one message and tha message
+// and anothre 40 m old message omes bak in list in info". The two copies of
+// one turn are given their project separately and minutes apart - the words
+// read one copy as several projects (project_ambiguous, shown as Jev's
+// "several projects") while the other keeps the project its record carries -
+// and the pair stopped folding on that difference, so the copy he had just
+// archived came straight back as a row of its own. Only a project the RECORD
+// carries may tell two turns apart.
+test('two copies of one turn still fold when a derived project lands on one of them', () => {
+  const text = 'Captain, Outreach CRM only. Your Outreach CRM copy, branch develop. '
+    + 'Yes, those branches can be deleted; their work is already in develop.';
+  const handFiled = shapeMessage({ id: 'm1', at: '2026-10-07T12:38:24Z', text,
+    task: 'crm', project: 'outreach-crm' });
+  const capture = shapeMessage({ id: 'm2', at: '2026-10-07T12:38:38Z', text, source: 'transcript',
+    project: 'several projects', project_ambiguous: true, project_by: 'jev', project_recorded: null,
+    archived: true });
+  const folded = foldTwins([handFiled, capture]);
+  assert.strictEqual(folded.length, 1, 'a derived project label split one turn into two rows');
+  assert.strictEqual(folded[0].archived, true,
+    'the row came back unarchived although one copy of the turn is archived');
+  assert.deepStrictEqual(folded[0].twins, ['m2'], 'the folded row does not name the copy it holds');
+});
+
 // His report 2026-09-28: a note read "Firstmate has not recorded an answer"
 // while firstmate had answered it in ordinary conversation, which names no
 // note. The first thing said after it, before his next send, is its answer -

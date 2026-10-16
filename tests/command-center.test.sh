@@ -1947,8 +1947,9 @@ test_archive_moves_the_row_at_once_and_a_refused_write_moves_it_back() {
   port=$SERVER_PORT
   body=$(curl -s -m 30 "http://127.0.0.1:$port/")
   stop_server
-  printf '%s\n' "$body" | sed -n '/^async function archiveMessageById(id, advance){/,/^}/p' > "$TMP_ROOT/snappy-archive.js"
-  assert_contains "$(cat "$TMP_ROOT/snappy-archive.js")" "moveArchived(m, archived);" \
+  printf '%s\n' "$body" | sed -n '/^const turnCopies = /,/^}/p;
+    /^async function archiveMessageById(id, advance){/,/^}/p' > "$TMP_ROOT/snappy-archive.js"
+  assert_contains "$(cat "$TMP_ROOT/snappy-archive.js")" "copies.forEach(c => moveArchived(c, archived));" \
     "the served archive does not move the row before the server answers"
   node -e '
     const assert = require("assert");
@@ -1958,6 +1959,8 @@ test_archive_moves_the_row_at_once_and_a_refused_write_moves_it_back() {
     let resolvePost;
     const state = { open: null, openNote: "" };
     const findMessageById = () => m;
+    const twinsOf = () => [];
+    const heldMessages = () => [];
     const orderFor = () => [];
     const msgKey = x => "msg/" + x.id;
     const advanceTo = () => {};
@@ -3391,6 +3394,78 @@ test_an_archived_message_leaves_messages_and_can_be_restored() {
     "a restored message did not return to Messages"
   stop_server
   pass "archiving is durable beside the message and can be restored"
+}
+
+# His report 2026-10-16: "i am trying to archive one message and tha message
+# and anothre 40 m old message omes bak in list in info". One row on his screen
+# is every record of the same turn (foldTwins) - the hand-filed one and the
+# sweep's own capture - so an Archive that reached only the copy whose id the
+# fold kept left the other one live, and it came back as a row of its own as
+# soon as anything (a project label landing on one copy, a reload) broke the
+# fold. The page's own archiveMessageById is run here, as served, against the
+# real server: both copies must be archived in the record.
+test_archiving_one_row_archives_every_copy_of_that_turn() {
+  local home port body out
+  home="$TMP_ROOT/archive-twins"
+  seed_home "$home"
+  # Two records of ONE turn, as the hand recorder and the sweep leave them.
+  { jq -cn '{id:"m-hand", at:"2026-10-07T12:38:24Z", title:"Outreach CRM: the branches can go",
+      text:"Captain, Outreach CRM only. Your Outreach CRM copy, branch develop. Yes, those branches can be deleted; their work is already in develop.",
+      task:null, project:null, worktree:null, branch:null}'
+    jq -cn '{id:"m-capture", at:"2026-10-07T12:38:38Z", title:"Captain, Outreach CRM only.",
+      text:"Captain, Outreach CRM only. Your Outreach CRM copy, branch develop. Yes, those branches can be deleted; their work is already in develop.",
+      task:null, project:null, worktree:null, branch:null, source:"transcript",
+      session:"sess-x", req:"req-x"}'
+  } > "$home/data/captain-messages.jsonl"
+  start_server "$home" || fail "the server did not start"
+  port=$SERVER_PORT
+  body=$(curl -s -m 30 "http://127.0.0.1:$port/")
+  printf '%s\n' "$body" | sed -n '/^let writing = /p;
+    /^const twinsOf = /p;
+    /^let twinFold = /,/^}/p;
+    /^function moveArchived(/,/^}/p;
+    /^function applyArchiveOverride(/,/^}/p;
+    /^function findMessageById(/,/^}/p;
+    /^const turnCopies = /,/^}/p;
+    /^async function archiveMessageById(/,/^}/p;
+    /^async function post(/,/^}/p' > "$TMP_ROOT/archive-twins.js"
+  assert_contains "$(cat "$TMP_ROOT/archive-twins.js")" "function archiveMessageById(" \
+    "the served page carries no archiveMessageById to run"
+  out=$(node -e '
+    const vm = require("vm"), fs = require("fs");
+    const [stateFile, code, base] = process.argv.slice(1);
+    const st = require(stateFile);
+    Object.assign(globalThis, st);
+    globalThis.state = {messages: [], archivedMessages: [], archiveOverride: {},
+                        deleted: new Set(), view: {items: []}, open: null, openNote: null,
+                        total: 2, archivedTotal: 0};
+    globalThis.render = () => {};
+    globalThis.nowIso = () => new Date().toISOString();
+    globalThis.msgKey = m => "msg/" + m.id;
+    const f = fetch; globalThis.fetch = (u, o) => f(base + u, o);
+    vm.runInThisContext(fs.readFileSync(code, "utf8"));
+    (async () => {
+      const body = await (await fetch("/api/messages")).json();
+      state.messages = body.messages.map(st.shapeMessage);
+      const rows = heldMessages();
+      const one = rows.length === 1 ? rows[0] : null;
+      // His Archive, on the one row the two records are shown as.
+      if (one) await archiveMessageById(one.id, false);
+      process.stdout.write(JSON.stringify({rows: rows.length, id: one && one.id,
+        twins: (one && one.twins) || [], note: state.openNote}));
+    })();
+  ' "$ROOT/web/command-center-state.js" "$TMP_ROOT/archive-twins.js" \
+    "http://127.0.0.1:$port") || fail "the page's own archiveMessageById could not be run"
+  assert_contains "$out" '"rows":1' \
+    "the two records of one turn were not even shown as one row, so this proves nothing"
+  body=$(curl -s -m 30 "http://127.0.0.1:$port/api/messages")
+  assert_equals "" "$(printf '%s' "$body" | jq -r '[.messages[].id] | join(" ")')" \
+    "a copy of the turn he archived came straight back into the list"
+  body=$(curl -s -m 30 "http://127.0.0.1:$port/api/messages?archived=1")
+  stop_server
+  assert_equals "m-capture m-hand" "$(printf '%s' "$body" | jq -r '[.messages[].id] | sort | join(" ")')" \
+    "his Archive did not reach every record of the turn he archived"
+  pass "archiving one row archives every record of that turn"
 }
 
 # His report 2026-09-28: "the sort order should have the latest archived item
@@ -5080,6 +5155,7 @@ test_a_message_far_behind_the_window_is_served_by_id
 test_an_archived_message_leaves_messages_and_can_be_restored
 test_an_answer_to_an_archived_message_stays_archived
 test_an_answer_to_a_reply_sent_on_a_twin_threads_into_the_one_row
+test_archiving_one_row_archives_every_copy_of_that_turn
 test_archived_messages_are_served_latest_archived_first
 test_a_held_message_leaves_the_messages_total_the_way_archiving_does
 test_a_message_with_nothing_known_about_its_work_is_still_served
